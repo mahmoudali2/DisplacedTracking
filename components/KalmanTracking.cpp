@@ -692,23 +692,100 @@ StatusCode KalmanTracking::execute() {
         error() << "Failed to cast input collection to TrackerHitPlaneCollection" << endmsg;
         return StatusCode::FAILURE;
     }
-    
+
+    // Try to access the event header to get event number
+    DataObject* evtObj = nullptr;
+    sc = eventSvc()->retrieveObject("EventHeader", evtObj);
+    if (sc.isSuccess() && evtObj != nullptr) {
+        // Try to get the collection base from the wrapper
+        auto* wrapper = dynamic_cast<AnyDataWrapper<std::unique_ptr<podio::CollectionBase>>*>(evtObj);
+        if (wrapper) {
+            auto& colBasePtr = wrapper->getData();
+            podio::CollectionBase* colBase = colBasePtr.get();
+            if (colBase) {
+                // Now try to cast to the specific collection type
+                auto* evtHeader = static_cast<edm4hep::EventHeaderCollection*>(colBase);
+                if (evtHeader && evtHeader->size() > 0) {
+                    debug() << "  Event number: " << (*evtHeader)[0].getEventNumber() << endmsg;
+                } else {
+                    debug() << "  Could not get event number from collection" << endmsg;
+                }
+            } else {
+                debug() << "  Null collection base pointer for EventHeader" << endmsg;
+            }
+        } else {
+            debug() << "  Retrieved EventHeader is not a podio collection wrapper" << endmsg;
+        }
+    } else {
+        debug() << "  Could not get event number" << endmsg;
+    }
+
     info() << "Processing " << hitCollection->size() << " tracker hits" << endmsg;
+    // getting info about first hits 
+    if (hitCollection->size() > 0) {
+        debug() << "First hit details:" << endmsg;
+        const auto& hit = (*hitCollection)[0];
+        debug() << "  CellID: " << hit.getCellID() << endmsg;
+        debug() << "  Position: (" << hit.getPosition()[0] << ", " 
+                                  << hit.getPosition()[1] << ", " 
+                                  << hit.getPosition()[2] << ")" << endmsg;
+    } else {
+        debug() << "WARNING: Negative number of hits!!!" << endmsg;
+    }
     
-    // Run track finding and fitting
-    std::vector<Track> tracks = findTracks(hitCollection);
+    // Check if we have enough hits for tracking
+    std::vector<Track> tracks;
+    if (hitCollection->size() < 3) {
+        warning() << "Not enough hits to create tracks. Need at least 3." << endmsg;
+        // Create empty track vector
+    } else {
+        // Only try to find tracks if we have enough hits
+        try {
+            tracks = findTracks(hitCollection);
+        } catch (const std::exception& ex) {
+            error() << "Exception during track finding: " << ex.what() << endmsg;
+            // Continue with empty track vector
+        }
+    }
+
     info() << "Found " << tracks.size() << " tracks" << endmsg;
     
-    // Create output track collection
-    auto trackCollection = new edm4hep::TrackCollection();
-    
+    // Create output track collection with proper initialization
+    auto* trackCollection = new edm4hep::TrackCollection();
+
+    // Make sure to register using the correct approach for EDM4hep
+    // Often with EDM4hep, collections need special handling
+    DataObject* trackDataObject = nullptr;
+
+    // Try different approaches to convert/wrap the collection
+    try {
+        // Option 1: Direct cast (might not work)
+        trackDataObject = dynamic_cast<DataObject*>(trackCollection);
+        
+        if (!trackDataObject) {
+            // Option 2: Create a wrapper (common in EDM4hep/podio)
+            trackDataObject = new AnyDataWrapper<std::unique_ptr<podio::CollectionBase>>(
+                std::unique_ptr<podio::CollectionBase>(trackCollection));
+        }
+    } catch (const std::exception& ex) {
+        error() << "Exception creating output collection: " << ex.what() << endmsg;
+        delete trackCollection;
+        return StatusCode::FAILURE;
+    }
+
+    if (!trackDataObject) {
+        error() << "Failed to convert/wrap TrackCollection to DataObject" << endmsg;
+        delete trackCollection;
+        return StatusCode::FAILURE;
+    }
+
     // Convert internal track representation to standard track format
     for (const auto& track : tracks) {
         createTrack(trackCollection, track);
     }
     
     // Register output collection
-    DataObject* trackDataObject = dynamic_cast<DataObject*>(trackCollection);
+   //DataObject* trackDataObject = dynamic_cast<DataObject*>(trackCollection);
     if (!trackDataObject) {
         error() << "Failed to convert TrackCollection to DataObject" << endmsg;
         delete trackCollection;
@@ -1016,6 +1093,12 @@ bool KalmanTracking::extendTrackCandidate(const TrackState& seedState,
 
 std::vector<Track> KalmanTracking::findTracks(const edm4hep::TrackerHitPlaneCollection* hits) {
     std::vector<Track> tracks;
+    // Check if we have enough hits for tracking (need at least 3)
+    if (hits->size() < 3) {
+        info() << "Not enough hits for tracking. Need at least 3, found " << hits->size() << endmsg;
+        return tracks; // Return empty track vector
+    }
+    
     std::vector<bool> usedHits(hits->size(), false);
     
     // Group hits by surface

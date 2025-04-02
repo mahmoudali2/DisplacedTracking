@@ -27,6 +27,7 @@ kalman.ParticleType = "muon"                          # Particle type for materi
 kalman.InitialMomentum = 1.0                          # Initial momentum estimate for seeding (GeV)
 kalman.MaxDistanceToSurface = 10.0                    # Maximum distance to consider surface intersections (mm)
 kalman.EncodingStringParameterName = "MuonSystemReadoutID"
+kalman.OutputLevel = 1  # DEBUG level
 
 # Input/Output service
 iosvc = IOSvc()
