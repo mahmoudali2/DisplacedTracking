@@ -1104,27 +1104,82 @@ std::map<int, std::vector<const dd4hep::rec::Surface*>> KalmanTracking::getSurfa
     // Process all surfaces and group them by layer ID
     for (const auto& surface : m_surfaces) {
         // Get detector element
-        dd4hep::DetElement det = surface->detElement(); // not sure if it detElement ot  detector();
+        dd4hep::DetElement det = surface->detElement();
         if (!det.isValid()) continue;
         
-        // Try to get layer ID from volume ID
+        // Get volume ID
         uint64_t volID = det.volumeID();
         int layerID = 0;
+        int type = 0;  // 0=barrel, 1=positive endcap, -1=negative endcap
         
-        try {
-            layerID = m_bitFieldCoder->get(volID, "layer");
-        } catch (...) {
-            // If no layer field, try to determine from position
-            dd4hep::rec::Vector3D pos = surface->origin(); // cm to mm
-            layerID = static_cast<int>(std::sqrt(pos.x()*pos.x() + pos.y()*pos.y()) / 10.0);
+
+        // Get the layer ID
+        layerID = m_bitFieldCoder->get(volID, "layer");
+            
+        // Try to get the type field
+        type = m_bitFieldCoder->get(volID, "type");
+            
+        // Create a composite ID that distinguishes barrel and endcaps
+        // For barrel: layerID
+        // For endcaps: 1000 * type + layerID (1000+layerID for positive, -1000+layerID for negative)
+        int compositeID;
+        if (type == 0) {
+                // Barrel
+                compositeID = layerID;
+        } else if (type == 1) {
+                // Endcaps
+                compositeID = 1000 * type + layerID;
+        } else {
+                compositeID = 1000 * type - layerID;
         }
-        
+            
         // Add surface to the appropriate layer group
-        result[layerID].push_back(surface);
+        result[compositeID].push_back(surface);
+            
+        // Debug output
+        if (msgLevel(MSG::DEBUG)) {
+                dd4hep::rec::Vector3D pos = surface->origin();
+                std::string typeStr;
+                if (type == 0) typeStr = "Barrel";
+                else if (type == 1) typeStr = "Positive Endcap";
+                else if (type == -1) typeStr = "Negative Endcap";
+                else typeStr = "Unknown";
+                
+               /* debug() << "Surface at (" << pos.x() << ", " << pos.y() << ", " 
+                       << pos.z() << ") - " << typeStr << " Layer " << layerID 
+                       << " (ID=" << compositeID << ")" << endmsg; */
+        }
+    } 
+    
+    // Output summary of layer distribution
+    if (msgLevel(MSG::INFO)) {
+        info() << "Layer distribution:" << endmsg;
+        for (const auto& [layer, surfaces] : result) {
+            std::string typeStr;
+            int actualLayer;
+            
+            if (layer >= 1000) {
+                // Positive endcap
+                typeStr = "Positive Endcap";
+                actualLayer = layer - 1000;
+            } else if (layer <= -1000) {
+                // Negative endcap
+                typeStr = "Negative Endcap";
+                actualLayer = -(layer + 1000);  // Make layer number positive for display
+            } else {
+                // Barrel
+                typeStr = "Barrel";
+                actualLayer = layer;
+            }
+            
+            info() << "  " << typeStr << " Layer " << actualLayer 
+                  << " (ID=" << layer << "): " << surfaces.size() << " surfaces" << endmsg;
+        }
     }
     
     return result;
 }
+
 
 double KalmanTracking::getRadiationLength(const dd4hep::rec::Vector3D& start, 
                                         const dd4hep::rec::Vector3D& end) const {
