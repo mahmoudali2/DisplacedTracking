@@ -23,6 +23,7 @@ kalman.DetectorName = "Muon-System"                   # Name of the detector to 
 kalman.InputHitCollection = "MSTrackerHits"           # Input digitized hits from DDPlanarDigi
 kalman.OutputTrackCollection = "KalmanTracks"         # Output reconstructed tracks
 kalman.MaxChi2 = 15.0                                 # Maximum chi-square for hit acceptance
+kalman.MaxRadius = 100000000000.0                     # Maximum radius of track helix circle in x-y
 kalman.ParticleType = "muon"                          # Particle type for material effects
 kalman.InitialMomentum = 1.0                          # Initial momentum estimate for seeding (GeV)
 kalman.MaxDistanceToSurface = 10.0                    # Maximum distance to consider surface intersections (mm)
@@ -31,7 +32,7 @@ kalman.OutputLevel = 1  # DEBUG level
 
 # Input/Output service
 iosvc = IOSvc()
-iosvc.Input = "output_digi_mu_gun_129.root"                # Input file with digitized hits
+iosvc.Input = "output_digi.root"                # Input file with digitized hits
 iosvc.Output = "output_tracks.root"             # Output file for reconstructed tracks
 
 # Application manager configuration

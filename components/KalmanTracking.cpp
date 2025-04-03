@@ -99,8 +99,8 @@ Eigen::Matrix<double, 2, 5> TrackState::projectionMatrix(const dd4hep::rec::Surf
     // Check if intersection is valid
     if (t <= 0) {
         // If no forward intersection, use a simplified projection
-        H(0, 1) = 10.0;  // Approximately project phi to u
-        H(1, 2) = 10.0;  // Approximately project eta to v
+        H(0, 1) = 1.0;  // Approximately project phi to u
+        H(1, 2) = 1.0;  // Approximately project eta to v
         return H;
     }
     
@@ -1315,275 +1315,326 @@ std::vector<const dd4hep::rec::Surface*> KalmanTracking::findIntersectingSurface
 // Core tracking methods
 //------------------------------------------------------------------------------
 
-TrackState KalmanTracking::createSeedState(const edm4hep::TrackerHitPlane& hit1, // not sure if it should be TrackerHitPlane
-                                         const dd4hep::rec::Surface* surface1,
-                                         const edm4hep::TrackerHitPlane& hit2,  // not sure if it should be TrackerHitPlane
-                                         const dd4hep::rec::Surface* surface2) {
-    debug() << "Inside createSeedState method" << endmsg;
-
-    // Get hit positions
-    const auto& pos1 = hit1.getPosition();
-    const auto& pos2 = hit2.getPosition();
-    
-    // Direction vector
-    double dx = pos2[0] - pos1[0];
-    double dy = pos2[1] - pos1[1];
-    double dz = pos2[2] - pos1[2];
-
-    debug() << "Direction vector: (" << dx << ", " << dy << ", " << dz << ")" << endmsg;
-    
-    // Calculate track parameters
-    
-    // Azimuthal angle
-    double phi = std::atan2(dy, dx);
-    
-    // Polar angle
-    double theta = std::atan2(std::sqrt(dx*dx + dy*dy), dz);
-    
-    // Pseudorapidity
-    double eta = -std::log(std::tan(theta/2.0));
-
-    debug() << "Calculated angles: phi=" << phi << ", theta=" << theta << ", eta=" << eta << endmsg;
-    
-    // Impact parameters (simplified - assumes origin as reference)
-    // In a real implementation, you'd calculate these more accurately
-    double d0 = 0.0;  // Approximation
-    double z0 = 0.0;  // Approximation
-    
-    // Use provided initial momentum estimate for the track
-    double pT = m_initialMomentum * std::sin(theta);
-    double qOverPt = 1.0 / pT;  // Assume positive charge initially
-
-    debug() << "Track parameters: qOverPt=" << qOverPt << ", d0=" << d0 << ", z0=" << z0 << endmsg;
-    
-    // Initialize track parameters
-    Eigen::Vector5d params;
-    params << qOverPt, phi, eta, d0, z0;
-    
-    // Initial covariance matrix - large uncertainties on all parameters
-    Eigen::Matrix5d cov = Eigen::Matrix5d::Identity();
-    cov(0, 0) = 1.0;    // q/pT uncertainty
-    cov(1, 1) = 0.01;   // phi uncertainty [rad]
-    cov(2, 2) = 0.01;   // eta uncertainty
-    cov(3, 3) = 10.0;   // d0 uncertainty [mm]
-    cov(4, 4) = 10.0;   // z0 uncertainty [mm]
-
-    debug() << "Created initial track state successfully" << endmsg;
-    
-    return TrackState(params, cov, surface1);
-}
-
-bool KalmanTracking::extendTrackCandidate(const TrackState& seedState, 
-                                       const edm4hep::TrackerHitPlaneCollection* hits,
-                                       std::vector<bool>& usedHits,
-                                       std::vector<edm4hep::TrackerHitPlane>& trackHits,
-                                       std::vector<const dd4hep::rec::Surface*>& trackSurfaces,
-                                       std::vector<size_t>& trackHitIndices) {
-    debug() << "Extending track candidate from seed state" << endmsg;
-    
-    // Get current track state
-    TrackState currentState = seedState;
-    
-    // Find potential surfaces that the track might intersect
-    debug() << "Finding potential intersecting surfaces..." << endmsg;
-    std::vector<const dd4hep::rec::Surface*> potentialSurfaces = 
-        findIntersectingSurfaces(currentState, m_maxDistanceToSurface);
-    debug() << "Found " << potentialSurfaces.size() << " potentially intersecting surfaces" << endmsg;
-    
-    // For each potential surface
-    for (const auto& surface : potentialSurfaces) {
-        debug() << "  Checking surface at (" << surface->origin().x() << ", "
-                << surface->origin().y() << ", " << surface->origin().z() << ")" << endmsg;
-        // Skip surfaces already used by this track
-        bool surfaceUsed = false;
-        for (const auto& surf : trackSurfaces) {
-            if (surf == surface) {
-                surfaceUsed = true;
-                break;
-            }
-        }
-        if (surfaceUsed) continue;
-        
-        try {
-            // Predict state to this surface
-            debug() << "  Attempting to predict track state to this surface..." << endmsg;
-            TrackState predictedState = currentState.predictTo(surface, m_field, *m_materialManager, m_particleProperties);
-            debug() << "  Prediction successful!" << endmsg;
-            
-            debug() << "Looking for compatible hits on surface at (" 
-                    << surface->origin().x() << ", " 
-                    << surface->origin().y() << ", " 
-                    << surface->origin().z() << ")" << endmsg;
-
-
-            // Find compatible hits on this surface
-            auto compatibleHits = findCompatibleHits(predictedState, hits, usedHits);
-            debug() << "  Found " << compatibleHits.size() << " compatible hits" << endmsg;
-            
-            if (!compatibleHits.empty()) {
-                // Use the best compatible hit (lowest chi-square)
-                size_t hitIdx = std::get<0>(compatibleHits[0]);
-                edm4hep::TrackerHitPlane hit = std::get<1>(compatibleHits[0]);
-                const dd4hep::rec::Surface* hitSurface = std::get<2>(compatibleHits[0]);
-                
-                // Update state with this hit
-                TrackState updatedState = predictedState.update(hit, hitSurface);
-                
-                // Add hit to track
-                trackHits.push_back(hit);
-                trackSurfaces.push_back(hitSurface);
-                trackHitIndices.push_back(hitIdx);
-                
-                // Update current state
-                currentState = updatedState;
-            }
-        } catch (const std::exception& ex) {
-            error() << "  Exception when checking surface: " << ex.what() << endmsg;
-            // Continue to next surface instead of crashing
-            continue;
-        }
-    }
-    // Track is valid if it has at least 3 hits
-    bool trackValid = trackHits.size() >= 3;
-    debug() << "Track candidate extension finished with " << trackHits.size() 
-            << " hits, valid = " << (trackValid ? "true" : "false") << endmsg;
-    
-    // Track is valid if it has at least 3 hits
-    return trackHits.size() >= 3;
-}
-
 std::vector<Track> KalmanTracking::findTracks(const edm4hep::TrackerHitPlaneCollection* hits) {
     std::vector<Track> tracks;
-    // Check if we have enough hits for tracking (need at least 3)
+    
+    // Check if we have enough hits for tracking
     if (hits->size() < 3) {
         info() << "Not enough hits for tracking. Need at least 3, found " << hits->size() << endmsg;
-        return tracks; // Return empty track vector
+        return tracks;
     }
     
-    std::vector<bool> usedHits(hits->size(), false);
+    // Group hits by layer
+    std::map<int, std::vector<std::pair<size_t, edm4hep::TrackerHitPlane>>> hitsByLayer;
     
-    // Group hits by surface
-    std::map<const dd4hep::rec::Surface*, std::vector<std::pair<size_t, edm4hep::TrackerHitPlane>>> hitsBySurface; // should it be TrackerHitPlane!?
-    
-    // Find surfaces for all hits
+    // Find surfaces and organize hits by layer
     for (size_t i = 0; i < hits->size(); ++i) {
         const auto& hit = (*hits)[i];
         const dd4hep::rec::Surface* surface = findSurface(hit);
         
         if (surface) {
-            hitsBySurface[surface].push_back(std::make_pair(i, hit));
+            int layerID = getLayerID(hit.getCellID());
+            hitsByLayer[layerID].push_back(std::make_pair(i, hit));
         } else {
             debug() << "Could not find surface for hit with cellID " << hit.getCellID() << endmsg;
         }
     }
-
-    info() << "Found " << hitsBySurface.size() << " surfaces with hits" << endmsg;
-    if (hitsBySurface.empty()) {
-        info() << "No surfaces found for any hits! Check detector configuration." << endmsg;
-        return tracks; // Return empty tracks if no surfaces found
-    }
-
-    // Print how many hits are on each surface
-    debug() << "Hit distribution by surface:" << endmsg;
-    for (const auto& [surface, hits] : hitsBySurface) {
-        debug() << "  Surface at (" << surface->origin().x() << ", " 
-                << surface->origin().y() << ", " << surface->origin().z() 
-                << ") has " << hits.size() << " hits" << endmsg;
-    }
-
-    info() << "Found surfaces for " << hitsBySurface.size() << " different surfaces" << endmsg;
-    // Track seeding strategy:
-    // 1. Start with pairs of hits from different layers
-    // 2. Build track seeds and extend them
     
-    // For each layer pair
-    for (auto it1 = m_surfacesByLayer.begin(); it1 != m_surfacesByLayer.end(); ++it1) {
+    info() << "Found hits in " << hitsByLayer.size() << " layers" << endmsg;
+    
+    // Check if we have at least 3 layers with hits
+    if (hitsByLayer.size() < 3) {
+        info() << "Not enough layers with hits for triplet seeding (need 3, found " 
+               << hitsByLayer.size() << ")" << endmsg;
+        return tracks;
+    }
+    
+    // Debug output - print hit distribution by layer
+    if (msgLevel(MSG::DEBUG)) {
+        debug() << "Hit distribution by layer:" << endmsg;
+        for (const auto& [layer, hits] : hitsByLayer) {
+            debug() << "  Layer " << layer << ": " << hits.size() << " hits" << endmsg;
+        }
+    }
+    
+    // Vector to track which hits are used
+    std::vector<bool> usedHits(hits->size(), false);
+    
+    // For each possible triplet combination
+    for (auto it1 = hitsByLayer.begin(); it1 != hitsByLayer.end(); ++it1) {
         int layer1 = it1->first;
-        const auto& surfaces1 = it1->second;
+        const auto& hitList1 = it1->second;
         
-        for (auto it2 = std::next(it1); it2 != m_surfacesByLayer.end(); ++it2) {
+        for (auto it2 = std::next(it1); it2 != hitsByLayer.end(); ++it2) {
             int layer2 = it2->first;
-            const auto& surfaces2 = it2->second;
+            const auto& hitList2 = it2->second;
             
-            // For each surface in first layer
-            for (const auto& surface1 : surfaces1) {
-                const auto& hitList1 = hitsBySurface[surface1];
+            for (auto it3 = std::next(it2); it3 != hitsByLayer.end(); ++it3) {
+                int layer3 = it3->first;
+                const auto& hitList3 = it3->second;
                 
-                // For each surface in second layer
-                for (const auto& surface2 : surfaces2) {
-                    const auto& hitList2 = hitsBySurface[surface2];
+                debug() << "Testing hit triplets from layers " << layer1 << ", " 
+                        << layer2 << ", " << layer3 << endmsg;
+                
+                int tripletCandidates = 0;
+                int validTriplets = 0;
+                
+                // Try all hit combinations
+                for (const auto& [idx1, hit1] : hitList1) {
+                    if (usedHits[idx1]) continue;
                     
-                    // For each hit pair
-                    for (const auto& [idx1, hit1] : hitList1) {
-                        if (usedHits[idx1]) continue;
+                    for (const auto& [idx2, hit2] : hitList2) {
+                        if (usedHits[idx2]) continue;
                         
-                        for (const auto& [idx2, hit2] : hitList2) {
-                            if (usedHits[idx2]) continue;
-
-                            // Inside the nested for loops where you create seed states
-                            debug() << "Attempting to create seed from hits on layers " 
-                                    << layer1 << " and " << layer2 << endmsg;
-                            debug() << "  Surface 1 origin: (" << surface1->origin().x() << ", "
-                                    << surface1->origin().y() << ", " << surface1->origin().z() << ")" << endmsg;
-                            debug() << "  Surface 2 origin: (" << surface2->origin().x() << ", "
-                                    << surface2->origin().y() << ", " << surface2->origin().z() << ")" << endmsg;
-                            debug() << "  Hit 1 position: (" << hit1.getPosition()[0] << ", " 
-                                    << hit1.getPosition()[1] << ", " << hit1.getPosition()[2] << ")" << endmsg;
-                            debug() << "  Hit 2 position: (" << hit2.getPosition()[0] << ", " 
-                                    << hit2.getPosition()[1] << ", " << hit2.getPosition()[2] << ")" << endmsg;
-
-                            // Right before creating the seed state
-                            debug() << "Creating seed state from these two hits..." << endmsg;
-
-                            try {
-                                // Create seed state from these two hits
-                                TrackState seedState = createSeedState(hit1, surface1, hit2, surface2);
-                                debug() << "Seed state created successfully with parameters: ("
-                                        << seedState.parameters()(0) << ", " // q/pT
-                                        << seedState.parameters()(1) << ", " // phi
-                                        << seedState.parameters()(2) << ", " // eta
-                                        << seedState.parameters()(3) << ", " // d0
-                                        << seedState.parameters()(4) << ")" << endmsg; // z0
-
-                                // Try to extend the track code...
-                            } catch (const std::exception& ex) {
-                                error() << "Exception during seed creation: " << ex.what() << endmsg;
-                                continue; // Try next hit pair
-                            }
+                        for (const auto& [idx3, hit3] : hitList3) {
+                            if (usedHits[idx3]) continue;
                             
-                            // Create seed state from these two hits
-                            TrackState seedState = createSeedState(hit1, surface1, hit2, surface2);
+                            tripletCandidates++;
                             
-                            // Find more hits and build track candidate
-                            std::vector<edm4hep::TrackerHitPlane> trackHits = {hit1, hit2};
-                            std::vector<const dd4hep::rec::Surface*> trackSurfaces = {surface1, surface2};
-                            std::vector<size_t> trackHitIndices = {idx1, idx2};
+                            // Create triplet seed
+                            bool seedValid = createTripletSeed(
+                                hit1, hit2, hit3, tracks, usedHits, idx1, idx2, idx3);
                             
-                            // Try to extend the track by adding compatible hits
-                            bool trackValid = extendTrackCandidate(seedState, hits, usedHits, trackHits, trackSurfaces, trackHitIndices);
-                            
-                            if (trackValid) {
-                                // Fit final track
-                                Track track = fitTrack(trackHits, trackSurfaces, seedState);
-                                
-                                // Quality cuts
-                                if (track.chi2() / track.ndf() < m_maxChi2) {
-                                    tracks.push_back(track);
-                                    
-                                    // Mark hits as used
-                                    for (size_t idx : trackHitIndices) {
-                                        usedHits[idx] = true;
-                                    }
-                                }
+                            if (seedValid) {
+                                validTriplets++;
                             }
                         }
                     }
                 }
+                
+                debug() << "Tested " << tripletCandidates << " triplet candidates, found " 
+                        << validTriplets << " valid triplets" << endmsg;
             }
         }
     }
     
+    info() << "Found " << tracks.size() << " tracks using triplet seeding" << endmsg;
     return tracks;
+}
+
+bool KalmanTracking::createTripletSeed(
+    const edm4hep::TrackerHitPlane& hit1,
+    const edm4hep::TrackerHitPlane& hit2,
+    const edm4hep::TrackerHitPlane& hit3,
+    std::vector<Track>& tracks,
+    std::vector<bool>& usedHits,
+    size_t idx1, size_t idx2, size_t idx3) {
+    
+    // Get hit positions
+    const auto& pos1 = hit1.getPosition();
+    const auto& pos2 = hit2.getPosition();
+    const auto& pos3 = hit3.getPosition();
+    
+    // Get surfaces for each hit
+    const dd4hep::rec::Surface* surf1 = findSurface(hit1);
+    const dd4hep::rec::Surface* surf2 = findSurface(hit2);
+    const dd4hep::rec::Surface* surf3 = findSurface(hit3);
+    
+    if (!surf1 || !surf2 || !surf3) {
+        debug() << "Could not find surfaces for triplet hits" << endmsg;
+        return false; // Couldn't find surfaces
+    }
+    
+    // Convert to Eigen vectors for calculations
+    Eigen::Vector3d p1(pos1[0], pos1[1], pos1[2]);
+    Eigen::Vector3d p2(pos2[0], pos2[1], pos2[2]);
+    Eigen::Vector3d p3(pos3[0], pos3[1], pos3[2]);
+    
+    debug() << "Fitting circle through points: " 
+            << "(" << p1.x() << "," << p1.y() << "), "
+            << "(" << p2.x() << "," << p2.y() << "), "
+            << "(" << p3.x() << "," << p3.y() << ")" << endmsg;
+    
+    // Fit circle in the x-y plane (transverse plane)
+    bool circleValid = false;
+    double x0, y0, radius; // Circle center and radius
+    
+    // Calculate circle parameters
+    circleValid = fitCircle(p1.x(), p1.y(), p2.x(), p2.y(), p3.x(), p3.y(), x0, y0, radius);
+    
+    if (!circleValid) {
+        debug() << "Circle fit failed - points may be collinear" << endmsg;
+        return false; // Invalid circle fit
+    }
+    
+    if (radius > m_maxRadius) {
+        debug() << "Circle radius too large: " << radius << " mm (limit: " 
+                << m_maxRadius << " mm)" << endmsg;
+        return false; // Radius too large (too straight)
+    }
+    
+    debug() << "Circle fit successful: center=(" << x0 << "," << y0 
+            << "), radius=" << radius << " mm" << endmsg;
+    
+    // Calculate helix parameters
+    
+    // 1. Calculate phi at each point and determine helix direction
+    double phi1 = std::atan2(p1.y() - y0, p1.x() - x0);
+    double phi2 = std::atan2(p2.y() - y0, p2.x() - x0);
+    double phi3 = std::atan2(p3.y() - y0, p3.x() - x0);
+    
+    // Unwrap angles to ensure proper ordering
+    if (phi2 - phi1 > M_PI) phi2 -= 2*M_PI;
+    if (phi2 - phi1 < -M_PI) phi2 += 2*M_PI;
+    if (phi3 - phi2 > M_PI) phi3 -= 2*M_PI;
+    if (phi3 - phi2 < -M_PI) phi3 += 2*M_PI;
+    
+    // 2. Determine charge from rotation direction
+    bool clockwise = (phi3 < phi1);
+    double charge = clockwise ? 1.0 : -1.0;
+    
+    // 3. Calculate pT from radius and magnetic field
+    // B field in Tesla, radius in meters, pT in GeV/c
+    dd4hep::Position fieldPos((p1.x() + p2.x() + p3.x())/3, 
+                             (p1.y() + p2.y() + p3.y())/3, 
+                             (p1.z() + p2.z() + p3.z())/3);
+    double Bz = m_field.magneticField(fieldPos).z() / dd4hep::tesla;
+    double pT = 0.3 * std::abs(Bz) * radius / 1000.0; // Convert radius from mm to m
+    
+    debug() << "B-field at center: " << Bz << " Tesla" << endmsg;
+    debug() << "Track direction: " << (clockwise ? "clockwise" : "counter-clockwise") 
+            << ", charge: " << charge << endmsg;
+    debug() << "Calculated pT: " << pT << " GeV/c" << endmsg;
+    
+    // 4. Fit z-component (linear in s)
+    // Calculate arc lengths
+    double s1 = 0;
+    double s2 = radius * std::abs(phi2 - phi1);
+    double s3 = radius * std::abs(phi3 - phi1);
+    
+    // Fit linear function z = a*s + b
+    double a, b;
+    fitLine(s1, p1.z(), s2, p2.z(), s3, p3.z(), a, b);
+    
+    debug() << "Z-fit: z = " << a << " * s + " << b << endmsg;
+    
+    // 5. Calculate theta from dz/ds
+    double theta = std::atan2(1.0, a);
+    double eta = -std::log(std::tan(theta/2.0));
+    
+    debug() << "Track angles: theta=" << theta << ", eta=" << eta << endmsg;
+    
+    // 6. Calculate impact parameters
+    double d0 = std::sqrt(std::pow(x0, 2) + std::pow(y0, 2)) - radius;
+    d0 = d0 * (clockwise ? 1 : -1); // Correct sign based on rotation direction
+    
+    double z0 = b; // z-intercept
+    
+    debug() << "Impact parameters: d0=" << d0 << " mm, z0=" << z0 << " mm" << endmsg;
+    
+    // Construct track parameters vector
+    double qOverPt = charge / pT;
+    double phi = std::atan2(y0, x0) + (clockwise ? -M_PI/2 : M_PI/2);
+    
+    // Normalize phi to [-π, π]
+    if (phi > M_PI) phi -= 2*M_PI;
+    if (phi < -M_PI) phi += 2*M_PI;
+    
+    Eigen::Vector5d params;
+    params << qOverPt, phi, eta, d0, z0;
+    
+    debug() << "Track parameters: (" 
+            << qOverPt << ", " << phi << ", " << eta << ", " << d0 << ", " << z0 << ")" << endmsg;
+    
+    // Create covariance matrix with reasonable initial uncertainties
+    Eigen::Matrix5d cov = Eigen::Matrix5d::Zero();
+    cov(0,0) = 0.1 * qOverPt * qOverPt; // 10% uncertainty on q/pT
+    cov(1,1) = 0.01; // phi uncertainty [rad]
+    cov(2,2) = 0.01; // eta uncertainty
+    cov(3,3) = 0.5;  // d0 uncertainty [mm]
+    cov(4,4) = 1.0;  // z0 uncertainty [mm]
+    
+    // Initialize track state with the first hit's surface
+    TrackState seedState(params, cov, surf1);
+    
+    // Create track with the seed state
+    Track track(seedState);
+    
+    // Add hits to the track
+    track.addHit(hit1, surf1, seedState);
+    
+    // Predict to second hit and update
+    TrackState predictedState2 = seedState.predictTo(surf2, m_field, *m_materialManager, m_particleProperties);
+    TrackState updatedState2 = predictedState2.update(hit2, surf2);
+    track.addHit(hit2, surf2, updatedState2);
+    
+    // Predict to third hit and update
+    TrackState predictedState3 = updatedState2.predictTo(surf3, m_field, *m_materialManager, m_particleProperties);
+    TrackState updatedState3 = predictedState3.update(hit3, surf3);
+    track.addHit(hit3, surf3, updatedState3);
+    
+    // Check track quality
+    double chi2ndf = track.chi2() / track.ndf();
+    debug() << "Track quality: chi2/ndf = " << chi2ndf 
+            << " (threshold: " << m_maxChi2 << ")" << endmsg;
+    
+    if (chi2ndf > m_maxChi2) {
+        debug() << "Track rejected: chi2/ndf too large" << endmsg;
+        return false; // Track quality not good enough
+    }
+    
+    // Add valid track and mark hits as used
+    tracks.push_back(track);
+    usedHits[idx1] = true;
+    usedHits[idx2] = true;
+    usedHits[idx3] = true;
+    
+    debug() << "Created valid track with 3 hits" << endmsg;
+    return true;
+}
+
+bool KalmanTracking::fitCircle(double x1, double y1, double x2, double y2, double x3, double y3, 
+                             double& x0, double& y0, double& radius) {
+    // Using the algebraic method for circle fitting through 3 points
+    
+    // Check if points are collinear (or too close)
+    double det = (x1 - x2) * (y2 - y3) - (x2 - x3) * (y1 - y2);
+    if (std::abs(det) < 1e-6) {
+        return false; // Points are collinear
+    }
+    
+    // Calculate circle parameters
+    double temp1 = x1*x1 + y1*y1;
+    double temp2 = x2*x2 + y2*y2;
+    double temp3 = x3*x3 + y3*y3;
+    
+    // Using determinants to solve the system of equations
+    double a = det * ((temp1 - temp2) * (y2 - y3) - (temp2 - temp3) * (y1 - y2));
+    double b = det * ((x1 - x2) * (temp2 - temp3) - (x2 - x3) * (temp1 - temp2));
+    double c = det * ((x1 - x2) * (y2 - y3) * (temp3 - temp1) + 
+                      (x2 - x3) * (y1 - y2) * (temp1 - temp2));
+    
+    // Calculate center coordinates
+    x0 = -a / (2 * det);
+    y0 = -b / (2 * det);
+    
+    // Calculate radius
+    radius = std::sqrt((x1 - x0)*(x1 - x0) + (y1 - y0)*(y1 - y0));
+    
+    return true;
+}
+
+void KalmanTracking::fitLine(double x1, double y1, double x2, double y2, double x3, double y3,
+                           double& slope, double& intercept) {
+    // Fit line using least squares method
+    double sumx = x1 + x2 + x3;
+    double sumy = y1 + y2 + y3;
+    double sumxy = x1*y1 + x2*y2 + x3*y3;
+    double sumx2 = x1*x1 + x2*x2 + x3*x3;
+    
+    // Number of points
+    const int n = 3;
+    
+    // Calculate slope and intercept
+    double denominator = n * sumx2 - sumx * sumx;
+    if (std::abs(denominator) < 1e-6) {
+        // Near-vertical line, use large slope
+        slope = 1e6;
+        intercept = sumy / n;
+    } else {
+        slope = (n * sumxy - sumx * sumy) / denominator;
+        intercept = (sumy - slope * sumx) / n;
+    }
 }
 
 Track KalmanTracking::fitTrack(const std::vector<edm4hep::TrackerHitPlane>& hits,

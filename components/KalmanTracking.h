@@ -178,24 +178,26 @@ public:
     // Find tracks in a collection of hits
     std::vector<Track> findTracks(const edm4hep::TrackerHitPlaneCollection* hits);
     
+    // Create a track seed from three hits (triplet seeding)
+    bool createTripletSeed(const edm4hep::TrackerHitPlane& hit1,
+                        const edm4hep::TrackerHitPlane& hit2,
+                        const edm4hep::TrackerHitPlane& hit3,
+                        std::vector<Track>& tracks,
+                        std::vector<bool>& usedHits,
+                        size_t idx1, size_t idx2, size_t idx3);
+
+    // Helper functions for circle fitting
+    bool fitCircle(double x1, double y1, double x2, double y2, double x3, double y3, 
+                double& x0, double& y0, double& radius);
+
+    // Helper function for line fitting
+    void fitLine(double x1, double y1, double x2, double y2, double x3, double y3,
+                double& slope, double& intercept);
+
     // Fit an existing track candidate
     Track fitTrack(const std::vector<edm4hep::TrackerHitPlane>& hits,
                   const std::vector<const dd4hep::rec::Surface*>& surfaces,
                   const TrackState& seedState);
-    
-    // Create a seed state from two hits
-    TrackState createSeedState(const edm4hep::TrackerHitPlane& hit1, 
-                              const dd4hep::rec::Surface* surface1,
-                              const edm4hep::TrackerHitPlane& hit2,
-                              const dd4hep::rec::Surface* surface2);
-    
-    // Extend a track candidate with more hits
-    bool extendTrackCandidate(const TrackState& seedState, 
-                             const edm4hep::TrackerHitPlaneCollection* hits,
-                             std::vector<bool>& usedHits,
-                             std::vector<edm4hep::TrackerHitPlane>& trackHits,
-                             std::vector<const dd4hep::rec::Surface*>& trackSurfaces,
-                             std::vector<size_t>& trackHitIndices);
     
     // Set maximum chi-square for hit acceptance
     void setMaxChi2(double chi2) { m_maxChi2 = chi2; }
@@ -247,7 +249,8 @@ private:
     Gaudi::Property<double> m_initialMomentum{this, "InitialMomentum", 1.0, "Initial momentum estimate for seeding (GeV)"};
     Gaudi::Property<double> m_maxDistanceToSurface{this, "MaxDistanceToSurface", 10.0, "Maximum distance to consider surface intersections (mm)"};
     Gaudi::Property<std::string> m_encodingStringParameter{this, "EncodingStringParameterName", "GlobalTrackerReadoutID", "Name of DD4hep parameter with the encoding string"};
-    
+    Gaudi::Property<double> m_maxRadius{this, "MaxRadius", 100000.0, "Maximum radius for track curvature (mm)"};
+
     // Services
     ServiceHandle<IGeoSvc> m_geoSvc{this, "GeoSvc", "GeoSvc", "Detector geometry service"};
     
