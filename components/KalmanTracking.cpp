@@ -869,6 +869,33 @@ StatusCode KalmanTracking::initialize() {
     // Get magnetic field
     m_field = m_detector->field();
     
+    dd4hep::Position center(0, 0, 0);
+    // check the field strength at different point at the detector
+    dd4hep::Direction bfield = m_field.magneticField(center);
+    info() << "Magnetic field at detector center: ("
+        << bfield.x() / dd4hep::tesla << ", "
+        << bfield.y() / dd4hep::tesla << ", "
+        << bfield.z() / dd4hep::tesla << ") Tesla" << endmsg;
+
+    // Check field at several points
+    const std::vector<dd4hep::Position> testPoints = {
+        dd4hep::Position(0, 0, 0),              
+        dd4hep::Position(450, 0, 0),           // it expects dimensions in cm
+        dd4hep::Position(0, 450, 0),           
+        dd4hep::Position(0, 0, 450),           
+        dd4hep::Position(500, 500, 0),
+        dd4hep::Position(500, 500, 500)    
+    };
+
+    info() << "Magnetic field at different positions:" << endmsg;
+    for (const auto& point : testPoints) {
+        dd4hep::Direction bfieldVec = m_field.magneticField(point);
+        info() << "  Position (" << point.x() << ", " << point.y() << ", " << point.z() 
+            << ") cm: B = (" << bfieldVec.x() / dd4hep::tesla << ", "
+            << bfieldVec.y() / dd4hep::tesla << ", "
+            << bfieldVec.z() / dd4hep::tesla << ") Tesla" << endmsg;
+    }
+    
     // Create material manager
     dd4hep::Volume worldVol = m_detector->worldVolume();
     m_materialManager = new dd4hep::rec::MaterialManager(worldVol);
@@ -1485,9 +1512,9 @@ bool KalmanTracking::createTripletSeed(
     
     // 3. Calculate pT from radius and magnetic field
     // B field in Tesla, radius in meters, pT in GeV/c
-    dd4hep::Position fieldPos((p1.x() + p2.x() + p3.x())/3, 
-                             (p1.y() + p2.y() + p3.y())/3, 
-                             (p1.z() + p2.z() + p3.z())/3);
+    dd4hep::Position fieldPos((p1.x() + p2.x() + p3.x())/30, 
+                             (p1.y() + p2.y() + p3.y())/30, 
+                             (p1.z() + p2.z() + p3.z())/30);
     double Bz = m_field.magneticField(fieldPos).z() / dd4hep::tesla;
     double pT = 0.3 * std::abs(Bz) * radius / 1000.0; // Convert radius from mm to m
     
