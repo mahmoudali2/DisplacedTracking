@@ -186,6 +186,10 @@ public:
                         std::vector<bool>& usedHits,
                         size_t idx1, size_t idx2, size_t idx3);
 
+    double calculateSagitta(const Eigen::Vector3d& p1, 
+                            const Eigen::Vector3d& p2, 
+                            const Eigen::Vector3d& p3);                 
+
     // Helper functions for circle fitting
     bool fitCircle(double x1, double y1, double x2, double y2, double x3, double y3, 
                 double& x0, double& y0, double& radius);

@@ -46,8 +46,8 @@ Eigen::Vector3d TrackState::momentum() const {
 
 Eigen::Vector3d TrackState::positionAtOrigin() const {
     // Extract track parameters
-    double d0 = _params(3);      // transverse impact parameter
-    double z0 = _params(4);      // longitudinal impact parameter
+    double d0 = _params(3) / 10.0;      // transverse impact parameter
+    double z0 = _params(4) / 10.0;      // longitudinal impact parameter
     double phi = _params(1);     // azimuthal angle
     
     // Calculate position at closest approach to origin
@@ -168,8 +168,12 @@ TrackState TrackState::predictTo(const dd4hep::rec::Surface* newSurface,
         double qOverPt = _params(0);  // q/pT
         double phi = _params(1);      // azimuthal angle
         double eta = _params(2);      // pseudorapidity
-        double d0 = _params(3);       // transverse impact parameter
-        double z0 = _params(4);       // longitudinal impact parameter
+        double d0 = _params(3);       // transverse impact parameter (convert from mm to cm)
+        double z0 = _params(4);       // longitudinal impact parameter (convert from mm to cm)
+        
+        // Convert impact parameters from mm to cm
+        d0 /= 10.0;
+        z0 /= 10.0;
         
         // Calculate momentum components
         double pT = std::abs(1.0 / qOverPt);
@@ -177,19 +181,19 @@ TrackState TrackState::predictTo(const dd4hep::rec::Surface* newSurface,
         double p = pT / std::sin(theta);
         double charge = (qOverPt > 0) ? particle.charge : -particle.charge;
         
-        // 3D momentum vector
+        // 3D momentum vector (direction doesn't change with unit conversion)
         Eigen::Vector3d momentum = this->momentum();
         
         // Calculate beta = v/c for the particle
         double beta = p / std::sqrt(p*p + particle.mass*particle.mass);
         
-        // Current position (approximate for the current surface)
+        // Current position (convert from mm to cm)
         Eigen::Vector3d posAtOrigin = positionAtOrigin();
-        
-        // Need to calculate position at the current surface
-        // This is a simplified approach - in a real implementation,
-        // you would need to calculate this more accurately
-        dd4hep::rec::Vector3D currentPos = _surface->origin(); // cm to mm
+        dd4hep::rec::Vector3D currentPos(posAtOrigin.x() / 10.0, 
+                                         posAtOrigin.y() / 10.0, 
+                                         posAtOrigin.z() / 10.0);
+
+        // Convert momentum direction to unit vector for DD4hep
         dd4hep::rec::Vector3D currentDir(momentum(0), momentum(1), momentum(2));
         currentDir = currentDir.unit();
         
@@ -316,7 +320,7 @@ TrackState TrackState::predictTo(const dd4hep::rec::Surface* newSurface,
                 }
             }
         }
-        
+
         // Return new state
         return TrackState(newParams, transportedCov, newSurface);
     } catch (const std::exception& ex) {
@@ -406,11 +410,11 @@ TrackState TrackState::update(const edm4hep::TrackerHitPlane& hit,
     const auto& pos = hit.getPosition();
     
     // Convert to local coordinates on surface
-    dd4hep::rec::Vector3D hitPosVec(pos[0], pos[1], pos[2]);
-    dd4hep::rec::Vector2D localPos = surface->globalToLocal(dd4hep::mm * hitPosVec);
+    dd4hep::rec::Vector3D hitPosVec(pos[0] / 10.0, pos[1] / 10.0, pos[2] /10.0);
+    dd4hep::rec::Vector2D localPos = surface->globalToLocal(hitPosVec);
     
     // Create measurement vector
-    Eigen::Vector2d meas(localPos[0] / dd4hep::mm, localPos[1] / dd4hep::mm);
+    Eigen::Vector2d meas(localPos[0], localPos[1]);
     
     // Create measurement covariance matrix
     Eigen::Matrix2d measCov = Eigen::Matrix2d::Zero();
@@ -455,15 +459,15 @@ TrackState TrackState::update(const edm4hep::TrackerHitPlane& hit,
     const auto& covValues = hit.getCovMatrix();
     
     // EDM4hep stores covariance as a 6-element vector [xx, xy, xz, yy, yz, zz]
-    cov3d(0, 0) = covValues[0]; // xx
-    cov3d(0, 1) = covValues[1]; // xy
-    cov3d(0, 2) = covValues[2]; // xz
-    cov3d(1, 0) = covValues[1]; // xy
-    cov3d(1, 1) = covValues[3]; // yy
-    cov3d(1, 2) = covValues[4]; // yz
-    cov3d(2, 0) = covValues[2]; // xz
-    cov3d(2, 1) = covValues[4]; // yz
-    cov3d(2, 2) = covValues[5]; // zz
+    cov3d(0, 0) = covValues[0] / 100.0; // xx
+    cov3d(0, 1) = covValues[1] / 100.0; // xy
+    cov3d(0, 2) = covValues[2] / 100.0; // xz
+    cov3d(1, 0) = covValues[1] / 100.0; // xy
+    cov3d(1, 1) = covValues[3] / 100.0; // yy
+    cov3d(1, 2) = covValues[4] / 100.0; // yz
+    cov3d(2, 0) = covValues[2] / 100.0; // xz
+    cov3d(2, 1) = covValues[4] / 100.0; // yz
+    cov3d(2, 2) = covValues[5] / 100.0; // zz
     
     // Project to local coordinates
     dd4hep::rec::Vector3D u_axis = surface->u();
@@ -508,11 +512,11 @@ double TrackState::getChi2Increment(const edm4hep::TrackerHitPlane& hit,
     const auto& pos = hit.getPosition();
     std::cout << "Hit global position (mm): (" << pos[0] << ", " << pos[1] << ", " << pos[2] << ")" << std::endl;
     
-    // Convert to local coordinates on surface
-    dd4hep::rec::Vector3D hitPosVec(pos[0], pos[1], pos[2]);
+    // Convert to local coordinates on surface with converting from mm to cm for DD4hep
+    dd4hep::rec::Vector3D hitPosVec(pos[0] / 10.0, pos[1] / 10.0, pos[2] / 10.0);
 
     // Try to print surface normal and basis vectors
-    dd4hep::rec::Vector3D origin = surface->origin(); //cm to mm
+    dd4hep::rec::Vector3D origin = surface->origin(); //cm 
     dd4hep::rec::Vector3D normal = surface->normal();
     dd4hep::rec::Vector3D uVec = surface->u();
     dd4hep::rec::Vector3D vVec = surface->v();
@@ -522,12 +526,11 @@ double TrackState::getChi2Increment(const edm4hep::TrackerHitPlane& hit,
     std::cout << "Surface u vector: (" << uVec.x() << ", " << uVec.y() << ", " << uVec.z() << ")" << std::endl;
     std::cout << "Surface v vector: (" << vVec.x() << ", " << vVec.y() << ", " << vVec.z() << ")" << std::endl;
     
-    dd4hep::rec::Vector2D localPos = surface->globalToLocal(dd4hep::mm * hitPosVec);
-    std::cout << "Hit local position (mm): (" << localPos.u() / dd4hep::mm << ", " 
-            << localPos.v() / dd4hep::mm << ")" << std::endl;
-    
-    // Create measurement vector - local coordinates in mm
-    Eigen::Vector2d meas(localPos.u() / dd4hep::mm, localPos.v() / dd4hep::mm);
+    dd4hep::rec::Vector2D localPos = surface->globalToLocal(hitPosVec);
+    std::cout << "Hit local position (cm): (" << localPos.u() << ", " 
+            << localPos.v() << ")" << std::endl;
+    // Use local coordinates in cm for measurement
+    Eigen::Vector2d meas(localPos.u(), localPos.v());
     std::cout << "Measurement vector: (" << meas(0) << ", " << meas(1) << ")" << std::endl;
     
     // Create measurement covariance matrix
@@ -572,15 +575,18 @@ double TrackState::getChi2Increment(const edm4hep::TrackerHitPlane& hit,
     const auto& covValues = hit.getCovMatrix();
     
     // EDM4hep stores covariance as a 6-element vector [xx, xy, xz, yy, yz, zz]
-    cov3d(0, 0) = covValues[0]; // xx
-    cov3d(0, 1) = covValues[1]; // xy
-    cov3d(0, 2) = covValues[2]; // xz
-    cov3d(1, 0) = covValues[1]; // xy
-    cov3d(1, 1) = covValues[3]; // yy
-    cov3d(1, 2) = covValues[4]; // yz
-    cov3d(2, 0) = covValues[2]; // xz
-    cov3d(2, 1) = covValues[4]; // yz
-    cov3d(2, 2) = covValues[5]; // zz
+
+    // Convert to cm^2 by dividing by 100
+    cov3d(0, 0) = covValues[0] / 100.0; // xx
+    cov3d(0, 1) = covValues[1] / 100.0; // xy
+    cov3d(0, 2) = covValues[2] / 100.0; // xz
+    cov3d(1, 0) = covValues[1] / 100.0; // xy
+    cov3d(1, 1) = covValues[3] / 100.0; // yy
+    cov3d(1, 2) = covValues[4] / 100.0; // yz
+    cov3d(2, 0) = covValues[2] / 100.0; // xz
+    cov3d(2, 1) = covValues[4] / 100.0; // yz
+    cov3d(2, 2) = covValues[5] / 100.0; // zz
+
     std::cout << "3D covariance matrix:" << std::endl;
     std::cout << "  [" << cov3d(0,0) << ", " << cov3d(0,1) << ", " << cov3d(0,2) << "]" << std::endl;
     std::cout << "  [" << cov3d(1,0) << ", " << cov3d(1,1) << ", " << cov3d(1,2) << "]" << std::endl;
@@ -613,8 +619,8 @@ double TrackState::getChi2Increment(const edm4hep::TrackerHitPlane& hit,
     double qOverPt = _params(0);
     double phi = _params(1);
     double eta = _params(2);
-    double d0 = _params(3);
-    double z0 = _params(4);
+    double d0 = _params(3) / 10.0;
+    double z0 = _params(4) / 10.0;
     
     std::cout << "Track state parameters: (" 
             << qOverPt << ", "  // q/pT
@@ -644,7 +650,7 @@ double TrackState::getChi2Increment(const edm4hep::TrackerHitPlane& hit,
     
     // Calculate the intersection of the track with the surface
     dd4hep::rec::Vector3D surfNormal = surface->normal().unit();
-    dd4hep::rec::Vector3D surfOrigin = surface->origin(); // cm to mm
+    dd4hep::rec::Vector3D surfOrigin = surface->origin(); // cm 
     
     double t = (surfNormal.dot(surfOrigin) - surfNormal.dot(dd4hep::rec::Vector3D(trackPos.x(), trackPos.y(), trackPos.z()))) / 
               surfNormal.dot(dd4hep::rec::Vector3D(dir.x(), dir.y(), dir.z()));
@@ -884,6 +890,10 @@ StatusCode KalmanTracking::initialize() {
         dd4hep::Position(0, 450, 0),           
         dd4hep::Position(0, 0, 450),           
         dd4hep::Position(500, 500, 0),
+        dd4hep::Position(500, 600, 100),
+        dd4hep::Position(600, 500, 200),
+        dd4hep::Position(500, 500, 250),
+        dd4hep::Position(100, 300, 350),
         dd4hep::Position(500, 500, 500)    
     };
 
@@ -1462,12 +1472,12 @@ bool KalmanTracking::createTripletSeed(
         return false; // Couldn't find surfaces
     }
     
-    // Convert to Eigen vectors for calculations
-    Eigen::Vector3d p1(pos1[0], pos1[1], pos1[2]);
-    Eigen::Vector3d p2(pos2[0], pos2[1], pos2[2]);
-    Eigen::Vector3d p3(pos3[0], pos3[1], pos3[2]);
+    // Convert to Eigen vectors in cm
+    Eigen::Vector3d p1(pos1[0] / 10.0, pos1[1] / 10.0, pos1[2] / 10.0);
+    Eigen::Vector3d p2(pos2[0] / 10.0, pos2[1] / 10.0, pos2[2] / 10.0);
+    Eigen::Vector3d p3(pos3[0] / 10.0, pos3[1] / 10.0, pos3[2] / 10.0);
     
-    debug() << "Fitting circle through points: " 
+    debug() << "Fitting circle through points (cm): " 
             << "(" << p1.x() << "," << p1.y() << "), "
             << "(" << p2.x() << "," << p2.y() << "), "
             << "(" << p3.x() << "," << p3.y() << ")" << endmsg;
@@ -1491,7 +1501,7 @@ bool KalmanTracking::createTripletSeed(
     }
     
     debug() << "Circle fit successful: center=(" << x0 << "," << y0 
-            << "), radius=" << radius << " mm" << endmsg;
+            << "), radius=" << radius << " cm" << endmsg;
     
     // Calculate helix parameters
     
@@ -1510,18 +1520,41 @@ bool KalmanTracking::createTripletSeed(
     bool clockwise = (phi3 < phi1);
     double charge = clockwise ? 1.0 : -1.0;
     
+    double sagitta = calculateSagitta(p1, p2, p3);
+    
+    // Calculate chord length
+    Eigen::Vector2d p1_2d(p1.x(), p1.y());
+    Eigen::Vector2d p3_2d(p3.x(), p3.y());
+    double chordLength = (p3_2d - p1_2d).norm();
+    
+    // Calculate radius using the sagitta formula
+    double sagittaRadius = (chordLength * chordLength) / (8 * sagitta);
+    
+    debug() << "Sagitta method: sagitta = " << sagitta << " cm, chord = " 
+            << chordLength << " cm, radius = " << sagittaRadius << " cm" << endmsg;
+
     // 3. Calculate pT from radius and magnetic field
     // B field in Tesla, radius in meters, pT in GeV/c
-    dd4hep::Position fieldPos((p1.x() + p2.x() + p3.x())/30, 
-                             (p1.y() + p2.y() + p3.y())/30, 
-                             (p1.z() + p2.z() + p3.z())/30);
-    double Bz = m_field.magneticField(fieldPos).z() / dd4hep::tesla;
-    double pT = 0.3 * std::abs(Bz) * radius / 1000.0; // Convert radius from mm to m
+    // Calculate magnetic field at position (keep this for logging purposes)
+    dd4hep::Position fieldPos((p1.x() + p2.x() + p3.x())/3.0, 
+                            (p1.y() + p2.y() + p3.y())/3.0, 
+                            (p1.z() + p2.z() + p3.z())/3.0);
+    double actualBz = m_field.magneticField(fieldPos).z() / dd4hep::tesla;
+
+    // Use estimated fixed value for now
+    const double estimatedBz = -1.7; // Tesla
+
+    debug() << "Magnetic field: actual=" << actualBz << " Tesla, using estimated=" 
+            << estimatedBz << " Tesla for calculation as a temporary solution, due to a problem in k4geo in retrieving the right value of Bz" << endmsg;
+
+    // Use the estimated value for pT calculation
+    double pT = 0.3 * std::abs(estimatedBz) * radius / 100.0; // Convert radius from mm to m
+    double sagittaPT = 0.3 * std::abs(estimatedBz) * sagittaRadius / 100.0; // Convert radius from mm to m
     
-    debug() << "B-field at center: " << Bz << " Tesla" << endmsg;
     debug() << "Track direction: " << (clockwise ? "clockwise" : "counter-clockwise") 
             << ", charge: " << charge << endmsg;
     debug() << "Calculated pT: " << pT << " GeV/c" << endmsg;
+    debug() << "Calculated sagittaPT: " << sagittaPT << " GeV/c" << endmsg;
     
     // 4. Fit z-component (linear in s)
     // Calculate arc lengths
@@ -1547,7 +1580,7 @@ bool KalmanTracking::createTripletSeed(
     
     double z0 = b; // z-intercept
     
-    debug() << "Impact parameters: d0=" << d0 << " mm, z0=" << z0 << " mm" << endmsg;
+    debug() << "Impact parameters: d0=" << d0 << " cm, z0=" << z0 << " cm" << endmsg;
     
     // Construct track parameters vector
     double qOverPt = charge / pT;
@@ -1608,6 +1641,35 @@ bool KalmanTracking::createTripletSeed(
     
     debug() << "Created valid track with 3 hits" << endmsg;
     return true;
+}
+
+double KalmanTracking::calculateSagitta(const Eigen::Vector3d& p1, 
+                                        const Eigen::Vector3d& p2, 
+                                        const Eigen::Vector3d& p3) {
+    // Project points onto the xy plane (transverse plane)
+    Eigen::Vector2d p1_2d(p1.x(), p1.y());
+    Eigen::Vector2d p2_2d(p2.x(), p2.y());
+    Eigen::Vector2d p3_2d(p3.x(), p3.y());
+    
+    // Vector from p1 to p3 (chord)
+    Eigen::Vector2d chord = p3_2d - p1_2d;
+    double chordLength = chord.norm();
+    
+    // Unit vector along the chord
+    Eigen::Vector2d chordDir = chord / chordLength;
+    
+    // Vector from p1 to p2
+    Eigen::Vector2d v1to2 = p2_2d - p1_2d;
+    
+    // Project v1to2 onto the chord direction
+    double projection = v1to2.dot(chordDir);
+    
+    // Calculate the perpendicular distance (sagitta)
+    Eigen::Vector2d projectionVec = projection * chordDir;
+    Eigen::Vector2d perpVec = v1to2 - projectionVec;
+    double sagitta = perpVec.norm();
+    
+    return sagitta;
 }
 
 bool KalmanTracking::fitCircle(double x1, double y1, double x2, double y2, double x3, double y3, 
