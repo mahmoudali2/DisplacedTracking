@@ -177,18 +177,27 @@ public:
     
     // Find tracks in a collection of hits
     std::vector<Track> findTracks(const edm4hep::TrackerHitPlaneCollection* hits);
-    
+
+    // Calculate circle center and radius using the Direct Formula Method
+    bool calculateCircleCenterDirect(
+        double x1, double y1, double x2, double y2, double x3, double y3,
+        double& x0, double& y0, double& radius);
+    // calculate sagitta    
+    double calculateSagitta(const Eigen::Vector3d& p1, 
+                            const Eigen::Vector3d& p2, 
+                            const Eigen::Vector3d& p3); 
+    // Calculate circle center and radius using the Sagitta Method
+    bool calculateCircleCenterSagitta(
+        const Eigen::Vector3d& p1, const Eigen::Vector3d& p2, const Eigen::Vector3d& p3,
+        double& x0, double& y0, double& radius);
+
     // Create a track seed from three hits (triplet seeding)
     bool createTripletSeed(const edm4hep::TrackerHitPlane& hit1,
                         const edm4hep::TrackerHitPlane& hit2,
                         const edm4hep::TrackerHitPlane& hit3,
                         std::vector<Track>& tracks,
                         std::vector<bool>& usedHits,
-                        size_t idx1, size_t idx2, size_t idx3);
-
-    double calculateSagitta(const Eigen::Vector3d& p1, 
-                            const Eigen::Vector3d& p2, 
-                            const Eigen::Vector3d& p3);                 
+                        size_t idx1, size_t idx2, size_t idx3);                
 
     // Helper functions for circle fitting
     bool fitCircle(double x1, double y1, double x2, double y2, double x3, double y3, 

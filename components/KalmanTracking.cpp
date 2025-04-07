@@ -1449,6 +1449,126 @@ std::vector<Track> KalmanTracking::findTracks(const edm4hep::TrackerHitPlaneColl
     return tracks;
 }
 
+// New function to calculate circle center and radius using the Direct Formula Method
+bool KalmanTracking::calculateCircleCenterDirect(
+    double x1, double y1, double x2, double y2, double x3, double y3,
+    double& x0, double& y0, double& radius) {
+    
+    // Calculate the determinant
+    double D = 2 * (x1 * (y2 - y3) + x2 * (y3 - y1) + x3 * (y1 - y2));
+    
+    // Check if points are collinear (determinant would be zero)
+    if (std::abs(D) < 1e-10) {
+        return false;
+    }
+    
+    // Calculate center coordinates
+    x0 = ((x1*x1 + y1*y1) * (y2 - y3) + 
+          (x2*x2 + y2*y2) * (y3 - y1) + 
+          (x3*x3 + y3*y3) * (y1 - y2)) / D;
+    
+    y0 = ((x1*x1 + y1*y1) * (x3 - x2) + 
+          (x2*x2 + y2*y2) * (x1 - x3) + 
+          (x3*x3 + y3*y3) * (x2 - x1)) / D;
+    
+    // Calculate radius as distance from center to any of the points
+    radius = std::sqrt((x1 - x0)*(x1 - x0) + (y1 - y0)*(y1 - y0));
+    
+    return true;
+}
+
+// Improved sagitta method with circle center calculation
+double KalmanTracking::calculateSagitta(const Eigen::Vector3d& p1, 
+                                        const Eigen::Vector3d& p2, 
+                                        const Eigen::Vector3d& p3) {
+    // Project points onto the xy plane (transverse plane)
+    Eigen::Vector2d p1_2d(p1.x(), p1.y());
+    Eigen::Vector2d p2_2d(p2.x(), p2.y());
+    Eigen::Vector2d p3_2d(p3.x(), p3.y());
+    
+    // Vector from p1 to p3 (chord)
+    Eigen::Vector2d chord = p3_2d - p1_2d;
+    double chordLength = chord.norm();
+    
+    // Unit vector along the chord
+    Eigen::Vector2d chordDir = chord / chordLength;
+    
+    // Vector from p1 to p2
+    Eigen::Vector2d v1to2 = p2_2d - p1_2d;
+    
+    // Project v1to2 onto the chord direction
+    double projection = v1to2.dot(chordDir);
+    
+    // Calculate the perpendicular distance (sagitta)
+    Eigen::Vector2d projectionVec = projection * chordDir;
+    Eigen::Vector2d perpVec = v1to2 - projectionVec;
+    double sagitta = perpVec.norm();
+    
+    return sagitta;
+}
+
+// Function to calculate circle center using sagitta method
+bool KalmanTracking::calculateCircleCenterSagitta(
+    const Eigen::Vector3d& p1, const Eigen::Vector3d& p2, const Eigen::Vector3d& p3,
+    double& x0, double& y0, double& radius) {
+    
+    // Project points onto the xy plane (transverse plane)
+    Eigen::Vector2d p1_2d(p1.x(), p1.y());
+    Eigen::Vector2d p2_2d(p2.x(), p2.y());
+    Eigen::Vector2d p3_2d(p3.x(), p3.y());
+    
+    // Vector from p1 to p3 (chord)
+    Eigen::Vector2d chord = p3_2d - p1_2d;
+    double chordLength = chord.norm();
+    
+    // Check if points are too close
+    if (chordLength < 1e-6) {
+        return false;
+    }
+    
+    // Vector from p1 to p2
+    Eigen::Vector2d v1to2 = p2_2d - p1_2d;
+    
+    // Project v1to2 onto the chord direction
+    Eigen::Vector2d chordDir = chord / chordLength;
+    double projection = v1to2.dot(chordDir);
+    
+    // Calculate the perpendicular vector and sagitta
+    Eigen::Vector2d projectionVec = projection * chordDir;
+    Eigen::Vector2d perpVec = v1to2 - projectionVec;
+    double sagitta = perpVec.norm();
+    
+    // If sagitta is too small, points are nearly collinear
+    if (sagitta < 1e-6) {
+        return false;
+    }
+    
+    // Calculate radius using sagitta formula
+    radius = (chordLength * chordLength) / (8 * sagitta) + (sagitta / 2);
+    
+    // Find the midpoint of chord p1-p3
+    Eigen::Vector2d midpoint = (p1_2d + p3_2d) / 2.0;
+    
+    // Perpendicular direction to chord (normalized)
+    Eigen::Vector2d perpDir(-chordDir.y(), chordDir.x());
+    
+    // Determine on which side of the chord the center lies
+    // Cross product to check if p2 is "above" or "below" the chord
+    double crossProduct = chordDir.x() * (p2_2d.y() - p1_2d.y()) - 
+                         chordDir.y() * (p2_2d.x() - p1_2d.x());
+    double directionFactor = (crossProduct > 0) ? 1.0 : -1.0;
+    
+    // Height from chord to center
+    double height = std::sqrt(radius * radius - (chordLength / 2.0) * (chordLength / 2.0));
+    
+    // Calculate center coordinates
+    x0 = midpoint.x() + directionFactor * height * perpDir.x();
+    y0 = midpoint.y() + directionFactor * height * perpDir.y();
+    
+    return true;
+}
+
+// Modified createTripletSeed function to use both methods
 bool KalmanTracking::createTripletSeed(
     const edm4hep::TrackerHitPlane& hit1,
     const edm4hep::TrackerHitPlane& hit2,
@@ -1477,49 +1597,58 @@ bool KalmanTracking::createTripletSeed(
     Eigen::Vector3d p2(pos2[0] / 10.0, pos2[1] / 10.0, pos2[2] / 10.0);
     Eigen::Vector3d p3(pos3[0] / 10.0, pos3[1] / 10.0, pos3[2] / 10.0);
     
+    // Check if hits are spatially compatible
+    double maxDist = 150.0; // cm
+    if ((p2 - p1).norm() > maxDist || (p3 - p2).norm() > maxDist) {
+        debug() << "Hits too far apart spatially" << endmsg;
+        return false;
+    }
+    
+    // Check angle consistency
+    Eigen::Vector3d v1 = p2 - p1;
+    Eigen::Vector3d v2 = p3 - p2;
+    v1.normalize();
+    v2.normalize();
+    double cosAngle = v1.dot(v2);
+    if (cosAngle < 0.9) { // Allow up to about 25 degrees deviation
+        debug() << "Hits not along a consistent path, angle too large" << endmsg;
+        return false;
+    }
+    
     debug() << "Fitting circle through points (cm): " 
             << "(" << p1.x() << "," << p1.y() << "), "
             << "(" << p2.x() << "," << p2.y() << "), "
             << "(" << p3.x() << "," << p3.y() << ")" << endmsg;
     
-    // Fit circle in the x-y plane (transverse plane)
+    // Calculate using original circle fit (for comparison)
     bool circleValid = false;
-    double x0, y0, radius; // Circle center and radius
-    
-    // Calculate circle parameters
-    circleValid = fitCircle(p1.x(), p1.y(), p2.x(), p2.y(), p3.x(), p3.y(), x0, y0, radius);
+    double x0_circle, y0_circle, radius_circle;
+    circleValid = fitCircle(p1.x(), p1.y(), p2.x(), p2.y(), p3.x(), p3.y(), 
+                           x0_circle, y0_circle, radius_circle);
     
     if (!circleValid) {
         debug() << "Circle fit failed - points may be collinear" << endmsg;
         return false; // Invalid circle fit
     }
     
-    if (radius > m_maxRadius) {
-        debug() << "Circle radius too large: " << radius << " mm (limit: " 
-                << m_maxRadius << " mm)" << endmsg;
-        return false; // Radius too large (too straight)
+    debug() << "Circle fit successful: center=(" << x0_circle << "," << y0_circle 
+            << "), radius=" << radius_circle << " cm" << endmsg;
+    
+    // Calculate using Direct Formula Method
+    double x0_direct, y0_direct, radius_direct;
+    bool directValid = calculateCircleCenterDirect(
+        p1.x(), p1.y(), p2.x(), p2.y(), p3.x(), p3.y(),
+        x0_direct, y0_direct, radius_direct);
+    
+    if (!directValid) {
+        debug() << "Direct formula method failed" << endmsg;
+        return false;
     }
     
-    debug() << "Circle fit successful: center=(" << x0 << "," << y0 
-            << "), radius=" << radius << " cm" << endmsg;
+    debug() << "Direct formula method: center=(" << x0_direct << "," << y0_direct 
+            << "), radius=" << radius_direct << " cm" << endmsg;
     
-    // Calculate helix parameters
-    
-    // 1. Calculate phi at each point and determine helix direction
-    double phi1 = std::atan2(p1.y() - y0, p1.x() - x0);
-    double phi2 = std::atan2(p2.y() - y0, p2.x() - x0);
-    double phi3 = std::atan2(p3.y() - y0, p3.x() - x0);
-    
-    // Unwrap angles to ensure proper ordering
-    if (phi2 - phi1 > M_PI) phi2 -= 2*M_PI;
-    if (phi2 - phi1 < -M_PI) phi2 += 2*M_PI;
-    if (phi3 - phi2 > M_PI) phi3 -= 2*M_PI;
-    if (phi3 - phi2 < -M_PI) phi3 += 2*M_PI;
-    
-    // 2. Determine charge from rotation direction
-    bool clockwise = (phi3 < phi1);
-    double charge = clockwise ? 1.0 : -1.0;
-    
+    // Calculate using sagitta method
     double sagitta = calculateSagitta(p1, p2, p3);
     
     // Calculate chord length
@@ -1527,98 +1656,127 @@ bool KalmanTracking::createTripletSeed(
     Eigen::Vector2d p3_2d(p3.x(), p3.y());
     double chordLength = (p3_2d - p1_2d).norm();
     
-    // Calculate radius using the sagitta formula
+    // Simplified sagitta radius calculation
     double sagittaRadius = (chordLength * chordLength) / (8 * sagitta);
     
     debug() << "Sagitta method: sagitta = " << sagitta << " cm, chord = " 
             << chordLength << " cm, radius = " << sagittaRadius << " cm" << endmsg;
-
-    // 3. Calculate pT from radius and magnetic field
-    // B field in Tesla, radius in meters, pT in GeV/c
-    // Calculate magnetic field at position (keep this for logging purposes)
+    
+    // Calculate full sagitta center and radius
+    double x0_sagitta, y0_sagitta, radius_sagitta;
+    bool sagittaValid = calculateCircleCenterSagitta(
+        p1, p2, p3, x0_sagitta, y0_sagitta, radius_sagitta);
+    
+    if (!sagittaValid) {
+        debug() << "Sagitta center calculation failed" << endmsg;
+        return false;
+    }
+    
+    debug() << "Sagitta full method: center=(" << x0_sagitta << "," << y0_sagitta 
+            << "), radius=" << radius_sagitta << " cm" << endmsg;
+    
+    // Calculate magnetic field
     dd4hep::Position fieldPos((p1.x() + p2.x() + p3.x())/3.0, 
                             (p1.y() + p2.y() + p3.y())/3.0, 
                             (p1.z() + p2.z() + p3.z())/3.0);
     double actualBz = m_field.magneticField(fieldPos).z() / dd4hep::tesla;
-
-    // Use estimated fixed value for now
     const double estimatedBz = -1.7; // Tesla
-
+    
     debug() << "Magnetic field: actual=" << actualBz << " Tesla, using estimated=" 
             << estimatedBz << " Tesla for calculation as a temporary solution, due to a problem in k4geo in retrieving the right value of Bz" << endmsg;
-
-    // Use the estimated value for pT calculation
-    double pT = 0.3 * std::abs(estimatedBz) * radius / 100.0; // Convert radius from mm to m
-    double sagittaPT = 0.3 * std::abs(estimatedBz) * sagittaRadius / 100.0; // Convert radius from mm to m
+    
+    // Calculate pT using all methods for comparison
+    double pT_circle = 0.3 * std::abs(estimatedBz) * radius_circle / 100.0; // Convert radius from cm to m
+    double pT_direct = 0.3 * std::abs(estimatedBz) * radius_direct / 100.0;
+    double pT_sagitta = 0.3 * std::abs(estimatedBz) * sagittaRadius / 100.0;
+    double pT_sagitta_full = 0.3 * std::abs(estimatedBz) * radius_sagitta / 100.0;
+    
+    debug() << "Comparison of pT estimates:" << endmsg;
+    debug() << "  Circle fit pT: " << pT_circle << " GeV/c" << endmsg;
+    debug() << "  Direct formula pT: " << pT_direct << " GeV/c" << endmsg;
+    debug() << "  Sagitta simple pT: " << pT_sagitta << " GeV/c" << endmsg;
+    debug() << "  Sagitta full pT: " << pT_sagitta_full << " GeV/c" << endmsg;
+    
+    // Use sagitta method for track parameters
+    double radius = radius_sagitta;
+    double x0 = x0_sagitta;
+    double y0 = y0_sagitta;
+    double pT = pT_sagitta_full;
+    
+    // Determine helix direction and charge
+    double phi1 = std::atan2(p1.y() - y0, p1.x() - x0);
+    double phi2 = std::atan2(p2.y() - y0, p2.x() - x0);
+    double phi3 = std::atan2(p3.y() - y0, p3.x() - x0);
+    
+    // Unwrap angles
+    if (phi2 - phi1 > M_PI) phi2 -= 2*M_PI;
+    if (phi2 - phi1 < -M_PI) phi2 += 2*M_PI;
+    if (phi3 - phi2 > M_PI) phi3 -= 2*M_PI;
+    if (phi3 - phi2 < -M_PI) phi3 += 2*M_PI;
+    
+    bool clockwise = (phi3 < phi1);
+    double charge = clockwise ? 1.0 : -1.0;
     
     debug() << "Track direction: " << (clockwise ? "clockwise" : "counter-clockwise") 
             << ", charge: " << charge << endmsg;
-    debug() << "Calculated pT: " << pT << " GeV/c" << endmsg;
-    debug() << "Calculated sagittaPT: " << sagittaPT << " GeV/c" << endmsg;
     
-    // 4. Fit z-component (linear in s)
-    // Calculate arc lengths
+    // Fit z-component
     double s1 = 0;
-    double s2 = sagittaRadius * std::abs(phi2 - phi1); // use sagitta radius for the moment, it gives better estimate
-    double s3 = sagittaRadius * std::abs(phi3 - phi1);
+    double s2 = radius * std::abs(phi2 - phi1);
+    double s3 = radius * std::abs(phi3 - phi1);
     
-    // Fit linear function z = a*s + b
     double a, b;
     fitLine(s1, p1.z(), s2, p2.z(), s3, p3.z(), a, b);
     
     debug() << "Z-fit: z = " << a << " * s + " << b << endmsg;
     
-    // 5. Calculate theta from dz/ds
     double theta = std::atan2(1.0, a);
     double eta = -std::log(std::tan(theta/2.0));
     
     debug() << "Track angles: theta=" << theta << ", eta=" << eta << endmsg;
     
-    // 6. Calculate impact parameters
-    double d0 = std::sqrt(std::pow(x0, 2) + std::pow(y0, 2)) - sagittaRadius;  // use sagitta radius for the moment, it gives better estimate
-    d0 = d0 * (clockwise ? 1 : -1); // Correct sign based on rotation direction
-    
-    double z0 = b; // z-intercept
+    // Calculate impact parameters
+    double d0 = std::sqrt(std::pow(x0, 2) + std::pow(y0, 2)) - radius;
+    d0 = d0 * (clockwise ? 1 : -1);
+    double z0 = b;
     
     debug() << "Impact parameters: d0=" << d0 << " cm, z0=" << z0 << " cm" << endmsg;
     
-    // Construct track parameters vector
+    // Track parameters
     double qOverPt = charge / pT;
     double phi = std::atan2(y0, x0) + (clockwise ? -M_PI/2 : M_PI/2);
     
-    // Normalize phi to [-π, π]
+    // Normalize phi
     if (phi > M_PI) phi -= 2*M_PI;
     if (phi < -M_PI) phi += 2*M_PI;
     
     Eigen::Vector5d params;
-    params << qOverPt, phi, eta, d0, z0;
+    params << qOverPt, phi, eta, d0*10.0, z0*10.0; // Convert to mm for TrackState
     
     debug() << "Track parameters: (" 
             << qOverPt << ", " << phi << ", " << eta << ", " << d0 << ", " << z0 << ")" << endmsg;
     
-    // Create covariance matrix with reasonable initial uncertainties
+    // Create covariance matrix
     Eigen::Matrix5d cov = Eigen::Matrix5d::Zero();
-    cov(0,0) = 0.1 * qOverPt * qOverPt; // 10% uncertainty on q/pT
-    cov(1,1) = 0.01; // phi uncertainty [rad]
-    cov(2,2) = 0.01; // eta uncertainty
-    cov(3,3) = 0.5;  // d0 uncertainty [mm]
-    cov(4,4) = 1.0;  // z0 uncertainty [mm]
+    cov(0,0) = 0.1 * qOverPt * qOverPt;
+    cov(1,1) = 0.01;
+    cov(2,2) = 0.01;
+    cov(3,3) = 0.5;
+    cov(4,4) = 1.0;
     
-    // Initialize track state with the first hit's surface
+    // Initialize track state
     TrackState seedState(params, cov, surf1);
     
-    // Create track with the seed state
+    // Create track
     Track track(seedState);
     
-    // Add hits to the track
+    // Add hits to track
     track.addHit(hit1, surf1, seedState);
     
-    // Predict to second hit and update
     TrackState predictedState2 = seedState.predictTo(surf2, m_field, *m_materialManager, m_particleProperties);
     TrackState updatedState2 = predictedState2.update(hit2, surf2);
     track.addHit(hit2, surf2, updatedState2);
     
-    // Predict to third hit and update
     TrackState predictedState3 = updatedState2.predictTo(surf3, m_field, *m_materialManager, m_particleProperties);
     TrackState updatedState3 = predictedState3.update(hit3, surf3);
     track.addHit(hit3, surf3, updatedState3);
@@ -1630,10 +1788,10 @@ bool KalmanTracking::createTripletSeed(
     
     if (chi2ndf > m_maxChi2) {
         debug() << "Track rejected: chi2/ndf too large" << endmsg;
-        return false; // Track quality not good enough
+        return false;
     }
     
-    // Add valid track and mark hits as used
+    // Add valid track
     tracks.push_back(track);
     usedHits[idx1] = true;
     usedHits[idx2] = true;
@@ -1641,35 +1799,6 @@ bool KalmanTracking::createTripletSeed(
     
     debug() << "Created valid track with 3 hits" << endmsg;
     return true;
-}
-
-double KalmanTracking::calculateSagitta(const Eigen::Vector3d& p1, 
-                                        const Eigen::Vector3d& p2, 
-                                        const Eigen::Vector3d& p3) {
-    // Project points onto the xy plane (transverse plane)
-    Eigen::Vector2d p1_2d(p1.x(), p1.y());
-    Eigen::Vector2d p2_2d(p2.x(), p2.y());
-    Eigen::Vector2d p3_2d(p3.x(), p3.y());
-    
-    // Vector from p1 to p3 (chord)
-    Eigen::Vector2d chord = p3_2d - p1_2d;
-    double chordLength = chord.norm();
-    
-    // Unit vector along the chord
-    Eigen::Vector2d chordDir = chord / chordLength;
-    
-    // Vector from p1 to p2
-    Eigen::Vector2d v1to2 = p2_2d - p1_2d;
-    
-    // Project v1to2 onto the chord direction
-    double projection = v1to2.dot(chordDir);
-    
-    // Calculate the perpendicular distance (sagitta)
-    Eigen::Vector2d projectionVec = projection * chordDir;
-    Eigen::Vector2d perpVec = v1to2 - projectionVec;
-    double sagitta = perpVec.norm();
-    
-    return sagitta;
 }
 
 bool KalmanTracking::fitCircle(double x1, double y1, double x2, double y2, double x3, double y3, 
