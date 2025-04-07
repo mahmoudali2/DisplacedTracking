@@ -1559,8 +1559,8 @@ bool KalmanTracking::createTripletSeed(
     // 4. Fit z-component (linear in s)
     // Calculate arc lengths
     double s1 = 0;
-    double s2 = radius * std::abs(phi2 - phi1);
-    double s3 = radius * std::abs(phi3 - phi1);
+    double s2 = sagittaRadius * std::abs(phi2 - phi1); // use sagitta radius for the moment, it gives better estimate
+    double s3 = sagittaRadius * std::abs(phi3 - phi1);
     
     // Fit linear function z = a*s + b
     double a, b;
@@ -1575,7 +1575,7 @@ bool KalmanTracking::createTripletSeed(
     debug() << "Track angles: theta=" << theta << ", eta=" << eta << endmsg;
     
     // 6. Calculate impact parameters
-    double d0 = std::sqrt(std::pow(x0, 2) + std::pow(y0, 2)) - radius;
+    double d0 = std::sqrt(std::pow(x0, 2) + std::pow(y0, 2)) - sagittaRadius;  // use sagitta radius for the moment, it gives better estimate
     d0 = d0 * (clockwise ? 1 : -1); // Correct sign based on rotation direction
     
     double z0 = b; // z-intercept
