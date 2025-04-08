@@ -190,6 +190,11 @@ public:
     bool calculateCircleCenterSagitta(
         const Eigen::Vector3d& p1, const Eigen::Vector3d& p2, const Eigen::Vector3d& p3,
         double& x0, double& y0, double& radius);
+    // Calculate impact parameter
+    double calculateImpactParameter(
+        double x0, double y0, double radius, bool clockwise,
+        double innerFieldStrength, double outerFieldStrength,
+        const Eigen::Vector3d& p1, const Eigen::Vector3d& p2, const Eigen::Vector3d& p3);    
 
     // Create a track seed from three hits (triplet seeding)
     bool createTripletSeed(const edm4hep::TrackerHitPlane& hit1,

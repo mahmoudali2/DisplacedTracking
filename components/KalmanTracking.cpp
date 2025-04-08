@@ -172,8 +172,8 @@ TrackState TrackState::predictTo(const dd4hep::rec::Surface* newSurface,
         double z0 = _params(4);       // longitudinal impact parameter (convert from mm to cm)
         
         // Convert impact parameters from mm to cm
-        d0 /= 10.0;
-        z0 /= 10.0;
+        //d0 /= 10.0;
+        //z0 /= 10.0;
         
         // Calculate momentum components
         double pT = std::abs(1.0 / qOverPt);
@@ -506,275 +506,318 @@ TrackState TrackState::update(const edm4hep::TrackerHitPlane& hit,
 
 double TrackState::getChi2Increment(const edm4hep::TrackerHitPlane& hit, 
                                    const dd4hep::rec::Surface* surface) const {
-    std::cout << "==== Chi2 Calculation Debug ====" << std::endl;
+    std::cout << "\n==== Enhanced Chi2 Calculation Begin ====" << std::endl;
     
-    // Get hit position
-    const auto& pos = hit.getPosition();
-    std::cout << "Hit global position (mm): (" << pos[0] << ", " << pos[1] << ", " << pos[2] << ")" << std::endl;
+    // Step 1: Extract hit information and convert units
+    // -------------------------------------------------------------
+    const auto& hitPosArr = hit.getPosition();
+    const auto& hitCovArr = hit.getCovMatrix();
     
-    // Convert to local coordinates on surface with converting from mm to cm for DD4hep
-    dd4hep::rec::Vector3D hitPosVec(pos[0] / 10.0, pos[1] / 10.0, pos[2] / 10.0);
-
-    // Try to print surface normal and basis vectors
-    dd4hep::rec::Vector3D origin = surface->origin(); //cm 
-    dd4hep::rec::Vector3D normal = surface->normal();
-    dd4hep::rec::Vector3D uVec = surface->u();
-    dd4hep::rec::Vector3D vVec = surface->v();
-
-    std::cout << "Surface origin: (" << origin.x() << ", " << origin.y() << ", " << origin.z() << ")" << std::endl;
-    std::cout << "Surface normal: (" << normal.x() << ", " << normal.y() << ", " << normal.z() << ")" << std::endl;
-    std::cout << "Surface u vector: (" << uVec.x() << ", " << uVec.y() << ", " << uVec.z() << ")" << std::endl;
-    std::cout << "Surface v vector: (" << vVec.x() << ", " << vVec.y() << ", " << vVec.z() << ")" << std::endl;
+    // EDM4hep uses mm, DD4hep uses cm - convert hit position from mm to cm
+    dd4hep::rec::Vector3D hitPosGlobal(hitPosArr[0] / 10.0, hitPosArr[1] / 10.0, hitPosArr[2] / 10.0);
     
-    dd4hep::rec::Vector2D localPos = surface->globalToLocal(hitPosVec);
-    std::cout << "Hit local position (cm): (" << localPos.u() << ", " 
-            << localPos.v() << ")" << std::endl;
-    // Use local coordinates in cm for measurement
-    Eigen::Vector2d meas(localPos.u(), localPos.v());
-    std::cout << "Measurement vector: (" << meas(0) << ", " << meas(1) << ")" << std::endl;
+    std::cout << "Hit global position (mm): (" 
+              << hitPosArr[0] << ", " << hitPosArr[1] << ", " << hitPosArr[2] << ")" << std::endl;
+    std::cout << "Hit global position (cm): (" 
+              << hitPosGlobal.x() << ", " << hitPosGlobal.y() << ", " << hitPosGlobal.z() << ")" << std::endl;
+              
+    // Convert hit covariance from mm² to cm²
+    Eigen::Matrix3d hitCovGlobal = Eigen::Matrix3d::Zero();
+    // EDM4hep stores covariance as [xx, xy, xz, yy, yz, zz]
+    hitCovGlobal(0, 0) = hitCovArr[0] / 100.0; // xx
+    hitCovGlobal(0, 1) = hitCovArr[1] / 100.0; // xy
+    hitCovGlobal(0, 2) = hitCovArr[2] / 100.0; // xz
+    hitCovGlobal(1, 0) = hitCovArr[1] / 100.0; // xy
+    hitCovGlobal(1, 1) = hitCovArr[3] / 100.0; // yy
+    hitCovGlobal(1, 2) = hitCovArr[4] / 100.0; // yz
+    hitCovGlobal(2, 0) = hitCovArr[2] / 100.0; // xz
+    hitCovGlobal(2, 1) = hitCovArr[4] / 100.0; // yz
+    hitCovGlobal(2, 2) = hitCovArr[5] / 100.0; // zz
     
-    // Create measurement covariance matrix
-    Eigen::Matrix2d measCov = Eigen::Matrix2d::Zero();
+    std::cout << "Hit covariance matrix (cm²):" << std::endl;
+    std::cout << "  [" << hitCovGlobal(0,0) << ", " << hitCovGlobal(0,1) << ", " << hitCovGlobal(0,2) << "]" << std::endl;
+    std::cout << "  [" << hitCovGlobal(1,0) << ", " << hitCovGlobal(1,1) << ", " << hitCovGlobal(1,2) << "]" << std::endl;
+    std::cout << "  [" << hitCovGlobal(2,0) << ", " << hitCovGlobal(2,1) << ", " << hitCovGlobal(2,2) << "]" << std::endl;
     
-    // Get hit covariance - convert from global 3D to local 2D
-    // This is a simplified approach - a real implementation would
-    // transform the covariance matrix properly
+    // Step 2: Extract surface information
+    // -------------------------------------------------------------
+    dd4hep::rec::Vector3D surfaceOrigin = surface->origin();
+    dd4hep::rec::Vector3D surfaceNormal = surface->normal().unit(); // Ensure it's normalized
+    dd4hep::rec::Vector3D uAxis = surface->u().unit();
+    dd4hep::rec::Vector3D vAxis = surface->v().unit();
     
-    // Get the rotation part of the transformation
-    Eigen::Matrix3d rotation = Eigen::Matrix3d::Identity();
-    
-    dd4hep::rec::Vector3D normNormal(
-        normal.x() / normal.r(),
-        normal.y() / normal.r(),
-        normal.z() / normal.r()
-    );
-
-    dd4hep::rec::Vector3D normU(
-        uVec.x() / uVec.r(),
-        uVec.y() / uVec.r(),
-        uVec.z() / uVec.r()
-    );
-
-    dd4hep::rec::Vector3D normV(
-        vVec.x() / vVec.r(),
-        vVec.y() / vVec.r(),
-        vVec.z() / vVec.r()
-    );
-
-    // Fill rotation matrix with basis vectors
-    rotation(0,0) = normU.x(); rotation(0,1) = normV.x(); rotation(0,2) = normNormal.x();
-    rotation(1,0) = normU.y(); rotation(1,1) = normV.y(); rotation(1,2) = normNormal.y();
-    rotation(2,0) = normU.z(); rotation(2,1) = normV.z(); rotation(2,2) = normNormal.z();
-    std::cout << "Rotation matrix:" << std::endl;
-    std::cout << "  [" << rotation(0,0) << ", " << rotation(0,1) << ", " << rotation(0,2) << "]" << std::endl;
-    std::cout << "  [" << rotation(1,0) << ", " << rotation(1,1) << ", " << rotation(1,2) << "]" << std::endl;
-    std::cout << "  [" << rotation(2,0) << ", " << rotation(2,1) << ", " << rotation(2,2) << "]" << std::endl;
-    
-    // Construct 3D covariance matrix from hit
-    Eigen::Matrix3d cov3d = Eigen::Matrix3d::Zero();
-    const auto& covValues = hit.getCovMatrix();
-    
-    // EDM4hep stores covariance as a 6-element vector [xx, xy, xz, yy, yz, zz]
-
-    // Convert to cm^2 by dividing by 100
-    cov3d(0, 0) = covValues[0] / 100.0; // xx
-    cov3d(0, 1) = covValues[1] / 100.0; // xy
-    cov3d(0, 2) = covValues[2] / 100.0; // xz
-    cov3d(1, 0) = covValues[1] / 100.0; // xy
-    cov3d(1, 1) = covValues[3] / 100.0; // yy
-    cov3d(1, 2) = covValues[4] / 100.0; // yz
-    cov3d(2, 0) = covValues[2] / 100.0; // xz
-    cov3d(2, 1) = covValues[4] / 100.0; // yz
-    cov3d(2, 2) = covValues[5] / 100.0; // zz
-
-    std::cout << "3D covariance matrix:" << std::endl;
-    std::cout << "  [" << cov3d(0,0) << ", " << cov3d(0,1) << ", " << cov3d(0,2) << "]" << std::endl;
-    std::cout << "  [" << cov3d(1,0) << ", " << cov3d(1,1) << ", " << cov3d(1,2) << "]" << std::endl;
-    std::cout << "  [" << cov3d(2,0) << ", " << cov3d(2,1) << ", " << cov3d(2,2) << "]" << std::endl;
-    
-    // Project to local coordinates
-    Eigen::Matrix<double, 2, 3> projection;
-    projection << uVec.x(), uVec.y(), uVec.z(),
-                  vVec.x(), vVec.y(), vVec.z();
-    
-    measCov = projection * cov3d * projection.transpose();
-    std::cout << "Measurement covariance matrix:" << std::endl;
-    std::cout << "  [" << measCov(0,0) << ", " << measCov(0,1) << "]" << std::endl;
-    std::cout << "  [" << measCov(1,0) << ", " << measCov(1,1) << "]" << std::endl;
-    
-    // If the covariance matrix has zeros on the diagonal, add a reasonable value
-    if (measCov(0, 0) < 1e-6 || measCov(1, 1) < 1e-6) {
-        std::cout << "WARNING: Measurement covariance is too small, adding minimum value" << std::endl;
-        // Add a reasonable detector resolution - typically ~0.1mm for silicon detectors
-        const double minResolution = 0.1 * 0.1;  // 0.1mm resolution squared
-        measCov(0, 0) = std::max(measCov(0, 0), minResolution);
-        measCov(1, 1) = std::max(measCov(1, 1), minResolution);
-        
-        std::cout << "Updated measurement covariance:" << std::endl;
-        std::cout << "  [" << measCov(0,0) << ", " << measCov(0,1) << "]" << std::endl;
-        std::cout << "  [" << measCov(1,0) << ", " << measCov(1,1) << "]" << std::endl;
-    }
-    
-    // Extract track parameters
+    std::cout << "Surface origin (cm): (" 
+              << surfaceOrigin.x() << ", " << surfaceOrigin.y() << ", " << surfaceOrigin.z() << ")" << std::endl;
+    std::cout << "Surface normal: (" 
+              << surfaceNormal.x() << ", " << surfaceNormal.y() << ", " << surfaceNormal.z() << ")" << std::endl;
+    std::cout << "Surface u-axis: (" 
+              << uAxis.x() << ", " << uAxis.y() << ", " << uAxis.z() << ")" << std::endl;
+    std::cout << "Surface v-axis: (" 
+              << vAxis.x() << ", " << vAxis.y() << ", " << vAxis.z() << ")" << std::endl;
+              
+    // Step 3: Convert track state to global position and momentum
+    // -------------------------------------------------------------
+    // Extract track parameters (q/pT, phi, eta, d0, z0)
     double qOverPt = _params(0);
     double phi = _params(1);
     double eta = _params(2);
-    double d0 = _params(3) / 10.0;
-    double z0 = _params(4) / 10.0;
+    double d0 = _params(3); /// 10.0; // Convert from mm to cm
+    double z0 = _params(4); /// 10.0; // Convert from mm to cm
     
-    std::cout << "Track state parameters: (" 
-            << qOverPt << ", "  // q/pT
-            << phi << ", "  // phi
-            << eta << ", "  // eta
-            << d0 << ", "  // d0
-            << z0 << ")" << std::endl;  // z0
-    
-    // Calculate theta from eta
+    // Convert eta to theta
     double theta = 2.0 * std::atan(std::exp(-eta));
     
+    // Calculate track position at closest approach to origin
+    Eigen::Vector3d trackPosAtOrigin;
+    trackPosAtOrigin << -d0 * std::sin(phi), d0 * std::cos(phi), z0;
+    
     // Calculate track direction
-    Eigen::Vector3d dir;
-    dir << std::cos(phi) * std::sin(theta),
-           std::sin(phi) * std::sin(theta),
-           std::cos(theta);
+    Eigen::Vector3d trackDir;
+    trackDir << std::cos(phi) * std::sin(theta),
+                std::sin(phi) * std::sin(theta),
+                std::cos(theta);
+    trackDir.normalize();
     
-    std::cout << "Track direction: (" << dir(0) << ", " << dir(1) << ", " << dir(2) << ")" << std::endl;
+    std::cout << "Track parameters: (q/pT=" << qOverPt << ", phi=" << phi 
+              << ", eta=" << eta << ", d0=" << d0 << "cm, z0=" << z0 << "cm)" << std::endl;
+    std::cout << "Track position at origin (cm): (" 
+              << trackPosAtOrigin.x() << ", " << trackPosAtOrigin.y() << ", " << trackPosAtOrigin.z() << ")" << std::endl;
+    std::cout << "Track direction: (" 
+              << trackDir.x() << ", " << trackDir.y() << ", " << trackDir.z() << ")" << std::endl;
+              
+    // Step 4: Calculate intersection of track with hit surface
+    // -------------------------------------------------------------
+    // Create track line: trackPos + t * trackDir
+    dd4hep::rec::Vector3D trackPosDD(trackPosAtOrigin.x(), trackPosAtOrigin.y(), trackPosAtOrigin.z());
+    dd4hep::rec::Vector3D trackDirDD(trackDir.x(), trackDir.y(), trackDir.z());
     
-    // Calculate track reference position
-    Eigen::Vector3d trackPos;
-    trackPos << -d0 * std::sin(phi),
-                d0 * std::cos(phi),
-                z0;
+    // Calculate intersection parameter t
+    // (surface_origin - track_pos) · normal / (track_dir · normal)
+    double denominator = surfaceNormal.dot(trackDirDD);
+    double t_intersect = 0.0;
+    bool hasIntersection = false;
     
-    std::cout << "Track reference position: (" << trackPos(0) << ", " << trackPos(1) << ", " << trackPos(2) << ")" << std::endl;
+    if (std::abs(denominator) > 1e-6) { // Ensure track isn't parallel to surface
+        t_intersect = surfaceNormal.dot(surfaceOrigin - trackPosDD) / denominator;
+        hasIntersection = (t_intersect > 0); // Only consider forward intersections
+    }
     
-    // Calculate the intersection of the track with the surface
-    dd4hep::rec::Vector3D surfNormal = surface->normal().unit();
-    dd4hep::rec::Vector3D surfOrigin = surface->origin(); // cm 
+    std::cout << "Track-surface intersection calculation:" << std::endl;
+    std::cout << "  Denominator (track_dir · normal): " << denominator << std::endl;
+    std::cout << "  Intersection parameter t: " << t_intersect << std::endl;
+    std::cout << "  Has forward intersection: " << (hasIntersection ? "Yes" : "No") << std::endl;
     
-    double t = (surfNormal.dot(surfOrigin) - surfNormal.dot(dd4hep::rec::Vector3D(trackPos.x(), trackPos.y(), trackPos.z()))) / 
-              surfNormal.dot(dd4hep::rec::Vector3D(dir.x(), dir.y(), dir.z()));
+    // Step 5: Calculate residual between track prediction and hit
+    // -------------------------------------------------------------
+    double chi2 = 0.0;
     
-    std::cout << "Distance to intersection: " << t << std::endl;
-    
-    // Check if the intersection is valid
-    if (t <= 0) {
-        std::cout << "WARNING: No forward intersection, calculating chi2 using projection matrix" << std::endl;
+    if (hasIntersection) {
+        // Calculate intersection point
+        dd4hep::rec::Vector3D intersectionPoint = trackPosDD + t_intersect * trackDirDD;
         
-        // Use projection matrix method as fallback
-        Eigen::Matrix<double, 2, 5> H = projectionMatrix(surface);
+        // Convert to local coordinates on surface
+        dd4hep::rec::Vector2D predictedLocalPos = surface->globalToLocal(intersectionPoint);
+        
+        // Get hit position in local coordinates
+        dd4hep::rec::Vector2D hitLocalPos = surface->globalToLocal(hitPosGlobal);
+        
+        std::cout << "Intersection point (global, cm): (" 
+                  << intersectionPoint.x() << ", " << intersectionPoint.y() << ", " << intersectionPoint.z() << ")" << std::endl;
+        std::cout << "Predicted position (local, cm): (" 
+                  << predictedLocalPos.u() << ", " << predictedLocalPos.v() << ")" << std::endl;
+        std::cout << "Hit position (local, cm): (" 
+                  << hitLocalPos.u() << ", " << hitLocalPos.v() << ")" << std::endl;
+        
+        // Calculate 2D residual (difference between hit and prediction)
+        Eigen::Vector2d residual;
+        residual << hitLocalPos.u() - predictedLocalPos.u(), 
+                    hitLocalPos.v() - predictedLocalPos.v();
+                    
+        std::cout << "Residual (local, cm): (" << residual(0) << ", " << residual(1) << ")" << std::endl;
+        
+        // Step 6: Transform hit covariance from global 3D to local 2D
+        // -------------------------------------------------------------
+        // Create transformation matrix from global 3D to local 2D
+        Eigen::Matrix<double, 2, 3> globalToLocal;
+        globalToLocal << uAxis.x(), uAxis.y(), uAxis.z(),
+                         vAxis.x(), vAxis.y(), vAxis.z();
+                         
+        // Transform hit covariance to local frame
+        Eigen::Matrix2d hitCovLocal = globalToLocal * hitCovGlobal * globalToLocal.transpose();
+        
+        // Ensure minimum uncertainty in measurement
+        const double minUncertainty = 1e-4; // 10 microns squared in cm²
+        hitCovLocal(0, 0) = std::max(hitCovLocal(0, 0), minUncertainty);
+        hitCovLocal(1, 1) = std::max(hitCovLocal(1, 1), minUncertainty);
+        
+        std::cout << "Hit covariance (local, cm²):" << std::endl;
+        std::cout << "  [" << hitCovLocal(0,0) << ", " << hitCovLocal(0,1) << "]" << std::endl;
+        std::cout << "  [" << hitCovLocal(1,0) << ", " << hitCovLocal(1,1) << "]" << std::endl;
+        
+        // Step 7: Calculate track prediction uncertainty
+        // -------------------------------------------------------------
+        // Extract track parameters' covariance matrix
+        Eigen::Matrix5d trackCov = _cov;
+        
+        // Create projection matrix from track parameters to local measurement
+        // This maps changes in track parameters to changes in predicted position
+        Eigen::Matrix<double, 2, 5> H = Eigen::Matrix<double, 2, 5>::Zero();
+        
+        // Calculate numerical derivatives
+        const double delta = 1e-6; // Small perturbation for numerical derivatives
+        
+        // For each track parameter, calculate how it affects the local position prediction
+        for (int i = 0; i < 5; i++) {
+            // Create perturbed parameters
+            Eigen::Vector5d perturbedParams = _params;
+            perturbedParams(i) += delta;
+            
+            // Recalculate position and direction with perturbed parameters
+            double pertPhi = (i == 1) ? perturbedParams(1) : phi;
+            double pertEta = (i == 2) ? perturbedParams(2) : eta;
+            double pertD0 = (i == 3) ? perturbedParams(3) : d0; // mm to cm
+            double pertZ0 = (i == 4) ? perturbedParams(4) : z0; // mm to cm
+            
+            // Calculate perturbed theta
+            double pertTheta = 2.0 * std::atan(std::exp(-pertEta));
+            
+            // Calculate perturbed position
+            Eigen::Vector3d pertPos;
+            pertPos << -pertD0 * std::sin(pertPhi), pertD0 * std::cos(pertPhi), pertZ0;
+            
+            // Calculate perturbed direction
+            Eigen::Vector3d pertDir;
+            pertDir << std::cos(pertPhi) * std::sin(pertTheta),
+                      std::sin(pertPhi) * std::sin(pertTheta),
+                      std::cos(pertTheta);
+            pertDir.normalize();
+            
+            // Calculate perturbed intersection
+            dd4hep::rec::Vector3D pertPosDD(pertPos.x(), pertPos.y(), pertPos.z());
+            dd4hep::rec::Vector3D pertDirDD(pertDir.x(), pertDir.y(), pertDir.z());
+            
+            double pertDenom = surfaceNormal.dot(pertDirDD);
+            if (std::abs(pertDenom) > 1e-6) {
+                double pertT = surfaceNormal.dot(surfaceOrigin - pertPosDD) / pertDenom;
+                if (pertT > 0) {
+                    dd4hep::rec::Vector3D pertIntersect = pertPosDD + pertT * pertDirDD;
+                    dd4hep::rec::Vector2D pertLocal = surface->globalToLocal(pertIntersect);
+                    
+                    // Calculate numerical derivative
+                    H(0, i) = (pertLocal.u() - predictedLocalPos.u()) / delta;
+                    H(1, i) = (pertLocal.v() - predictedLocalPos.v()) / delta;
+                }
+            }
+        }
+        
         std::cout << "Projection matrix H:" << std::endl;
         std::cout << "  [" << H(0,0) << ", " << H(0,1) << ", " << H(0,2) << ", " << H(0,3) << ", " << H(0,4) << "]" << std::endl;
         std::cout << "  [" << H(1,0) << ", " << H(1,1) << ", " << H(1,2) << ", " << H(1,3) << ", " << H(1,4) << "]" << std::endl;
         
-        // Predicted measurement
-        Eigen::Vector2d predictedMeas = H * _params;
-        std::cout << "Predicted measurement: (" << predictedMeas(0) << ", " << predictedMeas(1) << ")" << std::endl;
+        // Calculate predicted position covariance
+        Eigen::Matrix2d trackCovLocal = H * trackCov * H.transpose();
         
-        // Innovation (residual)
-        Eigen::Vector2d residual = meas - predictedMeas;
-        std::cout << "Residual (measurement - prediction): (" << residual(0) << ", " << residual(1) << ")" << std::endl;
+        // Ensure minimum track prediction uncertainty
+        const double minTrackUncertainty = 1e-4; // 10 microns squared in cm²
+        trackCovLocal(0, 0) = std::max(trackCovLocal(0, 0), minTrackUncertainty);
+        trackCovLocal(1, 1) = std::max(trackCovLocal(1, 1), minTrackUncertainty);
         
-        // Innovation covariance
-        Eigen::Matrix2d S = H * _cov * H.transpose() + measCov;
-        std::cout << "Innovation covariance matrix S:" << std::endl;
-        std::cout << "  [" << S(0,0) << ", " << S(0,1) << "]" << std::endl;
-        std::cout << "  [" << S(1,0) << ", " << S(1,1) << "]" << std::endl;
+        std::cout << "Track prediction covariance (local, cm²):" << std::endl;
+        std::cout << "  [" << trackCovLocal(0,0) << ", " << trackCovLocal(0,1) << "]" << std::endl;
+        std::cout << "  [" << trackCovLocal(1,0) << ", " << trackCovLocal(1,1) << "]" << std::endl;
         
-        // Check if S is invertible
-        Eigen::FullPivLU<Eigen::Matrix2d> lu_decomp(S);
-        if (!lu_decomp.isInvertible()) {
-            std::cout << "WARNING: Innovation covariance is not invertible!" << std::endl;
-            // Add a small diagonal term to make it invertible
-            S(0, 0) += 0.1;
-            S(1, 1) += 0.1;
+        // Step 8: Calculate chi-square value
+        // -------------------------------------------------------------
+        // Combined covariance = hit covariance + track prediction covariance
+        Eigen::Matrix2d totalCov = hitCovLocal + trackCovLocal;
+        
+        std::cout << "Total covariance (local, cm²):" << std::endl;
+        std::cout << "  [" << totalCov(0,0) << ", " << totalCov(0,1) << "]" << std::endl;
+        std::cout << "  [" << totalCov(1,0) << ", " << totalCov(1,1) << "]" << std::endl;
+        
+        // Ensure matrix is invertible by checking determinant
+        double det = totalCov(0,0) * totalCov(1,1) - totalCov(0,1) * totalCov(1,0);
+        
+        if (std::abs(det) < 1e-10) {
+            std::cout << "WARNING: Covariance matrix is singular (det=" << det << "), adding regularization" << std::endl;
+            // Add regularization to make matrix invertible
+            totalCov(0,0) += 0.01;
+            totalCov(1,1) += 0.01;
+            det = totalCov(0,0) * totalCov(1,1) - totalCov(0,1) * totalCov(1,0);
         }
         
-        // Chi-square contribution
-        double chi2 = residual.transpose() * S.inverse() * residual;
-        std::cout << "Chi-square value: " << chi2 << std::endl;
+        // Calculate inverse
+        Eigen::Matrix2d totalCovInv;
+        totalCovInv(0,0) = totalCov(1,1) / det;
+        totalCovInv(0,1) = -totalCov(0,1) / det;
+        totalCovInv(1,0) = -totalCov(1,0) / det;
+        totalCovInv(1,1) = totalCov(0,0) / det;
         
-        std::cout << "==== End Chi2 Calculation Debug ====" << std::endl;
-        return chi2;
-    }
-    
-    // Calculate intersection point
-    Eigen::Vector3d intersectPos = trackPos + t * dir;
-    std::cout << "Intersection point: (" << intersectPos(0) << ", " << intersectPos(1) << ", " << intersectPos(2) << ")" << std::endl;
-    
-    // Convert to local coordinates
-    dd4hep::rec::Vector3D globalPos(intersectPos.x(), intersectPos.y(), intersectPos.z());
-    dd4hep::rec::Vector2D predLocalPos = surface->globalToLocal(globalPos);
-    
-    // Create predicted measurement vector
-    Eigen::Vector2d predictedMeas(predLocalPos.u() / dd4hep::mm, predLocalPos.v() / dd4hep::mm);
-    std::cout << "Predicted measurement: (" << predictedMeas(0) << ", " << predictedMeas(1) << ")" << std::endl;
-    
-    // Calculate residual
-    Eigen::Vector2d residual = meas - predictedMeas;
-    std::cout << "Residual (measurement - prediction): (" << residual(0) << ", " << residual(1) << ")" << std::endl;
-    
-    // Calculate the innovation covariance
-    // Still use the projection matrix to relate parameter uncertainties to measurement uncertainties
-    Eigen::Matrix<double, 2, 5> H = projectionMatrix(surface);
-    Eigen::Matrix2d paramCov = H * _cov * H.transpose();
-    
-    std::cout << "Parameter covariance matrix:" << std::endl;
-    std::cout << "  [" << paramCov(0,0) << ", " << paramCov(0,1) << "]" << std::endl;
-    std::cout << "  [" << paramCov(1,0) << ", " << paramCov(1,1) << "]" << std::endl;
-    
-    // Add a minimum uncertainty from track prediction
-    if (paramCov(0, 0) < 1e-6 || paramCov(1, 1) < 1e-6) {
-        std::cout << "WARNING: Parameter covariance is too small, adding minimum value" << std::endl;
-        const double minTrackUncertainty = 1.0; // 1mm uncertainty in track prediction
-        paramCov(0, 0) = std::max(paramCov(0, 0), minTrackUncertainty);
-        paramCov(1, 1) = std::max(paramCov(1, 1), minTrackUncertainty);
+        // Calculate chi-square value
+        chi2 = residual.dot(totalCovInv * residual);
         
-        std::cout << "Updated parameter covariance:" << std::endl;
-        std::cout << "  [" << paramCov(0,0) << ", " << paramCov(0,1) << "]" << std::endl;
-        std::cout << "  [" << paramCov(1,0) << ", " << paramCov(1,1) << "]" << std::endl;
+        // Show detailed calculation
+        double term1 = residual(0) * totalCovInv(0,0) * residual(0);
+        double term2 = residual(0) * totalCovInv(0,1) * residual(1);
+        double term3 = residual(1) * totalCovInv(1,0) * residual(0);
+        double term4 = residual(1) * totalCovInv(1,1) * residual(1);
+        
+        std::cout << "Chi² calculation details:" << std::endl;
+        std::cout << "  Term 1 (r₁·C⁻¹₁₁·r₁): " << term1 << std::endl;
+        std::cout << "  Term 2 (r₁·C⁻¹₁₂·r₂): " << term2 << std::endl;
+        std::cout << "  Term 3 (r₂·C⁻¹₂₁·r₁): " << term3 << std::endl;
+        std::cout << "  Term 4 (r₂·C⁻¹₂₂·r₂): " << term4 << std::endl;
+        std::cout << "  Sum (χ²): " << term1 + term2 + term3 + term4 << std::endl;
+        
+    } else {
+        // No intersection - use a simpler approach based on closest approach
+        // -------------------------------------------------------------
+        
+        std::cout << "WARNING: No intersection with surface, using closest approach method" << std::endl;
+        
+        // Convert hit position to Eigen vector
+        Eigen::Vector3d hitPos(hitPosGlobal.x(), hitPosGlobal.y(), hitPosGlobal.z());
+        
+        // Calculate vector from track position to hit
+        Eigen::Vector3d displacement = hitPos - trackPosAtOrigin;
+        
+        // Project displacement onto track direction to find closest point
+        double projection = displacement.dot(trackDir);
+        Eigen::Vector3d closestPointOnTrack = trackPosAtOrigin + projection * trackDir;
+        
+        // Calculate perpendicular distance
+        Eigen::Vector3d perpendicularVector = hitPos - closestPointOnTrack;
+        double distance = perpendicularVector.norm();
+        
+        std::cout << "Closest point on track (cm): (" 
+                  << closestPointOnTrack.x() << ", " << closestPointOnTrack.y() << ", " << closestPointOnTrack.z() << ")" << std::endl;
+        std::cout << "Perpendicular distance (cm): " << distance << std::endl;
+        
+        // Use hit resolution to calculate chi-square
+        // Use the diagonal elements of the hit covariance matrix
+        double avgResolution = (std::sqrt(hitCovGlobal(0,0)) + 
+                               std::sqrt(hitCovGlobal(1,1)) + 
+                               std::sqrt(hitCovGlobal(2,2))) / 3.0;
+        
+        // Use a more conservative resolution if the provided one is too small
+        double effectiveResolution = std::max(avgResolution, 0.01); // At least 100 microns
+        
+        // Chi-square is squared distance divided by squared resolution
+        chi2 = (distance * distance) / (effectiveResolution * effectiveResolution);
+        
+        std::cout << "Average hit resolution (cm): " << avgResolution << std::endl;
+        std::cout << "Effective resolution used (cm): " << effectiveResolution << std::endl;
     }
     
-    // Innovation covariance
-    Eigen::Matrix2d S = paramCov + measCov;
-    std::cout << "Innovation covariance matrix S:" << std::endl;
-    std::cout << "  [" << S(0,0) << ", " << S(0,1) << "]" << std::endl;
-    std::cout << "  [" << S(1,0) << ", " << S(1,1) << "]" << std::endl;
-    
-    // Ensure matrix is positive definite
-    Eigen::FullPivLU<Eigen::Matrix2d> lu_decomp(S);
-    if (!lu_decomp.isInvertible()) {
-        std::cout << "WARNING: Innovation covariance is not invertible!" << std::endl;
-        // Add a small diagonal term to make it invertible
-        S(0, 0) += 0.1;
-        S(1, 1) += 0.1;
+    // Limit chi-square to a reasonable maximum value to prevent overflow
+    const double maxChi2 = 1000.0;
+    if (chi2 > maxChi2) {
+        std::cout << "WARNING: Chi² value " << chi2 << " exceeds maximum, capping at " << maxChi2 << std::endl;
+        chi2 = maxChi2;
     }
     
-    // Chi-square contribution
-    double chi2 = residual.transpose() * S.inverse() * residual;
-    
-    // Calculate individual terms to see where the large values come from
-    // We can decompose chi2 = r^T * S^-1 * r into components
-    Eigen::Matrix2d Sinv = S.inverse();
-    std::cout << "S inverse:" << std::endl;
-    std::cout << "  [" << Sinv(0,0) << ", " << Sinv(0,1) << "]" << std::endl;
-    std::cout << "  [" << Sinv(1,0) << ", " << Sinv(1,1) << "]" << std::endl;
-    
-    double term1 = residual(0) * Sinv(0,0) * residual(0);
-    double term2 = residual(0) * Sinv(0,1) * residual(1);
-    double term3 = residual(1) * Sinv(1,0) * residual(0);
-    double term4 = residual(1) * Sinv(1,1) * residual(1);
-    
-    std::cout << "Chi2 components:" << std::endl;
-    std::cout << "  Term 1 (residual[0] * Sinv[0,0] * residual[0]): " << term1 << std::endl;
-    std::cout << "  Term 2 (residual[0] * Sinv[0,1] * residual[1]): " << term2 << std::endl;
-    std::cout << "  Term 3 (residual[1] * Sinv[1,0] * residual[0]): " << term3 << std::endl;
-    std::cout << "  Term 4 (residual[1] * Sinv[1,1] * residual[1]): " << term4 << std::endl;
-    std::cout << "  Sum: " << term1 + term2 + term3 + term4 << " (should equal chi2)" << std::endl;
-    
-    std::cout << "Chi-square value: " << chi2 << std::endl;
-    
-    std::cout << "==== End Chi2 Calculation Debug ====" << std::endl;
+    std::cout << "Final Chi² value: " << chi2 << std::endl;
+    std::cout << "==== Enhanced Chi2 Calculation End ====\n" << std::endl;
     
     return chi2;
 }
@@ -796,7 +839,7 @@ void Track::addHit(const edm4hep::TrackerHitPlane& hit,
     _states.push_back(state);
     
     // Update chi-square
-    _chi2 += state.getChi2Increment(hit, surface);
+    //_chi2 += state.getChi2Increment(hit, surface);
 }
 
 Eigen::Vector3d Track::momentumAt(const dd4hep::Position& point) const {
@@ -1598,9 +1641,9 @@ bool KalmanTracking::createTripletSeed(
     Eigen::Vector3d p3(pos3[0] / 10.0, pos3[1] / 10.0, pos3[2] / 10.0);
     
     // Check if hits are spatially compatible
-    double maxDist = 150.0; // cm
+    double maxDist = 100.0; // cm
     if ((p2 - p1).norm() > maxDist || (p3 - p2).norm() > maxDist) {
-        debug() << "Hits too far apart spatially" << endmsg;
+        debug() << "Hits too far apart spatially, more than 1 m." << endmsg;
         return false;
     }
     
@@ -1735,13 +1778,26 @@ bool KalmanTracking::createTripletSeed(
     
     debug() << "Track angles: theta=" << theta << ", eta=" << eta << endmsg;
     
+    // Calculate impact parameters using two-segment model
+    // Determine inner and outer fields
+    double innerFieldStrength = 2.0;   // 2T inside solenoid
+    double outerFieldStrength = -1.7;  // -1.7T outside solenoid
+
+    // Use the two-segment model for d0 calculation
+    double d0 = calculateImpactParameter(x0, y0, radius, clockwise, 
+                                   innerFieldStrength, outerFieldStrength,
+                                   p1, p2, p3);
+    double z0 = b; // z0 calculation remains the same
+    
+    debug() << "Impact parameters: d0=" << d0 << " cm, z0=" << z0 << " cm" << endmsg;
+    /*
     // Calculate impact parameters
     double d0 = std::sqrt(std::pow(x0, 2) + std::pow(y0, 2)) - radius;
     d0 = d0 * (clockwise ? 1 : -1);
     double z0 = b;
     
     debug() << "Impact parameters: d0=" << d0 << " cm, z0=" << z0 << " cm" << endmsg;
-    
+    */    
     // Track parameters
     double qOverPt = charge / pT;
     double phi = std::atan2(y0, x0) + (clockwise ? -M_PI/2 : M_PI/2);
@@ -1756,6 +1812,10 @@ bool KalmanTracking::createTripletSeed(
     debug() << "Track parameters: (" 
             << qOverPt << ", " << phi << ", " << eta << ", " << d0 << ", " << z0 << ")" << endmsg;
     
+    std::cout << "Debug d0: centerToOrigin=" << std::sqrt(std::pow(x0, 2) + std::pow(y0, 2)) 
+          << "cm, radius=" << radius << "cm, raw d0=" 
+          << (std::sqrt(std::pow(x0, 2) + std::pow(y0, 2)) - radius) << "cm" << std::endl;
+
     // Create covariance matrix
     Eigen::Matrix5d cov = Eigen::Matrix5d::Zero();
     cov(0,0) = 0.1 * qOverPt * qOverPt;
@@ -1830,6 +1890,264 @@ bool KalmanTracking::fitCircle(double x1, double y1, double x2, double y2, doubl
     radius = std::sqrt((x1 - x0)*(x1 - x0) + (y1 - y0)*(y1 - y0));
     
     return true;
+}
+
+// This calculates d0 using a two-segment track model for field transitions
+double KalmanTracking::calculateImpactParameter(
+    double x0, double y0, double radius, bool clockwise,
+    double innerFieldStrength, double outerFieldStrength,
+    const Eigen::Vector3d& p1, const Eigen::Vector3d& p2, const Eigen::Vector3d& p3) {
+    
+    // Constants
+    const double solenoidRadius = 200.0; // cm - radius of the solenoid
+    double centerToOriginDistance = std::sqrt(x0*x0 + y0*y0);
+    
+    debug() << "---- Analytical Impact Parameter Calculation ----" << endmsg;
+    debug() << "Outer circle center: (" << x0 << ", " << y0 << ") cm" << endmsg;
+    debug() << "Outer circle radius: " << radius << " cm" << endmsg;
+    debug() << "Track curvature direction: " << (clockwise ? "clockwise" : "counter-clockwise") << endmsg;
+    debug() << "Center to origin distance: " << centerToOriginDistance << " cm" << endmsg;
+    
+    // Check if the particle would cross the solenoid boundary
+    bool intersectsSolenoid = false;
+    double intersectionX1 = 0, intersectionY1 = 0;
+    double intersectionX2 = 0, intersectionY2 = 0;
+    int numIntersections = 0;
+    
+    // Case 1: The circle intersects with the solenoid boundary
+    if (std::abs(centerToOriginDistance - solenoidRadius) < radius && 
+        radius < centerToOriginDistance + solenoidRadius) {
+        // Circle intersects with solenoid boundary
+        intersectsSolenoid = true;
+        
+        // Calculate the circle-circle intersection points
+        double centerAngle = std::atan2(y0, x0);
+        double distanceToChord = (centerToOriginDistance*centerToOriginDistance + 
+                                 solenoidRadius*solenoidRadius - radius*radius) / 
+                                 (2.0 * centerToOriginDistance);
+        double halfChordLength = std::sqrt(solenoidRadius*solenoidRadius - distanceToChord*distanceToChord);
+        
+        // Calculate the position of the center of the chord
+        double chordCenterX = distanceToChord * std::cos(centerAngle);
+        double chordCenterY = distanceToChord * std::sin(centerAngle);
+        
+        // Calculate the angle perpendicular to the center angle
+        double perpAngle = centerAngle + M_PI/2.0;
+        
+        // Calculate the two intersection points
+        intersectionX1 = chordCenterX + halfChordLength * std::cos(perpAngle);
+        intersectionY1 = chordCenterY + halfChordLength * std::sin(perpAngle);
+        intersectionX2 = chordCenterX - halfChordLength * std::cos(perpAngle);
+        intersectionY2 = chordCenterY - halfChordLength * std::sin(perpAngle);
+        
+        numIntersections = 2;
+        
+        debug() << "Track circle intersects with solenoid boundary" << endmsg;
+        debug() << "Intersection point 1: (" << intersectionX1 << ", " << intersectionY1 << ") cm" << endmsg;
+        debug() << "Intersection point 2: (" << intersectionX2 << ", " << intersectionY2 << ") cm" << endmsg;
+    } 
+    // Case 2: The circle is completely inside the solenoid
+    else if (centerToOriginDistance + radius < solenoidRadius) {
+        debug() << "Track circle is completely inside the solenoid - using inner circle directly" << endmsg;
+        intersectsSolenoid = false;
+        
+        // For particles inside the solenoid, calculate the actual impact parameter
+        // Impact parameter is the closest distance from the origin to the circle
+        double d0 = std::abs(centerToOriginDistance - radius);
+        
+        // Apply sign convention based on curvature
+        if (!clockwise) {
+            d0 = -d0;
+        }
+        
+        debug() << "Particle is fully inside the solenoid" << endmsg;
+        debug() << "Distance from center to origin: " << centerToOriginDistance << " cm" << endmsg;
+        debug() << "Track radius: " << radius << " cm" << endmsg;
+        debug() << "Calculated d0 = " << d0 << " cm" << endmsg;
+        debug() << "---- End Analytical Impact Parameter Calculation ----" << endmsg;
+        
+        return d0;
+    }
+    // Case 3: The circle is completely outside the solenoid
+    else {
+        debug() << "Track circle is completely outside the solenoid - checking if it crosses" << endmsg;
+        
+        // Calculate the closest approach of the circle to the origin
+        double closestApproach = std::abs(centerToOriginDistance - radius);
+        
+        if (closestApproach < solenoidRadius) {
+            // Track would pass through the solenoid when extrapolated
+            debug() << "Extrapolated track would pass through the solenoid" << endmsg;
+            
+            // Calculate the intersection point with the solenoid
+            double approachAngle = std::atan2(y0, x0);
+            if (centerToOriginDistance < radius) {
+                // If the origin is inside the circle, flip the approach angle
+                approachAngle += M_PI;
+            }
+            
+            // Vector from origin towards closest approach point
+            intersectionX1 = solenoidRadius * std::cos(approachAngle);
+            intersectionY1 = solenoidRadius * std::sin(approachAngle);
+            numIntersections = 1;
+            
+            intersectsSolenoid = true;
+            debug() << "Assuming intersection point: (" << intersectionX1 << ", " << intersectionY1 << ") cm" << endmsg;
+        } else {
+            // Track doesn't cross solenoid when extrapolated back
+            debug() << "Track does not cross solenoid when extrapolated" << endmsg;
+            debug() << "Closest approach to origin: " << closestApproach << " cm" << endmsg;
+            debug() << "This indicates a displaced vertex outside the solenoid" << endmsg;
+            
+            // For particles not crossing the solenoid, use the original d0 calculation
+            double d0 = centerToOriginDistance - radius;
+            if (!clockwise) {
+                d0 = -d0;  // Apply sign convention
+            }
+            
+            debug() << "Using outer circle only for impact parameter" << endmsg;
+            debug() << "Calculated d0 = " << d0 << " cm" << endmsg;
+            debug() << "---- End Analytical Impact Parameter Calculation ----" << endmsg;
+            
+            return d0;
+        }
+    }
+        
+     // If we're here, the track intersects the solenoid boundary
+    // We need to select the intersection point closest to the detector hits
+    double intersectionX, intersectionY;
+    if (numIntersections == 2) {
+        // Calculate the angles from circle center to first hit and from center to both intersections
+        double hitAngle = std::atan2(p1.y() - y0, p1.x() - x0);
+        double intersection1Angle = std::atan2(intersectionY1 - y0, intersectionX1 - x0);
+        double intersection2Angle = std::atan2(intersectionY2 - y0, intersectionX2 - x0);
+        
+        // Normalize angles to [0, 2π)
+        hitAngle = (hitAngle < 0) ? hitAngle + 2 * M_PI : hitAngle;
+        intersection1Angle = (intersection1Angle < 0) ? intersection1Angle + 2 * M_PI : intersection1Angle;
+        intersection2Angle = (intersection2Angle < 0) ? intersection2Angle + 2 * M_PI : intersection2Angle;
+        
+        // Calculate the angle differences in the direction of motion
+        double angleDiff1, angleDiff2;
+        if (clockwise) {
+            angleDiff1 = hitAngle - intersection1Angle;
+            angleDiff2 = hitAngle - intersection2Angle;
+        } else {
+            angleDiff1 = intersection1Angle - hitAngle;
+            angleDiff2 = intersection2Angle - hitAngle;
+        }
+        
+        // Normalize angle differences to [-π, π]
+        if (angleDiff1 > M_PI) angleDiff1 -= 2 * M_PI;
+        if (angleDiff1 < -M_PI) angleDiff1 += 2 * M_PI;
+        if (angleDiff2 > M_PI) angleDiff2 -= 2 * M_PI;
+        if (angleDiff2 < -M_PI) angleDiff2 += 2 * M_PI;
+        
+        // Calculate cross products for additional info
+        double cross1 = intersectionX1 * (y0 - intersectionY1) - intersectionY1 * (x0 - intersectionX1);
+        double cross2 = intersectionX2 * (y0 - intersectionY2) - intersectionY2 * (x0 - intersectionX2);
+        debug() << "Cross product 1: " << cross1 << ", Cross product 2: " << cross2 << endmsg;
+        
+        // The correct intersection should be in the opposite direction of motion from the hit
+        // and have a positive angle difference
+        if (angleDiff1 > 0 && (angleDiff2 < 0 || angleDiff1 < angleDiff2)) {
+            intersectionX = intersectionX1;
+            intersectionY = intersectionY1;
+            debug() << "Chose intersection 1 (based on particle direction, angle diff=" << angleDiff1 << ")" << endmsg;
+        } else {
+            intersectionX = intersectionX2;
+            intersectionY = intersectionY2;
+            debug() << "Chose intersection 2 (based on particle direction, angle diff=" << angleDiff2 << ")" << endmsg;
+        }
+    } else {
+        intersectionX = intersectionX1;
+        intersectionY = intersectionY1;
+    }
+    
+    // Calculate the velocity direction at the intersection point
+    // This is tangent to the outer circle at the intersection point
+    double velocityX, velocityY;
+    
+    // Vector from outer circle center to intersection point
+    double vecX = intersectionX - x0;
+    double vecY = intersectionY - y0;
+    double vecLength = std::sqrt(vecX*vecX + vecY*vecY);
+    vecX /= vecLength; // Normalize
+    vecY /= vecLength;
+    
+    // Velocity is perpendicular to radius vector
+    if (clockwise) {
+        velocityX = -vecY;
+        velocityY = vecX;
+    } else {
+        velocityX = vecY;
+        velocityY = -vecX;
+    }
+    
+    debug() << "Velocity direction at intersection: (" << velocityX << ", " << velocityY << ")" << endmsg;
+    
+    // Calculate inner circle radius based on field strength ratio
+    double innerRadius = radius * std::abs(outerFieldStrength / innerFieldStrength);
+    bool innerClockwise = !clockwise; // Curvature direction flips with field
+    
+    debug() << "Inner field: " << innerFieldStrength << " T, Outer field: " << outerFieldStrength << " T" << endmsg;
+    debug() << "Inner circle radius: " << innerRadius << " cm" << endmsg;
+    debug() << "Inner circle direction: " << (innerClockwise ? "clockwise" : "counter-clockwise") << endmsg;
+    
+    // Calculate the inner circle center 
+    // For a particle originating from the origin, the inner circle MUST pass through (0,0)
+    
+    // Calculate distance from origin to intersection point
+    double distanceToIntersection = std::sqrt(intersectionX*intersectionX + intersectionY*intersectionY);
+    
+    // Calculate the midpoint between origin and intersection
+    double midPointX = intersectionX / 2.0;
+    double midPointY = intersectionY / 2.0;
+    
+    // Calculate unit vector from origin to intersection
+    double unitVecX = intersectionX / distanceToIntersection;
+    double unitVecY = intersectionY / distanceToIntersection;
+    
+    // Perpendicular vector (rotate 90 degrees)
+    double perpVecX = -unitVecY;
+    double perpVecY = unitVecX;
+    
+    // Calculate distance from midpoint to center along perpendicular direction
+    // Using the formula for a circle passing through two points: h = √(r² - (d/2)²)
+    // where h is the height of the center from the midpoint, r is the radius,
+    // and d is the distance between the two points (origin and intersection)
+    double h = std::sqrt(innerRadius*innerRadius - (distanceToIntersection/2.0)*(distanceToIntersection/2.0));
+    
+    // Adjust sign based on expected curvature direction
+    if (innerClockwise) {
+        h = -h;  // Flip direction for clockwise
+    }
+    
+    // Calculate inner circle center
+    double innerX0 = midPointX + h * perpVecX;
+    double innerY0 = midPointY + h * perpVecY;
+    
+    debug() << "Inner circle center: (" << innerX0 << ", " << innerY0 << ") cm" << endmsg;
+    
+    // Verify distance from inner circle center to origin
+    double innerCenterToOriginDistance = std::sqrt(innerX0*innerX0 + innerY0*innerY0);
+    debug() << "Distance from inner circle to origin: " << 
+        std::abs(innerCenterToOriginDistance - innerRadius) << " cm" << endmsg;
+    debug() << "Inner circle to origin distance: " << innerCenterToOriginDistance << " cm" << endmsg;
+    debug() << "Inner circle radius: " << innerRadius << " cm" << endmsg;
+    
+    // Calculate the impact parameter (closest approach to origin)
+    double d0 = std::abs(innerCenterToOriginDistance - innerRadius);
+    
+    // Apply sign convention based on curvature
+    if (!innerClockwise) {
+        d0 = -d0;
+    }
+    
+    debug() << "Final calculated d0 = " << d0 << " cm" << endmsg;
+    debug() << "---- End Analytical Impact Parameter Calculation ----" << endmsg;
+    
+    return d0;
 }
 
 void KalmanTracking::fitLine(double x1, double y1, double x2, double y2, double x3, double y3,
