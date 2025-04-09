@@ -2013,7 +2013,7 @@ double KalmanTracking::calculateImpactParameter(
         }
     }
         
-     // If we're here, the track intersects the solenoid boundary
+    // If we're here, the track intersects the solenoid boundary
     // We need to select the intersection point closest to the detector hits
     double intersectionX, intersectionY;
     if (numIntersections == 2) {
@@ -2055,36 +2055,36 @@ double KalmanTracking::calculateImpactParameter(
             intersectionY = intersectionY1;
             debug() << "Chose intersection 1 (based on particle direction, angle diff=" << angleDiff1 << ")" << endmsg;
         } else {
-            intersectionX = intersectionX2;
-            intersectionY = intersectionY2;
-            debug() << "Chose intersection 2 (based on particle direction, angle diff=" << angleDiff2 << ")" << endmsg;
+            intersectionX = intersectionX1;
+            intersectionY = intersectionY1;
+            debug() << "Chose intersection 1 (based on particle direction, angle diff=" << angleDiff2 << ")" << endmsg;
         }
     } else {
         intersectionX = intersectionX1;
         intersectionY = intersectionY1;
     }
     
-    // Calculate the velocity direction at the intersection point
-    // This is tangent to the outer circle at the intersection point
-    double velocityX, velocityY;
+    // Calculate the tangent direction precisely at the intersection point
+    // This is perpendicular to the radius vector from outer circle center
+    double outerRadiusX = intersectionX - x0;
+    double outerRadiusY = intersectionY - y0;
+    double outerRadiusLength = std::sqrt(outerRadiusX*outerRadiusX + outerRadiusY*outerRadiusY);
+    outerRadiusX /= outerRadiusLength; // Normalize
+    outerRadiusY /= outerRadiusLength;
     
-    // Vector from outer circle center to intersection point
-    double vecX = intersectionX - x0;
-    double vecY = intersectionY - y0;
-    double vecLength = std::sqrt(vecX*vecX + vecY*vecY);
-    vecX /= vecLength; // Normalize
-    vecY /= vecLength;
-    
-    // Velocity is perpendicular to radius vector
+    // Calculate tangent vector (perpendicular to radius)
+    double tangentX, tangentY;
     if (clockwise) {
-        velocityX = -vecY;
-        velocityY = vecX;
+        tangentX = -outerRadiusY;
+        tangentY = outerRadiusX;
     } else {
-        velocityX = vecY;
-        velocityY = -vecX;
+        tangentX = outerRadiusY;
+        tangentY = -outerRadiusX;
     }
     
-    debug() << "Velocity direction at intersection: (" << velocityX << ", " << velocityY << ")" << endmsg;
+    // Verify tangent is perpendicular to outer radius vector
+    double outerDotProduct = tangentX * outerRadiusX + tangentY * outerRadiusY;
+    debug() << "Outer radius-tangent dot product (should be ~0): " << outerDotProduct << endmsg;
     
     // Calculate inner circle radius based on field strength ratio
     double innerRadius = radius * std::abs(outerFieldStrength / innerFieldStrength);
@@ -2094,50 +2094,56 @@ double KalmanTracking::calculateImpactParameter(
     debug() << "Inner circle radius: " << innerRadius << " cm" << endmsg;
     debug() << "Inner circle direction: " << (innerClockwise ? "clockwise" : "counter-clockwise") << endmsg;
     
-    // Calculate the inner circle center 
-    // For a particle originating from the origin, the inner circle MUST pass through (0,0)
+    // Calculate the inner circle center
+    // For fields of opposite signs, the center must be on the other side
+    double innerX0, innerY0;
+    bool oppositeSigns = (innerFieldStrength * outerFieldStrength < 0);
     
-    // Calculate distance from origin to intersection point
-    double distanceToIntersection = std::sqrt(intersectionX*intersectionX + intersectionY*intersectionY);
-    
-    // Calculate the midpoint between origin and intersection
-    double midPointX = intersectionX / 2.0;
-    double midPointY = intersectionY / 2.0;
-    
-    // Calculate unit vector from origin to intersection
-    double unitVecX = intersectionX / distanceToIntersection;
-    double unitVecY = intersectionY / distanceToIntersection;
-    
-    // Perpendicular vector (rotate 90 degrees)
-    double perpVecX = -unitVecY;
-    double perpVecY = unitVecX;
-    
-    // Calculate distance from midpoint to center along perpendicular direction
-    // Using the formula for a circle passing through two points: h = √(r² - (d/2)²)
-    // where h is the height of the center from the midpoint, r is the radius,
-    // and d is the distance between the two points (origin and intersection)
-    double h = std::sqrt(innerRadius*innerRadius - (distanceToIntersection/2.0)*(distanceToIntersection/2.0));
-    
-    // Adjust sign based on expected curvature direction
-    if (innerClockwise) {
-        h = -h;  // Flip direction for clockwise
-    }
+    // Direction factor for inner circle calculation
+    double dirFactor = (innerClockwise) ? 1.0 : -1.0;
+    if (oppositeSigns) dirFactor = -dirFactor;
     
     // Calculate inner circle center
-    double innerX0 = midPointX + h * perpVecX;
-    double innerY0 = midPointY + h * perpVecY;
+    innerX0 = intersectionX + dirFactor * innerRadius * tangentY;
+    innerY0 = intersectionY - dirFactor * innerRadius * tangentX;
     
     debug() << "Inner circle center: (" << innerX0 << ", " << innerY0 << ") cm" << endmsg;
     
-    // Verify distance from inner circle center to origin
+    // Calculate and verify inner radius vector at intersection
+    double innerRadiusX = intersectionX - innerX0;
+    double innerRadiusY = intersectionY - innerY0;
+    double innerRadiusLength = std::sqrt(innerRadiusX*innerRadiusX + innerRadiusY*innerRadiusY);
+    innerRadiusX /= innerRadiusLength; // Normalize
+    innerRadiusY /= innerRadiusLength;
+    
+    // Verify the inner radius is perpendicular to the tangent
+    double innerDotProduct = tangentX * innerRadiusX + tangentY * innerRadiusY;
+    debug() << "Inner radius-tangent dot product (should be ~0): " << innerDotProduct << endmsg;
+    
+    // Verify the calculated radius matches the expected inner radius
+    debug() << "Calculated inner radius length: " << innerRadiusLength << " cm" << endmsg;
+    debug() << "Expected inner radius: " << innerRadius << " cm" << endmsg;
+    debug() << "Radius difference: " << std::abs(innerRadiusLength - innerRadius) << " cm" << endmsg;
+    
+    // Calculate distance from inner circle center to origin
     double innerCenterToOriginDistance = std::sqrt(innerX0*innerX0 + innerY0*innerY0);
-    debug() << "Distance from inner circle to origin: " << 
-        std::abs(innerCenterToOriginDistance - innerRadius) << " cm" << endmsg;
+    
+    // Calculate how close the inner circle comes to the origin
+    double distanceToOrigin = std::abs(innerCenterToOriginDistance - innerRadius);
+    debug() << "Distance from inner circle to origin: " << distanceToOrigin << " cm" << endmsg;
     debug() << "Inner circle to origin distance: " << innerCenterToOriginDistance << " cm" << endmsg;
     debug() << "Inner circle radius: " << innerRadius << " cm" << endmsg;
     
+    // Calculate the ratio between the distance to origin and the radius
+    // For a perfect track from the origin, this ratio should be exactly 1.0
+    double distanceRatio = innerCenterToOriginDistance / innerRadius;
+    debug() << "Distance ratio (should be close to 1.0): " << distanceRatio << endmsg;
+    
+    // Calculate precision metrics
+    debug() << "Precision error: " << std::abs(distanceRatio - 1.0) * 100.0 << "%" << endmsg;
+    
     // Calculate the impact parameter (closest approach to origin)
-    double d0 = std::abs(innerCenterToOriginDistance - innerRadius);
+    double d0 = distanceToOrigin;
     
     // Apply sign convention based on curvature
     if (!innerClockwise) {
