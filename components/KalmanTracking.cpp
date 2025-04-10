@@ -1641,7 +1641,7 @@ bool KalmanTracking::createTripletSeed(
     Eigen::Vector3d p3(pos3[0] / 10.0, pos3[1] / 10.0, pos3[2] / 10.0);
     
     // Check if hits are spatially compatible
-    double maxDist = 100.0; // cm
+    double maxDist = 100.0; // cm  //make it a GAUDI property
     if ((p2 - p1).norm() > maxDist || (p3 - p2).norm() > maxDist) {
         debug() << "Hits too far apart spatially, more than 1 m." << endmsg;
         return false;
@@ -2283,32 +2283,77 @@ void KalmanTracking::createTrack(edm4hep::TrackCollection* trackCollection, cons
     // Set track properties
     std_track.setChi2(track.chi2());
     std_track.setNdf(track.ndf());
+
+    // Check if track has states
+    if (track.states().empty()) {
+        debug() << "Track has no states! Cannot create EDM4hep track." << endmsg;
+        return;
+    }
     
+    // Get track parameters directly from Track class
+    const Eigen::Vector5d& params = track.parameters();  // Use the Track::parameters() method
+    
+    // Debug - print the parameters we're directly getting from Track
+    debug() << "Direct track parameters: (" 
+            << params(0) << ", " << params(1) << ", " << params(2) << ", " 
+            << params(3)/10.0 << " cm, " << params(4)/10.0 << " cm)" << endmsg;
+
     // Get final state
     const auto& finalState = track.states().back();
-    const auto& params = finalState.parameters();
+    //const auto& params = finalState.parameters();
+    //const auto& cov = finalState.covariance();
     
     // Create a new TrackState
     edm4hep::TrackState trackState;
     
+    // Debug output - show original parameters
+    debug() << "Internal track parameters (q/pT, phi, eta, d0, z0): (" 
+            << params(0) << ", " << params(1) << ", " << params(2) << ", " 
+            << params(3)/10.0 << " cm, " << params(4)/10.0 << " cm)" << endmsg;
+    
     // Convert our (q/pT, phi, eta, d0, z0) parameters to EDM4hep format
-    trackState.D0 = params(3);           // d0
-    trackState.phi = params(1);           // phi
-    trackState.omega = params(0);         // q/pT
-    trackState.Z0 = params(4);            // z0
+    trackState.D0 = params(3);  // d0 (already in mm)
+    trackState.phi = params(1); // phi (radians)
+    
+    // Convert q/pT to omega (1/R in 1/mm)
+    double bField = -1.7; // Tesla, use actual field at track position
+    double pT = std::abs(1.0 / params(0)); // GeV
+    double qSign = (params(0) > 0) ? 1.0 : -1.0;
+    double radius = pT / (0.3 * std::abs(bField)); // radius in meters
+    radius *= 1000; // convert to mm
+    trackState.omega = qSign / radius; // 1/mm with sign
+    
+    debug() << "Calculated track curvature: pT=" << pT << " GeV, R=" 
+            << radius << " mm, omega=" << trackState.omega << " 1/mm" << endmsg;
+    
+    trackState.Z0 = params(4);  // z0 (already in mm)
     trackState.tanLambda = std::sinh(params(2)); // Convert eta to tanLambda
     trackState.location = edm4hep::TrackState::AtIP;
     
-    // Set reference point
+    // Set reference point (ensure it's in mm)
     Eigen::Vector3d refPoint = finalState.positionAtOrigin();
-    
-    // Use setReferencePoint if available
     float refPointArray[3] = {
-        static_cast<float>(refPoint.x()),
+        static_cast<float>(refPoint.x()),  // should be mm 
         static_cast<float>(refPoint.y()),
         static_cast<float>(refPoint.z())
     };
     trackState.referencePoint = refPointArray;
+    
+    /* Convert covariance matrix (important!)
+    std::array<float, 15> covMatrix;
+    int idx = 0;
+    for (int i = 0; i < 5; ++i) {
+        for (int j = 0; j <= i; ++j) {
+            // Store covariance elements - may need unit conversion for some elements
+            covMatrix[idx++] = cov(i, j);
+        }
+    }
+    trackState.covMatrix = covMatrix;
+    */
+    // Debug - show EDM4hep parameters
+    debug() << "EDM4hep track state: D0=" << trackState.D0 << " mm, phi=" << trackState.phi
+            << ", omega=" << trackState.omega << " 1/mm, Z0=" << trackState.Z0
+            << " mm, tanLambda=" << trackState.tanLambda << endmsg;
     
     // Add track state to track
     std_track.addToTrackStates(trackState);
