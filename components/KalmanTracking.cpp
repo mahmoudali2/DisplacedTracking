@@ -2320,7 +2320,7 @@ void KalmanTracking::createTrack(edm4hep::TrackCollection* trackCollection, cons
     double pT = std::abs(1.0 / params(0)); // GeV
     double qSign = (params(0) > 0) ? 1.0 : -1.0;
     double radius = pT / (0.3 * std::abs(bField)); // radius in meters
-    radius *= 1000; // convert to mm
+    radius *= 1000.0; // convert to mm
     trackState.omega = qSign / radius; // 1/mm with sign
     
     debug() << "Calculated track curvature: pT=" << pT << " GeV, R=" 
