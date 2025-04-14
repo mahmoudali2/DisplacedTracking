@@ -561,8 +561,8 @@ double TrackState::getChi2Increment(const edm4hep::TrackerHitPlane& hit,
     double qOverPt = _params(0);
     double phi = _params(1);
     double eta = _params(2);
-    double d0 = _params(3); /// 10.0; // Convert from mm to cm
-    double z0 = _params(4); /// 10.0; // Convert from mm to cm
+    double d0 = _params(3) / 10.0; // Convert from mm to cm
+    double z0 = _params(4) / 10.0; // Convert from mm to cm
     
     // Convert eta to theta
     double theta = 2.0 * std::atan(std::exp(-eta));
@@ -1641,7 +1641,7 @@ bool KalmanTracking::createTripletSeed(
     Eigen::Vector3d p3(pos3[0] / 10.0, pos3[1] / 10.0, pos3[2] / 10.0);
     
     // Check if hits are spatially compatible
-    double maxDist = 100.0; // cm  //make it a GAUDI property
+    double maxDist = 150.0; // cm  //make it a GAUDI property
     if ((p2 - p1).norm() > maxDist || (p3 - p2).norm() > maxDist) {
         debug() << "Hits too far apart spatially, more than 1 m." << endmsg;
         return false;
