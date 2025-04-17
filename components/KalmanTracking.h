@@ -129,11 +129,20 @@ public:
                const dd4hep::rec::Surface* surface,
                const TrackState& state);
     
+    // Add a hit to the track with its index
+    void addHitWithIndex(const edm4hep::TrackerHitPlane& hit, 
+                        const dd4hep::rec::Surface* surface,
+                        const TrackState& state,
+                        size_t hitIndex);
+    
     // Get track states
     const std::vector<TrackState>& states() const { return _states; }
     
     // Get hits associated with this track
     const std::vector<edm4hep::TrackerHitPlane>& hits() const { return _hits; }
+    
+    // Get hit indices
+    const std::vector<size_t>& hitIndices() const { return _hitIndices; }
     
     // Get surfaces associated with the hits
     const std::vector<const dd4hep::rec::Surface*>& surfaces() const { return _surfaces; }
@@ -155,6 +164,7 @@ public:
 private:
     std::vector<TrackState> _states;   // Track states at each hit
     std::vector<edm4hep::TrackerHitPlane> _hits;  // Hits used in the track
+    std::vector<size_t> _hitIndices;   // Indices of hits in the original collection
     std::vector<const dd4hep::rec::Surface*> _surfaces; // Surfaces for each hit
     double _chi2;                      // Total chi-square
 };

@@ -838,8 +838,21 @@ void Track::addHit(const edm4hep::TrackerHitPlane& hit,
     _surfaces.push_back(surface);
     _states.push_back(state);
     
-    // Update chi-square
-    //_chi2 += state.getChi2Increment(hit, surface);
+    // Update chi-square if needed
+    // _chi2 += state.getChi2Increment(hit, surface);
+}
+
+void Track::addHitWithIndex(const edm4hep::TrackerHitPlane& hit, 
+                           const dd4hep::rec::Surface* surface,
+                           const TrackState& state,
+                           size_t hitIndex) {
+    _hits.push_back(hit);
+    _surfaces.push_back(surface);
+    _states.push_back(state);
+    _hitIndices.push_back(hitIndex);
+    
+    // Update chi-square if needed
+    // _chi2 += state.getChi2Increment(hit, surface);
 }
 
 Eigen::Vector3d Track::momentumAt(const dd4hep::Position& point) const {
@@ -1396,12 +1409,13 @@ std::vector<const dd4hep::rec::Surface*> KalmanTracking::findIntersectingSurface
 //------------------------------------------------------------------------------
 
 std::vector<Track> KalmanTracking::findTracks(const edm4hep::TrackerHitPlaneCollection* hits) {
-    std::vector<Track> tracks;
+    // Vector to hold all final tracks
+    std::vector<Track> finalTracks;
     
     // Check if we have enough hits for tracking
     if (hits->size() < 3) {
         info() << "Not enough hits for tracking. Need at least 3, found " << hits->size() << endmsg;
-        return tracks;
+        return finalTracks;
     }
     
     // Group hits by layer
@@ -1426,7 +1440,7 @@ std::vector<Track> KalmanTracking::findTracks(const edm4hep::TrackerHitPlaneColl
     if (hitsByLayer.size() < 3) {
         info() << "Not enough layers with hits for triplet seeding (need 3, found " 
                << hitsByLayer.size() << ")" << endmsg;
-        return tracks;
+        return finalTracks;
     }
     
     // Debug output - print hit distribution by layer
@@ -1437,8 +1451,20 @@ std::vector<Track> KalmanTracking::findTracks(const edm4hep::TrackerHitPlaneColl
         }
     }
     
-    // Vector to track which hits are used
-    std::vector<bool> usedHits(hits->size(), false);
+    // Structure to hold candidate tracks and their info
+    struct TrackCandidate {
+        // Constructor that takes a Track and pT value
+        TrackCandidate(const Track& t, double p) : track(t), pT(p) {}
+        
+        Track track;
+        double pT;
+    };
+    
+    // Vector to collect all potential track candidates
+    std::vector<TrackCandidate> candidates;
+    
+    // Vector to track which hits are used (we'll reset this for each candidate)
+    std::vector<bool> tempUsedHits(hits->size(), false);
     
     // For each possible triplet combination
     for (auto it1 = hitsByLayer.begin(); it1 != hitsByLayer.end(); ++it1) {
@@ -1461,22 +1487,32 @@ std::vector<Track> KalmanTracking::findTracks(const edm4hep::TrackerHitPlaneColl
                 
                 // Try all hit combinations
                 for (const auto& [idx1, hit1] : hitList1) {
-                    if (usedHits[idx1]) continue;
-                    
                     for (const auto& [idx2, hit2] : hitList2) {
-                        if (usedHits[idx2]) continue;
-                        
                         for (const auto& [idx3, hit3] : hitList3) {
-                            if (usedHits[idx3]) continue;
-                            
                             tripletCandidates++;
+                            
+                            // Reset the temporary used hits vector for each candidate
+                            std::fill(tempUsedHits.begin(), tempUsedHits.end(), false);
+                            
+                            // Create a vector to store created tracks
+                            std::vector<Track> tempTracks;
                             
                             // Create triplet seed
                             bool seedValid = createTripletSeed(
-                                hit1, hit2, hit3, tracks, usedHits, idx1, idx2, idx3);
+                                hit1, hit2, hit3, tempTracks, tempUsedHits, idx1, idx2, idx3);
                             
-                            if (seedValid) {
+                            if (seedValid && !tempTracks.empty()) {
                                 validTriplets++;
+                                
+                                // Get the newly created track
+                                Track& newTrack = tempTracks.back();
+                                
+                                // Calculate pT from track parameters
+                                double qOverPt = newTrack.parameters()(0);
+                                double pT = std::abs(1.0 / qOverPt);
+                                
+                                // Create track candidate with constructor
+                                candidates.emplace_back(newTrack, pT);
                             }
                         }
                     }
@@ -1488,8 +1524,43 @@ std::vector<Track> KalmanTracking::findTracks(const edm4hep::TrackerHitPlaneColl
         }
     }
     
-    info() << "Found " << tracks.size() << " tracks using triplet seeding" << endmsg;
-    return tracks;
+    // Sort candidates by descending pT (highest pT first)
+    std::sort(candidates.begin(), candidates.end(), 
+              [](const TrackCandidate& a, const TrackCandidate& b) {
+                  return a.pT > b.pT;
+              });
+    
+    info() << "Found " << candidates.size() << " track candidates" << endmsg;
+    
+    // Vector to track which hits are used in final tracks
+    std::vector<bool> usedHits(hits->size(), false);
+    
+    // Select tracks by prioritizing high-pT tracks and ensuring hits aren't reused
+    for (const auto& candidate : candidates) {
+        // Check if any of the hits in this candidate are already used
+        bool hasConflict = false;
+        for (size_t idx : candidate.track.hitIndices()) {
+            if (usedHits[idx]) {
+                hasConflict = true;
+                break;
+            }
+        }
+        
+        // If there's no conflict, add this track to our final set
+        if (!hasConflict) {
+            finalTracks.push_back(candidate.track);
+            
+            // Mark hits as used
+            for (size_t idx : candidate.track.hitIndices()) {
+                usedHits[idx] = true;
+            }
+            
+            debug() << "Selected track with pT = " << candidate.pT << " GeV/c" << endmsg;
+        }
+    }
+    
+    info() << "Selected " << finalTracks.size() << " tracks after hit conflict resolution" << endmsg;
+    return finalTracks;
 }
 
 // New function to calculate circle center and radius using the Direct Formula Method
@@ -1611,7 +1682,6 @@ bool KalmanTracking::calculateCircleCenterSagitta(
     return true;
 }
 
-// Modified createTripletSeed function to use both methods
 bool KalmanTracking::createTripletSeed(
     const edm4hep::TrackerHitPlane& hit1,
     const edm4hep::TrackerHitPlane& hit2,
@@ -1641,7 +1711,7 @@ bool KalmanTracking::createTripletSeed(
     Eigen::Vector3d p3(pos3[0] / 10.0, pos3[1] / 10.0, pos3[2] / 10.0);
     
     // Check if hits are spatially compatible
-    double maxDist = 150.0; // cm  //make it a GAUDI property
+    double maxDist = 100.0; // cm  //make it a GAUDI property
     if ((p2 - p1).norm() > maxDist || (p3 - p2).norm() > maxDist) {
         debug() << "Hits too far apart spatially, more than 1 m." << endmsg;
         return false;
@@ -1790,14 +1860,11 @@ bool KalmanTracking::createTripletSeed(
     double z0 = b; // z0 calculation remains the same
     
     debug() << "Impact parameters: d0=" << d0 << " cm, z0=" << z0 << " cm" << endmsg;
-    /*
-    // Calculate impact parameters
-    double d0 = std::sqrt(std::pow(x0, 2) + std::pow(y0, 2)) - radius;
-    d0 = d0 * (clockwise ? 1 : -1);
-    double z0 = b;
     
-    debug() << "Impact parameters: d0=" << d0 << " cm, z0=" << z0 << " cm" << endmsg;
-    */    
+    std::cout << "Debug d0: centerToOrigin=" << std::sqrt(std::pow(x0, 2) + std::pow(y0, 2)) 
+          << "cm, radius=" << radius << "cm, raw d0=" 
+          << (std::sqrt(std::pow(x0, 2) + std::pow(y0, 2)) - radius) << "cm" << std::endl;
+
     // Track parameters
     double qOverPt = charge / pT;
     double phi = std::atan2(y0, x0) + (clockwise ? -M_PI/2 : M_PI/2);
@@ -1812,10 +1879,6 @@ bool KalmanTracking::createTripletSeed(
     debug() << "Track parameters: (" 
             << qOverPt << ", " << phi << ", " << eta << ", " << d0 << ", " << z0 << ")" << endmsg;
     
-    std::cout << "Debug d0: centerToOrigin=" << std::sqrt(std::pow(x0, 2) + std::pow(y0, 2)) 
-          << "cm, radius=" << radius << "cm, raw d0=" 
-          << (std::sqrt(std::pow(x0, 2) + std::pow(y0, 2)) - radius) << "cm" << std::endl;
-
     // Create covariance matrix
     Eigen::Matrix5d cov = Eigen::Matrix5d::Zero();
     cov(0,0) = 0.1 * qOverPt * qOverPt;
@@ -1830,16 +1893,16 @@ bool KalmanTracking::createTripletSeed(
     // Create track
     Track track(seedState);
     
-    // Add hits to track
-    track.addHit(hit1, surf1, seedState);
+    // Add hits to track with their indices
+    track.addHitWithIndex(hit1, surf1, seedState, idx1);
     
     TrackState predictedState2 = seedState.predictTo(surf2, m_field, *m_materialManager, m_particleProperties);
     TrackState updatedState2 = predictedState2.update(hit2, surf2);
-    track.addHit(hit2, surf2, updatedState2);
+    track.addHitWithIndex(hit2, surf2, updatedState2, idx2);
     
     TrackState predictedState3 = updatedState2.predictTo(surf3, m_field, *m_materialManager, m_particleProperties);
     TrackState updatedState3 = predictedState3.update(hit3, surf3);
-    track.addHit(hit3, surf3, updatedState3);
+    track.addHitWithIndex(hit3, surf3, updatedState3, idx3);
     
     // Check track quality
     double chi2ndf = track.chi2() / track.ndf();
@@ -1851,8 +1914,12 @@ bool KalmanTracking::createTripletSeed(
         return false;
     }
     
-    // Add valid track
+    // Add valid track to the vector, but don't mark hits as used here
+    // The hit usage will be managed by the findTracks method
     tracks.push_back(track);
+    
+    // Optionally, mark hits as used in the temporary used hits vector
+    // This is used during the candidate creation phase
     usedHits[idx1] = true;
     usedHits[idx2] = true;
     usedHits[idx3] = true;
