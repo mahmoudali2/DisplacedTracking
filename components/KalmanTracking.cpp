@@ -884,8 +884,14 @@ Eigen::Vector3d Track::momentumAt(const dd4hep::Position& point) const {
 
 // Constructor
 KalmanTracking::KalmanTracking(const std::string& name, ISvcLocator* pSvcLocator)
-    : Algorithm(name, pSvcLocator),
-      m_particleProperties(muon_mass, -1.0, "muon") {
+    : MultiTransformer(name, pSvcLocator,
+        {
+            KeyValues{"InputHitCollection", {"TrackerHits"}},
+            KeyValues{"HeaderCollectionName", {"EventHeader"}}
+        },
+        {
+            KeyValues{"OutputTrackCollection", {"KalmanTracks"}}
+        }) {
     
     // Initialize particle map with common particles
     m_particleMap["electron"] = ParticleProperties(electron_mass, -1.0, "electron");
@@ -1007,153 +1013,91 @@ StatusCode KalmanTracking::initialize() {
     return StatusCode::SUCCESS;
 }
 
-StatusCode KalmanTracking::configure() {
-    // No additional configuration needed beyond what's in initialize()
-    return StatusCode::SUCCESS;
-}
-
-// Execute method
-StatusCode KalmanTracking::execute() {
-    // Retrieve input hit collection
-    DataObject* obj = nullptr;
-    StatusCode sc = eventSvc()->retrieveObject(m_inputHitCollection.value(), obj);
-
-    if (sc.isFailure() || obj == nullptr) {
-        error() << "Failed to retrieve collection: " << m_inputHitCollection.value() << endmsg;
-        return sc;
+// Operator method
+std::tuple<edm4hep::TrackCollection> KalmanTracking::operator()(
+    const edm4hep::TrackerHitPlaneCollection& hits,
+    const edm4hep::EventHeaderCollection& headers) const {
+    
+    // Create output collection
+    edm4hep::TrackCollection trackCollection;
+    
+    // Print event separator and basic info
+    info() << "\n" << std::string(80, '=') << endmsg;
+    
+    // Get event number from the header
+    unsigned int eventNumber = 0;
+    if (!headers.empty()) {
+        eventNumber = headers[0].getEventNumber();
+        info() << "Processing Event #" << eventNumber << endmsg;
+    } else {
+        info() << "Processing new event (unknown number)" << endmsg;
     }
-
-    // Try to get the collection base from the wrapper
-    auto* wrapper = dynamic_cast<AnyDataWrapper<std::unique_ptr<podio::CollectionBase>>*>(obj);
-    if (!wrapper) {
-        error() << "Retrieved object is not a podio collection wrapper" << endmsg;
-        return StatusCode::FAILURE;
-    }
-
-    // Get the collection base
-    auto& colBasePtr = wrapper->getData();
-    podio::CollectionBase* colBase = colBasePtr.get();
-
-    if (!colBase) {
-        error() << "Null collection base pointer" << endmsg;
-        return StatusCode::FAILURE;
-    }
-
-    // Now try to cast to the specific collection type
-    edm4hep::TrackerHitPlaneCollection* hitCollection = 
-        static_cast<edm4hep::TrackerHitPlaneCollection*>(colBase);
-
-    if (!hitCollection) {
-        error() << "Failed to cast input collection to TrackerHitPlaneCollection" << endmsg;
-        return StatusCode::FAILURE;
-    }
-
-    // Try to access the event header to get event number
-    DataObject* evtObj = nullptr;
-    sc = eventSvc()->retrieveObject("EventHeader", evtObj);
-    if (sc.isSuccess() && evtObj != nullptr) {
-        // Try to get the collection base from the wrapper
-        auto* wrapper = dynamic_cast<AnyDataWrapper<std::unique_ptr<podio::CollectionBase>>*>(evtObj);
-        if (wrapper) {
-            auto& colBasePtr = wrapper->getData();
-            podio::CollectionBase* colBase = colBasePtr.get();
-            if (colBase) {
-                // Now try to cast to the specific collection type
-                auto* evtHeader = static_cast<edm4hep::EventHeaderCollection*>(colBase);
-                if (evtHeader && evtHeader->size() > 0) {
-                    debug() << "  Event number: " << (*evtHeader)[0].getEventNumber() << endmsg;
-                } else {
-                    debug() << "  Could not get event number from collection" << endmsg;
-                }
-            } else {
-                debug() << "  Null collection base pointer for EventHeader" << endmsg;
-            }
-        } else {
-            debug() << "  Retrieved EventHeader is not a podio collection wrapper" << endmsg;
+    
+    info() << std::string(80, '-') << endmsg;
+    
+    info() << "Processing " << hits.size() << " tracker hits" << endmsg;
+    
+    // Print some details about hits
+    if (msgLevel(MSG::DEBUG)) {
+        debug() << "Hit details:" << endmsg;
+        for (size_t i = 0; i < hits.size(); ++i) {
+            const auto& hit = hits[i];
+            const auto& pos = hit.getPosition();
+            debug() << "  Hit " << i << " at (" 
+                    << pos[0] << ", " << pos[1] << ", " << pos[2] << ") mm" << endmsg;
         }
-    } else {
-        debug() << "  Could not get event number" << endmsg;
-    }
-
-    info() << "Processing " << hitCollection->size() << " tracker hits" << endmsg;
-    // getting info about first hits 
-    if (hitCollection->size() > 0) {
-        debug() << "First hit details:" << endmsg;
-        const auto& hit = (*hitCollection)[0];
-        debug() << "  CellID: " << hit.getCellID() << endmsg;
-        debug() << "  Position: (" << hit.getPosition()[0] << ", " 
-                                  << hit.getPosition()[1] << ", " 
-                                  << hit.getPosition()[2] << ")" << endmsg;
-    } else {
-        debug() << "WARNING: Negative number of hits!!!" << endmsg;
     }
     
     // Check if we have enough hits for tracking
-    std::vector<Track> tracks;
-    if (hitCollection->size() < 3) {
+    if (hits.size() < 3) {
         warning() << "Not enough hits to create tracks. Need at least 3." << endmsg;
-        // Create empty track vector
-    } else {
-        // Only try to find tracks if we have enough hits
-        try {
-            tracks = findTracks(hitCollection);
-        } catch (const std::exception& ex) {
-            error() << "Exception during track finding: " << ex.what() << endmsg;
-            // Continue with empty track vector
-        }
+        info() << std::string(80, '=') << "\n" << endmsg; // Bottom separator
+        return trackCollection; // Return empty collection
     }
-
+    
+    // Find tracks
+    std::vector<Track> tracks;
+    try {
+        tracks = findTracks(&hits);
+    } catch (const std::exception& ex) {
+        error() << "Exception during track finding: " << ex.what() << endmsg;
+        info() << std::string(80, '=') << "\n" << endmsg; // Bottom separator
+        return trackCollection; // Return empty collection
+    }
+    
     info() << "Found " << tracks.size() << " tracks" << endmsg;
     
-    // Create output track collection with proper initialization
-    auto* trackCollection = new edm4hep::TrackCollection();
-
-    // Make sure to register using the correct approach for EDM4hep
-    // Often with EDM4hep, collections need special handling
-    DataObject* trackDataObject = nullptr;
-
-    // Try different approaches to convert/wrap the collection
-    try {
-        // Option 1: Direct cast (might not work)
-        trackDataObject = dynamic_cast<DataObject*>(trackCollection);
+    // Print track details
+    for (size_t i = 0; i < tracks.size(); ++i) {
+        const auto& track = tracks[i];
         
-        if (!trackDataObject) {
-            // Option 2: Create a wrapper (common in EDM4hep/podio)
-            trackDataObject = new AnyDataWrapper<std::unique_ptr<podio::CollectionBase>>(
-                std::unique_ptr<podio::CollectionBase>(trackCollection));
-        }
-    } catch (const std::exception& ex) {
-        error() << "Exception creating output collection: " << ex.what() << endmsg;
-        delete trackCollection;
-        return StatusCode::FAILURE;
+        // Get track parameters
+        const auto& params = track.parameters();
+        double pT = std::abs(1.0 / params(0));
+        double phi = params(1);
+        double eta = params(2);
+        double d0 = params(3) / 10.0; // convert to cm
+        double z0 = params(4) / 10.0; // convert to cm
+        
+        info() << "Track " << i << ":" << endmsg;
+        info() << "  pT = " << pT << " GeV/c" << endmsg;
+        info() << "  phi = " << phi << " rad" << endmsg;
+        info() << "  eta = " << eta << endmsg;
+        info() << "  d0 = " << d0 << " cm" << endmsg;
+        info() << "  z0 = " << z0 << " cm" << endmsg;
+        info() << "  chi2/ndof = " << track.chi2() / track.ndf() << endmsg;
+        info() << "  # hits = " << track.hits().size() << endmsg;
     }
-
-    if (!trackDataObject) {
-        error() << "Failed to convert/wrap TrackCollection to DataObject" << endmsg;
-        delete trackCollection;
-        return StatusCode::FAILURE;
-    }
-
-    // Convert internal track representation to standard track format
+    
+    // Convert internal tracks to EDM4hep tracks
     for (const auto& track : tracks) {
-        createTrack(trackCollection, track);
+        createTrack(&trackCollection, track);
     }
     
-    // Register output collection
-   //DataObject* trackDataObject = dynamic_cast<DataObject*>(trackCollection);
-    if (!trackDataObject) {
-        error() << "Failed to convert TrackCollection to DataObject" << endmsg;
-        delete trackCollection;
-        return StatusCode::FAILURE;
-    }
-    sc = eventSvc()->registerObject(m_outputTrackCollection.value(), trackDataObject);
-    if (sc.isFailure()) {
-        error() << "Failed to register output track collection" << endmsg;
-        delete trackCollection;  // Prevent memory leak
-        return sc;
-    }
+    // Bottom separator
+    info() << std::string(80, '=') << "\n" << endmsg;
     
-    return StatusCode::SUCCESS;
+    return trackCollection;
 }
 
 // Finalize method
@@ -1408,7 +1352,7 @@ std::vector<const dd4hep::rec::Surface*> KalmanTracking::findIntersectingSurface
 // Core tracking methods
 //------------------------------------------------------------------------------
 
-std::vector<Track> KalmanTracking::findTracks(const edm4hep::TrackerHitPlaneCollection* hits) {
+std::vector<Track> KalmanTracking::findTracks(const edm4hep::TrackerHitPlaneCollection* hits) const {
     // Vector to hold all final tracks
     std::vector<Track> finalTracks;
     
@@ -1566,7 +1510,7 @@ std::vector<Track> KalmanTracking::findTracks(const edm4hep::TrackerHitPlaneColl
 // New function to calculate circle center and radius using the Direct Formula Method
 bool KalmanTracking::calculateCircleCenterDirect(
     double x1, double y1, double x2, double y2, double x3, double y3,
-    double& x0, double& y0, double& radius) {
+    double& x0, double& y0, double& radius) const{
     
     // Calculate the determinant
     double D = 2 * (x1 * (y2 - y3) + x2 * (y3 - y1) + x3 * (y1 - y2));
@@ -1594,7 +1538,7 @@ bool KalmanTracking::calculateCircleCenterDirect(
 // Improved sagitta method with circle center calculation
 double KalmanTracking::calculateSagitta(const Eigen::Vector3d& p1, 
                                         const Eigen::Vector3d& p2, 
-                                        const Eigen::Vector3d& p3) {
+                                        const Eigen::Vector3d& p3) const{
     // Project points onto the xy plane (transverse plane)
     Eigen::Vector2d p1_2d(p1.x(), p1.y());
     Eigen::Vector2d p2_2d(p2.x(), p2.y());
@@ -1624,7 +1568,7 @@ double KalmanTracking::calculateSagitta(const Eigen::Vector3d& p1,
 // Function to calculate circle center using sagitta method
 bool KalmanTracking::calculateCircleCenterSagitta(
     const Eigen::Vector3d& p1, const Eigen::Vector3d& p2, const Eigen::Vector3d& p3,
-    double& x0, double& y0, double& radius) {
+    double& x0, double& y0, double& radius) const{
     
     // Project points onto the xy plane (transverse plane)
     Eigen::Vector2d p1_2d(p1.x(), p1.y());
@@ -1688,7 +1632,7 @@ bool KalmanTracking::createTripletSeed(
     const edm4hep::TrackerHitPlane& hit3,
     std::vector<Track>& tracks,
     std::vector<bool>& usedHits,
-    size_t idx1, size_t idx2, size_t idx3) {
+    size_t idx1, size_t idx2, size_t idx3) const{
     
     // Get hit positions
     const auto& pos1 = hit1.getPosition();
@@ -1929,7 +1873,7 @@ bool KalmanTracking::createTripletSeed(
 }
 
 bool KalmanTracking::fitCircle(double x1, double y1, double x2, double y2, double x3, double y3, 
-                             double& x0, double& y0, double& radius) {
+                             double& x0, double& y0, double& radius) const{
     // Using the algebraic method for circle fitting through 3 points
     
     // Check if points are collinear (or too close)
@@ -1963,7 +1907,7 @@ bool KalmanTracking::fitCircle(double x1, double y1, double x2, double y2, doubl
 double KalmanTracking::calculateImpactParameter(
     double x0, double y0, double radius, bool clockwise,
     double innerFieldStrength, double outerFieldStrength,
-    const Eigen::Vector3d& p1, const Eigen::Vector3d& p2, const Eigen::Vector3d& p3) {
+    const Eigen::Vector3d& p1, const Eigen::Vector3d& p2, const Eigen::Vector3d& p3) const{
     
     // Constants
     const double solenoidRadius = 200.0; // cm - radius of the solenoid
@@ -2224,7 +2168,7 @@ double KalmanTracking::calculateImpactParameter(
 }
 
 void KalmanTracking::fitLine(double x1, double y1, double x2, double y2, double x3, double y3,
-                           double& slope, double& intercept) {
+                           double& slope, double& intercept) const{
     // Fit line using least squares method
     double sumx = x1 + x2 + x3;
     double sumy = y1 + y2 + y3;

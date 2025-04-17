@@ -170,41 +170,43 @@ private:
 };
 
 /**
- * Kalman Filter based Track Finder/Fitter implemented as a Gaudi Algorithm
+ * Kalman Filter based Track Finder/Fitter implemented as a Key4hep Transformer
  */
-class KalmanTracking : public Algorithm {
+class KalmanTracking final
+    : public k4FWCore::MultiTransformer<
+        std::tuple<edm4hep::TrackCollection>(const edm4hep::TrackerHitPlaneCollection&, const edm4hep::EventHeaderCollection&)
+      > {
 public:
     KalmanTracking(const std::string& name, ISvcLocator* pSvcLocator);
     virtual ~KalmanTracking() = default;
-    
-    // Gaudi Algorithm methods
-    virtual StatusCode initialize() override;
-    virtual StatusCode execute() override;
-    virtual StatusCode finalize() override;
-    
-    // Kalman Tracker methods
-    StatusCode configure() override;
-    
-    // Find tracks in a collection of hits
-    std::vector<Track> findTracks(const edm4hep::TrackerHitPlaneCollection* hits);
 
+    StatusCode initialize() override;
+    StatusCode finalize() override;
+
+    std::tuple<edm4hep::TrackCollection> operator()(
+        const edm4hep::TrackerHitPlaneCollection& hits,
+        const edm4hep::EventHeaderCollection& headers) const override;
+    
+    // Make sure findTracks is const
+    std::vector<Track> findTracks(const edm4hep::TrackerHitPlaneCollection* hits) const;
+ 
     // Calculate circle center and radius using the Direct Formula Method
     bool calculateCircleCenterDirect(
         double x1, double y1, double x2, double y2, double x3, double y3,
-        double& x0, double& y0, double& radius);
+        double& x0, double& y0, double& radius) const;
     // calculate sagitta    
     double calculateSagitta(const Eigen::Vector3d& p1, 
                             const Eigen::Vector3d& p2, 
-                            const Eigen::Vector3d& p3); 
+                            const Eigen::Vector3d& p3) const; 
     // Calculate circle center and radius using the Sagitta Method
     bool calculateCircleCenterSagitta(
         const Eigen::Vector3d& p1, const Eigen::Vector3d& p2, const Eigen::Vector3d& p3,
-        double& x0, double& y0, double& radius);
+        double& x0, double& y0, double& radius) const;
     // Calculate impact parameter
     double calculateImpactParameter(
         double x0, double y0, double radius, bool clockwise,
         double innerFieldStrength, double outerFieldStrength,
-        const Eigen::Vector3d& p1, const Eigen::Vector3d& p2, const Eigen::Vector3d& p3);    
+        const Eigen::Vector3d& p1, const Eigen::Vector3d& p2, const Eigen::Vector3d& p3) const;    
 
     // Create a track seed from three hits (triplet seeding)
     bool createTripletSeed(const edm4hep::TrackerHitPlane& hit1,
@@ -212,15 +214,15 @@ public:
                         const edm4hep::TrackerHitPlane& hit3,
                         std::vector<Track>& tracks,
                         std::vector<bool>& usedHits,
-                        size_t idx1, size_t idx2, size_t idx3);                
+                        size_t idx1, size_t idx2, size_t idx3) const;                
 
     // Helper functions for circle fitting
     bool fitCircle(double x1, double y1, double x2, double y2, double x3, double y3, 
-                double& x0, double& y0, double& radius);
+                double& x0, double& y0, double& radius) const;
 
     // Helper function for line fitting
     void fitLine(double x1, double y1, double x2, double y2, double x3, double y3,
-                double& slope, double& intercept);
+                double& slope, double& intercept) const;
 
     // Fit an existing track candidate
     Track fitTrack(const std::vector<edm4hep::TrackerHitPlane>& hits,
@@ -265,12 +267,12 @@ private:
     // Group surfaces by detector layer
     std::map<int, std::vector<const dd4hep::rec::Surface*>> getSurfacesByLayer() const;
     
-    // Convert internal track representation to standard track format
+    // Make createTrack const since it will be called from operator()
     void createTrack(edm4hep::TrackCollection* trackCollection, const Track& track) const;
     
     // Properties
-    Gaudi::Property<std::string> m_inputHitCollection{this, "InputHitCollection", "TrackerHits", "Input hit collection path"};
-    Gaudi::Property<std::string> m_outputTrackCollection{this, "OutputTrackCollection", "KalmanTracks", "Output track collection path"};
+    //Gaudi::Property<std::string> m_inputHitCollection{this, "InputHitCollection", "TrackerHits", "Input hit collection path"};
+    //Gaudi::Property<std::string> m_outputTrackCollection{this, "OutputTrackCollection", "KalmanTracks", "Output track collection path"};
     Gaudi::Property<std::string> m_detectorName{this, "DetectorName", "Tracker", "Name of detector to process"};
     Gaudi::Property<double> m_maxChi2{this, "MaxChi2", 10.0, "Maximum chi2 for hit-track compatibility"};
     Gaudi::Property<std::string> m_particleType{this, "ParticleType", "pion", "Particle type for material effects"};
