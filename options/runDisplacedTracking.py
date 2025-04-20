@@ -1,6 +1,6 @@
 # Author : Mahmoud Al-Thakeel
 # 
-# Steering file for running the Kalman tracking algorithm
+# Steering file for running the displaced tracking algorithm
 # This script configures and runs the DisplacedTracking Gaudi component
 #
 
