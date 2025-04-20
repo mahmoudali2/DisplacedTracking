@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.12)
-project(KalmanTracking LANGUAGES CXX)
+project(DisplacedTracking LANGUAGES CXX)
 
 # Find required packages
 find_package(DD4hep REQUIRED)
@@ -14,11 +14,11 @@ find_package(podio REQUIRED)
 
 # Define sources
 set(sources
-    components/KalmanTracking.cpp
+    components/DisplacedTracking.cpp
 )
 
 # Create the module
-gaudi_add_module(KalmanTracking
+gaudi_add_module(DisplacedTracking
     SOURCES ${sources}
     LINK 
         podio::podioIO
@@ -33,13 +33,13 @@ gaudi_add_module(KalmanTracking
 )
 
 # Include directories
-target_include_directories(KalmanTracking PUBLIC
+target_include_directories(DisplacedTracking PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_LIST_DIR}>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 
 # Install the target
-install(TARGETS KalmanTracking
+install(TARGETS DisplacedTracking
     EXPORT ${CMAKE_PROJECT_NAME}Targets
     RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}" COMPONENT bin
     LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}" COMPONENT shlib

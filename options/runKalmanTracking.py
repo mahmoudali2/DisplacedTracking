@@ -1,14 +1,14 @@
 # Author : Mahmoud Al-Thakeel
 # 
 # Steering file for running the Kalman tracking algorithm
-# This script configures and runs the KalmanTracking Gaudi component
+# This script configures and runs the DisplacedTracking Gaudi component
 #
 
 import os
 from Gaudi.Configuration import INFO
 from k4FWCore import ApplicationMgr, IOSvc
 from Configurables import EventDataSvc
-from Configurables import KalmanTracking
+from Configurables import DisplacedTracking
 from Configurables import GeoSvc
 
 # Geometry service - provides access to detector geometry
@@ -18,7 +18,7 @@ geoservice.OutputLevel = INFO
 geoservice.EnableGeant4Geo = False
 
 # Kalman tracker algorithm
-kalman = KalmanTracking()
+kalman = DisplacedTracking()
 kalman.DetectorName = "Muon-System"                   # Name of the detector to process      
 kalman.MaxChi2 = 100.0                                 # Maximum chi-square for hit acceptance
 kalman.MaxRadius = 100000000000.0 

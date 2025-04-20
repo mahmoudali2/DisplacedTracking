@@ -1,5 +1,5 @@
 #include <iostream>
-#include "KalmanTracking.h"
+#include "DisplacedTracking.h"
 #include "DDRec/SurfaceManager.h"
 #include "DDRec/SurfaceHelper.h"
 #include "DD4hep/DD4hepUnits.h"
@@ -18,11 +18,11 @@ constexpr double c_light = 299792458.0;     // m/s
 constexpr double qe = 1.602176634e-19;      // coulombs
 
 //------------------------------------------------------------------------------
-// KalmanTracking Implementation
+// DisplacedTracking Implementation
 //------------------------------------------------------------------------------
 
 // Constructor
-KalmanTracking::KalmanTracking(const std::string& name, ISvcLocator* pSvcLocator)
+DisplacedTracking::DisplacedTracking(const std::string& name, ISvcLocator* pSvcLocator)
     : MultiTransformer(name, pSvcLocator,
         {
             KeyValues{"InputHitCollection", {"TrackerHits"}},
@@ -44,7 +44,7 @@ KalmanTracking::KalmanTracking(const std::string& name, ISvcLocator* pSvcLocator
 }
 
 // Initialize method
-StatusCode KalmanTracking::initialize() {
+StatusCode DisplacedTracking::initialize() {
     StatusCode sc = Algorithm::initialize();
     if (!sc.isSuccess()) return sc;
 
@@ -153,7 +153,7 @@ StatusCode KalmanTracking::initialize() {
 }
 
 // Operator method
-std::tuple<edm4hep::TrackCollection> KalmanTracking::operator()(
+std::tuple<edm4hep::TrackCollection> DisplacedTracking::operator()(
     const edm4hep::TrackerHitPlaneCollection& hits,
     const edm4hep::EventHeaderCollection& headers) const {
     
@@ -290,7 +290,7 @@ std::tuple<edm4hep::TrackCollection> KalmanTracking::operator()(
 }
 
 // Finalize method
-StatusCode KalmanTracking::finalize() {
+StatusCode DisplacedTracking::finalize() {
     // Clean up material manager
     if (m_materialManager) {
         delete m_materialManager;
@@ -301,12 +301,12 @@ StatusCode KalmanTracking::finalize() {
 }
 
 // Find surface for a hit
-const dd4hep::rec::Surface* KalmanTracking::findSurface(const edm4hep::TrackerHitPlane& hit) const {  // should it be edm4hep::TrackerHitPlane!?
+const dd4hep::rec::Surface* DisplacedTracking::findSurface(const edm4hep::TrackerHitPlane& hit) const {  // should it be edm4hep::TrackerHitPlane!?
     return findSurfaceByID(hit.getCellID());
 }
 
 // Find surface by cell ID
-const dd4hep::rec::Surface* KalmanTracking::findSurfaceByID(uint64_t cellID) const {
+const dd4hep::rec::Surface* DisplacedTracking::findSurfaceByID(uint64_t cellID) const {
     // Find surface for this cell ID using the surface map
     dd4hep::rec::SurfaceMap::const_iterator sI = m_surfaceMap->find(cellID);
     
@@ -318,13 +318,13 @@ const dd4hep::rec::Surface* KalmanTracking::findSurfaceByID(uint64_t cellID) con
 }
 
 // Extract layer ID from cell ID
-int KalmanTracking::getLayerID(uint64_t cellID) const {
+int DisplacedTracking::getLayerID(uint64_t cellID) const {
     // Use BitFieldCoder to extract layer ID
     return m_bitFieldCoder->get(cellID, "layer");
 }
 
 // Group surfaces by detector layer
-std::map<int, std::vector<const dd4hep::rec::Surface*>> KalmanTracking::getSurfacesByLayer() const {
+std::map<int, std::vector<const dd4hep::rec::Surface*>> DisplacedTracking::getSurfacesByLayer() const {
     std::map<int, std::vector<const dd4hep::rec::Surface*>> result;
     
     // Process all surfaces and group them by layer ID
@@ -407,7 +407,7 @@ std::map<int, std::vector<const dd4hep::rec::Surface*>> KalmanTracking::getSurfa
 }
 
 
-double KalmanTracking::getRadiationLength(const dd4hep::rec::Vector3D& start, 
+double DisplacedTracking::getRadiationLength(const dd4hep::rec::Vector3D& start, 
                                         const dd4hep::rec::Vector3D& end) const {
     if (!m_materialManager) {
         warning() << "Material manager not initialized for radiation length calculation" << endmsg;
@@ -438,7 +438,7 @@ double KalmanTracking::getRadiationLength(const dd4hep::rec::Vector3D& start,
 }
 
 // Get momentum
-Eigen::Vector3d KalmanTracking::getMomentum(const edm4hep::TrackState& state) const {
+Eigen::Vector3d DisplacedTracking::getMomentum(const edm4hep::TrackState& state) const {
     // Get parameters
     double omega = state.omega;  // 1/mm
     double phi = state.phi;      // rad
@@ -461,7 +461,7 @@ Eigen::Vector3d KalmanTracking::getMomentum(const edm4hep::TrackState& state) co
     return Eigen::Vector3d(px, py, pz);
 }
 // Get Position
-Eigen::Vector3d KalmanTracking::getPosition(const edm4hep::TrackState& state) const {
+Eigen::Vector3d DisplacedTracking::getPosition(const edm4hep::TrackState& state) const {
     // Get parameters
     double d0 = state.D0;      // mm
     double phi = state.phi;    // rad
@@ -474,7 +474,7 @@ Eigen::Vector3d KalmanTracking::getPosition(const edm4hep::TrackState& state) co
     return Eigen::Vector3d(x0, y0, z0);
 }
 // EDM4HEP Track state
-edm4hep::TrackState KalmanTracking::createTrackState(
+edm4hep::TrackState DisplacedTracking::createTrackState(
     double d0, double phi, double omega, double z0, double tanLambda,
     int location) const {
     
@@ -517,7 +517,7 @@ edm4hep::TrackState KalmanTracking::createTrackState(
 // Core tracking methods
 //------------------------------------------------------------------------------
 
-edm4hep::TrackCollection KalmanTracking::findTracks(
+edm4hep::TrackCollection DisplacedTracking::findTracks(
     const edm4hep::TrackerHitPlaneCollection* hits) const {
     
     // Create output collection for all track candidates
@@ -757,7 +757,7 @@ edm4hep::TrackCollection KalmanTracking::findTracks(
 }
 
 // New function to calculate circle center and radius using the Direct Formula Method
-bool KalmanTracking::calculateCircleCenterDirect(
+bool DisplacedTracking::calculateCircleCenterDirect(
     double x1, double y1, double x2, double y2, double x3, double y3,
     double& x0, double& y0, double& radius) const{
     
@@ -785,7 +785,7 @@ bool KalmanTracking::calculateCircleCenterDirect(
 }
 
 // Improved sagitta method with circle center calculation
-double KalmanTracking::calculateSagitta(const Eigen::Vector3d& p1, 
+double DisplacedTracking::calculateSagitta(const Eigen::Vector3d& p1, 
                                         const Eigen::Vector3d& p2, 
                                         const Eigen::Vector3d& p3) const{
     // Project points onto the xy plane (transverse plane)
@@ -815,7 +815,7 @@ double KalmanTracking::calculateSagitta(const Eigen::Vector3d& p1,
 }
 
 // Function to calculate circle center using sagitta method
-bool KalmanTracking::calculateCircleCenterSagitta(
+bool DisplacedTracking::calculateCircleCenterSagitta(
     const Eigen::Vector3d& p1, const Eigen::Vector3d& p2, const Eigen::Vector3d& p3,
     double& x0, double& y0, double& radius) const{
     
@@ -875,7 +875,7 @@ bool KalmanTracking::calculateCircleCenterSagitta(
     return true;
 }
 
-bool KalmanTracking::createTripletSeed(
+bool DisplacedTracking::createTripletSeed(
     const edm4hep::TrackerHitPlane& hit1,
     const edm4hep::TrackerHitPlane& hit2,
     const edm4hep::TrackerHitPlane& hit3,
@@ -1111,7 +1111,7 @@ bool KalmanTracking::createTripletSeed(
     return true;
 }
 
-bool KalmanTracking::fitCircle(double x1, double y1, double x2, double y2, double x3, double y3, 
+bool DisplacedTracking::fitCircle(double x1, double y1, double x2, double y2, double x3, double y3, 
                              double& x0, double& y0, double& radius) const{
     // Using the algebraic method for circle fitting through 3 points
     
@@ -1143,7 +1143,7 @@ bool KalmanTracking::fitCircle(double x1, double y1, double x2, double y2, doubl
 }
 
 // This calculates d0 using a two-segment track model for field transitions
-double KalmanTracking::calculateImpactParameter(
+double DisplacedTracking::calculateImpactParameter(
     double x0, double y0, double radius, bool clockwise,
     double innerFieldStrength, double outerFieldStrength,
     const Eigen::Vector3d& p1, const Eigen::Vector3d& p2, const Eigen::Vector3d& p3) const{
@@ -1406,7 +1406,7 @@ double KalmanTracking::calculateImpactParameter(
     return d0;
 }
 
-void KalmanTracking::fitLine(double x1, double y1, double x2, double y2, double x3, double y3,
+void DisplacedTracking::fitLine(double x1, double y1, double x2, double y2, double x3, double y3,
                            double& slope, double& intercept) const{
     // Fit line using least squares method
     double sumx = x1 + x2 + x3;

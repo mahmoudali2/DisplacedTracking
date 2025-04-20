@@ -1,5 +1,5 @@
-#ifndef KALMAN_TRACKING_H
-#define KALMAN_TRACKING_H
+#ifndef DISPLACED_TRACKING_H
+#define DISPLACED_TRACKING_H
 
 #include <vector>
 #include <map>
@@ -70,13 +70,13 @@ struct ParticleProperties {
 /**
  * Kalman Filter based Track Finder/Fitter implemented as a Key4hep Transformer
  */
-class KalmanTracking final
+class DisplacedTracking final
     : public k4FWCore::MultiTransformer<
         std::tuple<edm4hep::TrackCollection>(const edm4hep::TrackerHitPlaneCollection&, const edm4hep::EventHeaderCollection&)
       > {
 public:
-    KalmanTracking(const std::string& name, ISvcLocator* pSvcLocator);
-    virtual ~KalmanTracking() = default;
+    DisplacedTracking(const std::string& name, ISvcLocator* pSvcLocator);
+    virtual ~DisplacedTracking() = default;
 
     StatusCode initialize() override;
     StatusCode finalize() override;
@@ -191,5 +191,5 @@ private:
     // Map of known particle types
     std::map<std::string, ParticleProperties> m_particleMap;
 };
-DECLARE_COMPONENT(KalmanTracking)
+DECLARE_COMPONENT(DisplacedTracking)
 #endif // KALMAN_TRACKER_H
