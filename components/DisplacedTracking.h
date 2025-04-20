@@ -170,10 +170,8 @@ private:
     Gaudi::Property<std::string> m_detectorName{this, "DetectorName", "Tracker", "Name of detector to process"};
     Gaudi::Property<double> m_maxChi2{this, "MaxChi2", 10.0, "Maximum chi2 for hit-track compatibility"};
     Gaudi::Property<std::string> m_particleType{this, "ParticleType", "pion", "Particle type for material effects"};
-    Gaudi::Property<double> m_initialMomentum{this, "InitialMomentum", 1.0, "Initial momentum estimate for seeding (GeV)"};
-    Gaudi::Property<double> m_maxDistanceToSurface{this, "MaxDistanceToSurface", 10.0, "Maximum distance to consider surface intersections (mm)"};
     Gaudi::Property<std::string> m_encodingStringParameter{this, "EncodingStringParameterName", "GlobalTrackerReadoutID", "Name of DD4hep parameter with the encoding string"};
-    Gaudi::Property<double> m_maxRadius{this, "MaxRadius", 100000.0, "Maximum radius for track curvature (mm)"};
+    Gaudi::Property<double> m_maxDist{this, "MaxDist", 150.0, "Maximum distance between two hits (cm)"};
 
     // Services
     ServiceHandle<IGeoSvc> m_geoSvc{this, "GeoSvc", "GeoSvc", "Detector geometry service"};

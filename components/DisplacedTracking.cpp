@@ -904,7 +904,7 @@ bool DisplacedTracking::createTripletSeed(
     Eigen::Vector3d p3(pos3[0] / 10.0, pos3[1] / 10.0, pos3[2] / 10.0);
     
     // Check if hits are spatially compatible
-    double maxDist = 100.0; // cm  //make it a GAUDI property
+    double maxDist = m_maxDist; // cm
     if ((p2 - p1).norm() > maxDist || (p3 - p2).norm() > maxDist) {
         debug() << "Hits too far apart spatially, more than 1 m." << endmsg;
         return false;

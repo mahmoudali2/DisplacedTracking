@@ -20,21 +20,19 @@ geoservice.EnableGeant4Geo = False
 # Kalman tracker algorithm
 kalman = DisplacedTracking()
 kalman.DetectorName = "Muon-System"                   # Name of the detector to process      
-kalman.MaxChi2 = 100.0                                 # Maximum chi-square for hit acceptance
-kalman.MaxRadius = 100000000000.0 
+kalman.MaxChi2 = 10.0                                 # Maximum chi-square for hit acceptance
+kalman.MaxDist = 150.0                                # Maximum distance between two hits (cm)
 kalman.ParticleType = "muon"                          # Particle type for material effects
-kalman.InitialMomentum = 10.0                          # Initial momentum estimate for seeding (GeV)
-kalman.MaxDistanceToSurface = 25.0                    # Maximum distance to consider surface intersections (mm)
 kalman.EncodingStringParameterName = "MuonSystemReadoutID"
 kalman.OutputLevel = 1  # DEBUG level
 
-kalman.InputHitCollection = ["MSTrackerHits"]           # Input digitized hits from DDPlanarDigi
-kalman.OutputTrackCollection = ["KalmanTracks"]          # Output reconstructed tracks
+kalman.InputHitCollection = ["MSTrackerHits"]         # Input digitized hits from DDPlanarDigi
+kalman.OutputTrackCollection = ["KalmanTracks"]       # Output reconstructed tracks
 
 # Input/Output service
 iosvc = IOSvc()
-iosvc.Input = "output_digi_10k_10GeV.root"                # Input file with digitized hits
-iosvc.Output = "output_tracks_test.root"             # Output file for reconstructed tracks
+iosvc.Input = "output_digi_10k_10GeV.root"            # Input file with digitized hits
+iosvc.Output = "output_tracks_test.root"              # Output file for reconstructed tracks
 
 # Application manager configuration
 ApplicationMgr(
