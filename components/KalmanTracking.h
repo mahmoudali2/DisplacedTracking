@@ -68,108 +68,6 @@ struct ParticleProperties {
 };
 
 /**
- * Track state at a specific surface
- * Uses 5 parameters: (q/pT, phi, eta, d0, z0)
- * This parametrization is suitable for both barrel and endcap regions
- */
-class TrackState {
-public:
-    // Constructor for 5-parameter track state
-    TrackState(const Eigen::Vector5d& params, const Eigen::Matrix5d& cov, 
-               const dd4hep::rec::Surface* surface);
-    
-    // Predict state to a new surface, including material effects
-    TrackState predictTo(const dd4hep::rec::Surface* newSurface, 
-                         const dd4hep::OverlayedField& field,
-                         const dd4hep::rec::MaterialManager& matMgr,
-                         const ParticleProperties& particle) const;
-    
-    // Filter: update state with a measurement
-    TrackState update(const edm4hep::TrackerHitPlane& hit, 
-                     const dd4hep::rec::Surface* surface) const;
-    
-    // Get chi-square increment when adding this hit
-    double getChi2Increment(const edm4hep::TrackerHitPlane& hit, 
-                           const dd4hep::rec::Surface* surface) const;
-    
-    // Accessors
-    const Eigen::Vector5d& parameters() const { return _params; }
-    const Eigen::Matrix5d& covariance() const { return _cov; }
-    const dd4hep::rec::Surface* surface() const { return _surface; }
-    
-    // Get 3D momentum vector from parameters
-    Eigen::Vector3d momentum() const;
-    
-    // Get position at closest approach to origin
-    Eigen::Vector3d positionAtOrigin() const;
-    
-private:
-    // Helper functions for material effects
-    void addMultipleScatteringNoise(Eigen::Matrix5d& cov, double theta0) const;
-    double calculateEnergyLoss(double momentum, double beta, double radLength, 
-                              const ParticleProperties& particle) const;
-    
-    // Helper for projecting track parameters to measurement space
-    Eigen::Matrix<double, 2, 5> projectionMatrix(const dd4hep::rec::Surface* surface) const;
-    
-    Eigen::Vector5d _params;           // Track parameters: (q/pT, phi, eta, d0, z0)
-    Eigen::Matrix5d _cov;              // Covariance matrix
-    const dd4hep::rec::Surface* _surface; // Reference surface
-};
-
-/**
- * Track class representing a reconstructed particle trajectory
- */
-class Track {
-public:
-    Track(const TrackState& initialState);
-    
-    // Add a hit to the track
-    void addHit(const edm4hep::TrackerHitPlane& hit, 
-               const dd4hep::rec::Surface* surface,
-               const TrackState& state);
-    
-    // Add a hit to the track with its index
-    void addHitWithIndex(const edm4hep::TrackerHitPlane& hit, 
-                        const dd4hep::rec::Surface* surface,
-                        const TrackState& state,
-                        size_t hitIndex);
-    
-    // Get track states
-    const std::vector<TrackState>& states() const { return _states; }
-    
-    // Get hits associated with this track
-    const std::vector<edm4hep::TrackerHitPlane>& hits() const { return _hits; }
-    
-    // Get hit indices
-    const std::vector<size_t>& hitIndices() const { return _hitIndices; }
-    
-    // Get surfaces associated with the hits
-    const std::vector<const dd4hep::rec::Surface*>& surfaces() const { return _surfaces; }
-    
-    // Get chi-square of the track fit
-    double chi2() const { return _chi2; }
-    
-    // Get number of degrees of freedom
-    int ndf() const { return 2 * _hits.size() - 5; }
-    
-    // Momentum at a given point (e.g., vertex)
-    Eigen::Vector3d momentumAt(const dd4hep::Position& point) const;
-    
-    // Get track parameters at first state
-    Eigen::Vector5d parameters() const { 
-        return _states.front().parameters(); 
-    }
-    
-private:
-    std::vector<TrackState> _states;   // Track states at each hit
-    std::vector<edm4hep::TrackerHitPlane> _hits;  // Hits used in the track
-    std::vector<size_t> _hitIndices;   // Indices of hits in the original collection
-    std::vector<const dd4hep::rec::Surface*> _surfaces; // Surfaces for each hit
-    double _chi2;                      // Total chi-square
-};
-
-/**
  * Kalman Filter based Track Finder/Fitter implemented as a Key4hep Transformer
  */
 class KalmanTracking final
@@ -188,8 +86,9 @@ public:
         const edm4hep::EventHeaderCollection& headers) const override;
     
     // Make sure findTracks is const
-    std::vector<Track> findTracks(const edm4hep::TrackerHitPlaneCollection* hits) const;
- 
+    edm4hep::TrackCollection findTracks(
+                            const edm4hep::TrackerHitPlaneCollection* hits) const;
+
     // Calculate circle center and radius using the Direct Formula Method
     bool calculateCircleCenterDirect(
         double x1, double y1, double x2, double y2, double x3, double y3,
@@ -212,9 +111,9 @@ public:
     bool createTripletSeed(const edm4hep::TrackerHitPlane& hit1,
                         const edm4hep::TrackerHitPlane& hit2,
                         const edm4hep::TrackerHitPlane& hit3,
-                        std::vector<Track>& tracks,
+                        edm4hep::TrackCollection* tracks,
                         std::vector<bool>& usedHits,
-                        size_t idx1, size_t idx2, size_t idx3) const;                
+                        size_t idx1, size_t idx2, size_t idx3) const;
 
     // Helper functions for circle fitting
     bool fitCircle(double x1, double y1, double x2, double y2, double x3, double y3, 
@@ -224,11 +123,6 @@ public:
     void fitLine(double x1, double y1, double x2, double y2, double x3, double y3,
                 double& slope, double& intercept) const;
 
-    // Fit an existing track candidate
-    Track fitTrack(const std::vector<edm4hep::TrackerHitPlane>& hits,
-                  const std::vector<const dd4hep::rec::Surface*>& surfaces,
-                  const TrackState& seedState);
-    
     // Set maximum chi-square for hit acceptance
     void setMaxChi2(double chi2) { m_maxChi2 = chi2; }
     
@@ -248,31 +142,31 @@ private:
     // Extract layer ID from cell ID
     int getLayerID(uint64_t cellID) const;
     
-    // Find potential intersecting surfaces for a track
-    std::vector<const dd4hep::rec::Surface*> findIntersectingSurfaces(
-        const TrackState& state, double maxDistance) const;
+    Eigen::Vector3d getMomentum(const edm4hep::TrackState& state) const;
     
-    // Kalman filter operations
-    TrackState predictStep(const TrackState& state, const dd4hep::rec::Surface* nextSurface);
-    TrackState filterStep(const TrackState& predicted, 
-                         const edm4hep::TrackerHitPlane& hit,
-                         const dd4hep::rec::Surface* surface);
+    // Get position vector from track state
+    Eigen::Vector3d getPosition(const edm4hep::TrackState& state) const;
     
-    // Track building operations
-    std::vector<std::tuple<size_t, edm4hep::TrackerHitPlane, const dd4hep::rec::Surface*>> findCompatibleHits(
-        const TrackState& state, 
-        const edm4hep::TrackerHitPlaneCollection* hits,
-        const std::vector<bool>& usedHits);
-    
+    // Create a track state with the given parameters
+    edm4hep::TrackState createTrackState(
+                    double d0, double phi, double omega, double z0, double tanLambda,
+                    int location = edm4hep::TrackState::AtOther) const;
+        
+    // Predict track state to a new surface
+    edm4hep::TrackState predictToSurface(
+        const edm4hep::TrackState& state,
+        const dd4hep::rec::Surface* surface) const;
+        
+    // Calculate chi-square between track state and hit
+    double getChi2(
+        const edm4hep::TrackState& state,
+        const edm4hep::TrackerHitPlane& hit,
+        const dd4hep::rec::Surface* surface) const;
+
     // Group surfaces by detector layer
     std::map<int, std::vector<const dd4hep::rec::Surface*>> getSurfacesByLayer() const;
     
-    // Make createTrack const since it will be called from operator()
-    void createTrack(edm4hep::TrackCollection* trackCollection, const Track& track) const;
-    
     // Properties
-    //Gaudi::Property<std::string> m_inputHitCollection{this, "InputHitCollection", "TrackerHits", "Input hit collection path"};
-    //Gaudi::Property<std::string> m_outputTrackCollection{this, "OutputTrackCollection", "KalmanTracks", "Output track collection path"};
     Gaudi::Property<std::string> m_detectorName{this, "DetectorName", "Tracker", "Name of detector to process"};
     Gaudi::Property<double> m_maxChi2{this, "MaxChi2", 10.0, "Maximum chi2 for hit-track compatibility"};
     Gaudi::Property<std::string> m_particleType{this, "ParticleType", "pion", "Particle type for material effects"};
