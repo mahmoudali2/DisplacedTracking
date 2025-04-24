@@ -926,20 +926,6 @@ bool DisplacedTracking::createTripletSeed(
             << "(" << p2.x() << "," << p2.y() << "), "
             << "(" << p3.x() << "," << p3.y() << ")" << endmsg;
     
-    // Calculate using original circle fit (for comparison)
-    bool circleValid = false;
-    double x0_circle, y0_circle, radius_circle;
-    circleValid = fitCircle(p1.x(), p1.y(), p2.x(), p2.y(), p3.x(), p3.y(), 
-                           x0_circle, y0_circle, radius_circle);
-    
-    if (!circleValid) {
-        debug() << "Circle fit failed - points may be collinear" << endmsg;
-        return false; // Invalid circle fit
-    }
-    
-    debug() << "Circle fit successful: center=(" << x0_circle << "," << y0_circle 
-            << "), radius=" << radius_circle << " cm" << endmsg;
-    
     // Calculate using Direct Formula Method
     double x0_direct, y0_direct, radius_direct;
     bool directValid = calculateCircleCenterDirect(
@@ -992,13 +978,13 @@ bool DisplacedTracking::createTripletSeed(
             << estimatedBz << " Tesla for calculation as a temporary solution, due to a problem in k4geo in retrieving the right value of Bz" << endmsg;
     
     // Calculate pT using all methods for comparison
-    double pT_circle = 0.3 * std::abs(estimatedBz) * radius_circle / 100.0; // Convert radius from cm to m
+    //double pT_circle = 0.3 * std::abs(estimatedBz) * radius_circle / 100.0; // Convert radius from cm to m
     double pT_direct = 0.3 * std::abs(estimatedBz) * radius_direct / 100.0;
     double pT_sagitta = 0.3 * std::abs(estimatedBz) * sagittaRadius / 100.0;
     double pT_sagitta_full = 0.3 * std::abs(estimatedBz) * radius_sagitta / 100.0;
     
     debug() << "Comparison of pT estimates:" << endmsg;
-    debug() << "  Circle fit pT: " << pT_circle << " GeV/c" << endmsg;
+    //debug() << "  Circle fit pT: " << pT_circle << " GeV/c" << endmsg;
     debug() << "  Direct formula pT: " << pT_direct << " GeV/c" << endmsg;
     debug() << "  Sagitta simple pT: " << pT_sagitta << " GeV/c" << endmsg;
     debug() << "  Sagitta full pT: " << pT_sagitta_full << " GeV/c" << endmsg;
@@ -1110,7 +1096,7 @@ bool DisplacedTracking::createTripletSeed(
     debug() << "Created valid EDM4hep track with 3 hits" << endmsg;
     return true;
 }
-
+/*
 bool DisplacedTracking::fitCircle(double x1, double y1, double x2, double y2, double x3, double y3, 
                              double& x0, double& y0, double& radius) const{
     // Using the algebraic method for circle fitting through 3 points
@@ -1141,7 +1127,7 @@ bool DisplacedTracking::fitCircle(double x1, double y1, double x2, double y2, do
     
     return true;
 }
-
+*/
 // This calculates d0 using a two-segment track model for field transitions
 double DisplacedTracking::calculateImpactParameter(
     double x0, double y0, double radius, bool clockwise,
