@@ -176,6 +176,30 @@ private:
     // Services
     ServiceHandle<IGeoSvc> m_geoSvc{this, "GeoSvc", "GeoSvc", "Detector geometry service"};
     
+    // Event accounting counters
+    mutable int m_totalInputEvents = 0;
+    mutable int m_eventsWithTooFewHits = 0;
+    mutable int m_eventsWithNoLayers = 0;
+    mutable int m_eventsWithTooFewLayers = 0;
+    mutable int m_eventsWithNoTracks = 0;
+    mutable int m_eventsWithTracks = 0;
+    // Run statistics counters
+    mutable int m_totalHits = 0;
+    mutable int m_totalTripletCandidates = 0;
+    mutable int m_totalValidTriplets = 0;
+    mutable int m_totalTrackCandidates = 0;
+    mutable int m_totalAcceptedTracks = 0;
+    mutable int m_totalRejectedTracks = 0;
+    mutable int m_processedEvents = 0;
+    // Detailed failure counters for triplet seeding
+    mutable int m_surfaceFailures = 0;
+    mutable int m_distanceFailures = 0;
+    mutable int m_angleFailures = 0;
+    mutable int m_circleFitFailures = 0;
+    mutable int m_parameterFailures = 0;
+    // Method to print run statistics
+    void printRunStatistics() const;
+
     // Member variables
     dd4hep::Detector* m_detector{nullptr};  // Detector instance
     dd4hep::OverlayedField m_field;         // Magnetic field

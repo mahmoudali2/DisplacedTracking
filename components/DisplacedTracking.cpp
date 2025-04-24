@@ -156,7 +156,9 @@ StatusCode DisplacedTracking::initialize() {
 std::tuple<edm4hep::TrackCollection> DisplacedTracking::operator()(
     const edm4hep::TrackerHitPlaneCollection& hits,
     const edm4hep::EventHeaderCollection& headers) const {
-    
+
+    m_totalInputEvents++;
+
     // Find tracks using the direct EDM4hep approach
     edm4hep::TrackCollection trackCollection;
 
@@ -184,13 +186,6 @@ std::tuple<edm4hep::TrackCollection> DisplacedTracking::operator()(
             debug() << "  Hit " << i << " at ("
                     << pos[0] << ", " << pos[1] << ", " << pos[2] << ") mm" << endmsg;
         }
-    }
-    
-    // Check if we have enough hits for tracking
-    if (hits.size() < 3) {
-        warning() << "Not enough hits to create tracks. Need at least 3." << endmsg;
-        info() << std::string(80, '=') << "\n" << endmsg; // Bottom separator
-        return std::make_tuple(std::move(trackCollection)); // Return empty collection
     }
     
     try {
@@ -282,7 +277,12 @@ std::tuple<edm4hep::TrackCollection> DisplacedTracking::operator()(
             info() << "  # hits = " << track.trackerHits_size() << endmsg;
         }
     }
-    
+
+    if (trackCollection.size() > 0) {
+        m_eventsWithTracks++;
+    } else {
+        m_eventsWithNoTracks++;
+    }
     // Bottom separator
     info() << std::string(80, '=') << "\n" << endmsg;
     
@@ -291,6 +291,10 @@ std::tuple<edm4hep::TrackCollection> DisplacedTracking::operator()(
 
 // Finalize method
 StatusCode DisplacedTracking::finalize() {
+    // Print final statistics
+    info() << "\n\n######### FINAL TRACKING STATISTICS #########" << endmsg;
+    printRunStatistics();
+    info() << "##############################################\n\n" << endmsg;
     // Clean up material manager
     if (m_materialManager) {
         delete m_materialManager;
@@ -301,7 +305,7 @@ StatusCode DisplacedTracking::finalize() {
 }
 
 // Find surface for a hit
-const dd4hep::rec::Surface* DisplacedTracking::findSurface(const edm4hep::TrackerHitPlane& hit) const {  // should it be edm4hep::TrackerHitPlane!?
+const dd4hep::rec::Surface* DisplacedTracking::findSurface(const edm4hep::TrackerHitPlane& hit) const {
     return findSurfaceByID(hit.getCellID());
 }
 
@@ -517,6 +521,530 @@ edm4hep::TrackState DisplacedTracking::createTrackState(
 // Core tracking methods
 //------------------------------------------------------------------------------
 
+edm4hep::TrackCollection DisplacedTracking::findTracks(
+    const edm4hep::TrackerHitPlaneCollection* hits) const {
+    
+    // Create output collection for all track candidates
+    edm4hep::TrackCollection candidateTracks;
+    
+    // Increment processed events counter
+    m_processedEvents++;
+    
+    // Add to total hit count
+    m_totalHits += hits->size();
+    
+    // Check if we have enough hits for tracking
+    if (hits->size() < 3) {
+        m_eventsWithTooFewHits++;
+        info() << "Not enough hits for tracking. Need at least 3, found " << hits->size() << endmsg;
+        return std::move(candidateTracks);
+    }
+    
+    // Group hits by layer
+    std::map<int, std::vector<std::pair<size_t, edm4hep::TrackerHitPlane>>> hitsByLayer;
+    
+    // Find surfaces and organize hits by layer
+    for (size_t i = 0; i < hits->size(); ++i) {
+        const auto& hit = (*hits)[i];
+        const dd4hep::rec::Surface* surface = findSurface(hit);
+        
+        if (surface) {
+            int layerID = getLayerID(hit.getCellID());
+            hitsByLayer[layerID].push_back(std::make_pair(i, hit));
+        } else {
+            debug() << "Could not find surface for hit with cellID " << hit.getCellID() << endmsg;
+        }
+    }
+    
+    info() << "Found hits in " << hitsByLayer.size() << " layers" << endmsg;
+    
+    // Check if we have at least 3 layers with hits
+    if (hitsByLayer.size() < 3) {
+        m_eventsWithTooFewLayers++;
+        info() << "Not enough layers with hits for triplet seeding (need 3, found " 
+               << hitsByLayer.size() << ")" << endmsg;
+        return std::move(candidateTracks);
+    }
+    
+    // Vector to track which hits are used during seeding
+    std::vector<bool> tempUsedHits(hits->size(), false);
+    
+    // Structure to hold track candidate info for later selection
+    struct TrackInfo {
+        edm4hep::Track track;
+        double pT;
+        std::vector<size_t> hitIndices;
+        
+        TrackInfo(edm4hep::Track t, double p) : track(t), pT(p) {}
+    };
+    
+    // Vector to collect all track candidates with their info
+    std::vector<TrackInfo> trackInfos;
+    
+    // Counters for this event's triplet statistics
+    int eventTripletCandidates = 0;
+    int eventValidTriplets = 0;
+    
+    // For each possible triplet combination
+    for (auto it1 = hitsByLayer.begin(); it1 != hitsByLayer.end(); ++it1) {
+        int layer1 = it1->first;
+        const auto& hitList1 = it1->second;
+        
+        for (auto it2 = std::next(it1); it2 != hitsByLayer.end(); ++it2) {
+            int layer2 = it2->first;
+            const auto& hitList2 = it2->second;
+            
+            for (auto it3 = std::next(it2); it3 != hitsByLayer.end(); ++it3) {
+                int layer3 = it3->first;
+                const auto& hitList3 = it3->second;
+                
+                debug() << "Testing hit triplets from layers " << layer1 << ", " 
+                        << layer2 << ", " << layer3 << endmsg;
+                
+                int tripletCandidates = 0;
+                int validTriplets = 0;
+                
+                // Try all hit combinations
+                for (const auto& [idx1, hit1] : hitList1) {
+                    for (const auto& [idx2, hit2] : hitList2) {
+                        for (const auto& [idx3, hit3] : hitList3) {
+                            tripletCandidates++;
+                            eventTripletCandidates++;
+                            
+                            // Reset the temporary used hits vector for each candidate
+                            std::fill(tempUsedHits.begin(), tempUsedHits.end(), false);
+                            
+                            // Get previous size to check if a track was created
+                            size_t prevSize = candidateTracks.size();
+                            
+                            // Create triplet seed
+                            bool seedValid = createTripletSeed(
+                                hit1, hit2, hit3, &candidateTracks, tempUsedHits, idx1, idx2, idx3);
+                            
+                            if (seedValid && candidateTracks.size() > prevSize) {
+                                validTriplets++;
+                                eventValidTriplets++;
+                                
+                                // Get the newly created track
+                                auto newTrack = candidateTracks[candidateTracks.size() - 1];
+                                
+                                // Get its track state
+                                edm4hep::TrackState state;
+                                bool foundState = false;
+                                
+                                for (int j = 0; j < newTrack.trackStates_size(); ++j) {
+                                    if (newTrack.getTrackStates(j).location == edm4hep::TrackState::AtIP) {
+                                        state = newTrack.getTrackStates(j);
+                                        foundState = true;
+                                        break;
+                                    }
+                                }
+                                
+                                if (!foundState && newTrack.trackStates_size() > 0) {
+                                    state = newTrack.getTrackStates(0);
+                                    foundState = true;
+                                }
+                                
+                                if (foundState) {
+                                    // Get magnetic field at track position
+                                    dd4hep::Position fieldPos(0, 0, 0);  // Default center position
+                                    if (newTrack.trackerHits_size() > 0) {
+                                        // Use average position of hits for better field estimate
+                                        double sumX = 0, sumY = 0, sumZ = 0;
+                                        for (int j = 0; j < newTrack.trackerHits_size(); j++) {
+                                            auto hit = newTrack.getTrackerHits(j);
+                                            sumX += hit.getPosition()[0] / 10.0;  // mm to cm
+                                            sumY += hit.getPosition()[1] / 10.0;
+                                            sumZ += hit.getPosition()[2] / 10.0;
+                                        }
+                                        fieldPos = dd4hep::Position(
+                                            sumX / newTrack.trackerHits_size(),
+                                            sumY / newTrack.trackerHits_size(),
+                                            sumZ / newTrack.trackerHits_size()
+                                        );
+                                    }
+                                    
+                                    // Extract field value in Tesla
+                                    double bField = 0.0;
+                                    try {
+                                        bField = m_field.magneticField(fieldPos).z() / dd4hep::tesla;
+                                    } catch (...) {
+                                        bField = 0.0;  // Handle any field access errors
+                                    }
+                                    
+                                    // Use default if field is too small
+                                    if (std::abs(bField) < 0.1) {
+                                        bField = -1.7;  // Default field value
+                                    }
+                                    
+                                    // Calculate pT from track parameters
+                                    double omega = state.omega;
+                                    double pT = 0.3 * std::abs(bField) / std::abs(omega) * 0.001; // GeV/c
+
+                                    // Create TrackInfo with the track and pT
+                                    TrackInfo info(newTrack, pT);
+                                    
+                                    // Add hit indices
+                                    info.hitIndices.push_back(idx1);
+                                    info.hitIndices.push_back(idx2);
+                                    info.hitIndices.push_back(idx3);
+                                    
+                                    trackInfos.push_back(info);
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                debug() << "Tested " << tripletCandidates << " triplet candidates, found " 
+                        << validTriplets << " valid triplets" << endmsg;
+            }
+        }
+    }
+    
+    // Update run-level statistics
+    m_totalTripletCandidates += eventTripletCandidates;
+    m_totalValidTriplets += eventValidTriplets;
+    m_totalTrackCandidates += trackInfos.size();
+    
+    info() << "Found " << trackInfos.size() << " track candidates" << endmsg;
+    
+    // Sort candidates by descending pT (highest pT first)
+    std::sort(trackInfos.begin(), trackInfos.end(), 
+              [](const TrackInfo& a, const TrackInfo& b) {
+                  return a.pT > b.pT;
+              });
+    
+    // Vector to track which hits are used in final tracks
+    std::vector<bool> usedHits(hits->size(), false);
+    
+    // use a vector of indices to select tracks
+    std::vector<size_t> selectedTrackIndices;
+    
+    // Event-level counter for rejected tracks
+    int eventRejectedTracks = 0;
+    
+    // Select tracks by prioritizing high-pT tracks and ensuring hits aren't reused
+    for (size_t i = 0; i < trackInfos.size(); ++i) {
+        const auto& trackInfo = trackInfos[i];
+        
+        // Check if any of the hits in this candidate are already used
+        bool hasConflict = false;
+        for (size_t idx : trackInfo.hitIndices) {
+            if (usedHits[idx]) {
+                hasConflict = true;
+                break;
+            }
+        }
+        
+        // If there's no conflict, select this track
+        if (!hasConflict) {
+            selectedTrackIndices.push_back(i);
+            
+            // Mark hits as used
+            for (size_t idx : trackInfo.hitIndices) {
+                usedHits[idx] = true;
+            }
+            
+            debug() << "Selected track with pT = " << trackInfo.pT << " GeV/c" << endmsg;
+        } else {
+            eventRejectedTracks++;
+        }
+    }
+    
+    // Update run-level track statistics
+    m_totalAcceptedTracks += selectedTrackIndices.size();
+    m_totalRejectedTracks += eventRejectedTracks;
+    
+    // Now create the final collection with only the selected tracks
+    edm4hep::TrackCollection finalTracks;
+    for (size_t idx : selectedTrackIndices) {
+        // Create a new track in the final collection
+        auto newTrack = finalTracks.create();
+        
+        // Get the original track
+        const auto& origTrack = trackInfos[idx].track;
+        
+        // Copy properties
+        newTrack.setChi2(origTrack.getChi2());
+        newTrack.setNdf(origTrack.getNdf());
+        
+        // Copy track states
+        for (int j = 0; j < origTrack.trackStates_size(); ++j) {
+            newTrack.addToTrackStates(origTrack.getTrackStates(j));
+        }
+        
+        // Copy hits
+        for (int j = 0; j < origTrack.trackerHits_size(); ++j) {
+            newTrack.addToTrackerHits(origTrack.getTrackerHits(j));
+        }
+    }
+     
+    info() << "Selected " << finalTracks.size() << " tracks after hit conflict resolution" << endmsg;
+    
+    // Print run statistics every 10 events
+    if (m_processedEvents % 10 == 0) {
+        printRunStatistics();
+    }
+    
+    return std::move(finalTracks);
+}
+
+// --- Enhanced createTripletSeed method with better diagnostics ---
+bool DisplacedTracking::createTripletSeed(
+    const edm4hep::TrackerHitPlane& hit1,
+    const edm4hep::TrackerHitPlane& hit2,
+    const edm4hep::TrackerHitPlane& hit3,
+    edm4hep::TrackCollection* tracks,
+    std::vector<bool>& usedHits,
+    size_t idx1, size_t idx2, size_t idx3) const {
+    
+    // Get hit positions
+    const auto& pos1 = hit1.getPosition();
+    const auto& pos2 = hit2.getPosition();
+    const auto& pos3 = hit3.getPosition();
+    
+    // Get surfaces for each hit
+    const dd4hep::rec::Surface* surf1 = findSurface(hit1);
+    const dd4hep::rec::Surface* surf2 = findSurface(hit2);
+    const dd4hep::rec::Surface* surf3 = findSurface(hit3);
+    
+    if (!surf1 || !surf2 || !surf3) {
+        m_surfaceFailures++; // Count surface finding failures
+        return false; // Couldn't find surfaces
+    }
+    
+    // Convert to Eigen vectors in cm
+    Eigen::Vector3d p1(pos1[0] / 10.0, pos1[1] / 10.0, pos1[2] / 10.0);
+    Eigen::Vector3d p2(pos2[0] / 10.0, pos2[1] / 10.0, pos2[2] / 10.0);
+    Eigen::Vector3d p3(pos3[0] / 10.0, pos3[1] / 10.0, pos3[2] / 10.0);
+    
+    // Check if hits are spatially compatible
+    double maxDist = m_maxDist; // cm
+    double dist12 = (p2 - p1).norm();
+    double dist23 = (p3 - p2).norm();
+    
+    if (dist12 > maxDist || dist23 > maxDist) {
+        m_distanceFailures++; // Count distance failures
+        return false;
+    }
+    
+    // Check angle consistency
+    Eigen::Vector3d v1 = p2 - p1;
+    Eigen::Vector3d v2 = p3 - p2;
+    v1.normalize();
+    v2.normalize();
+    double cosAngle = v1.dot(v2);
+    
+    if (cosAngle < 0.9) { // Allow up to about 25 degrees deviation
+        m_angleFailures++; // Count angle consistency failures
+        return false;
+    }
+    
+    // Calculate using Direct Formula Method for circle fit
+    double x0_direct, y0_direct, radius_direct;
+    bool directValid = calculateCircleCenterDirect(
+        p1.x(), p1.y(), p2.x(), p2.y(), p3.x(), p3.y(),
+        x0_direct, y0_direct, radius_direct);
+    
+    if (!directValid) {
+        m_circleFitFailures++; // Count circle fit failures
+        return false;
+    }
+    
+    // Calculate using sagitta method
+    double x0_sagitta, y0_sagitta, radius_sagitta;
+    bool sagittaValid = calculateCircleCenterSagitta(
+        p1, p2, p3, x0_sagitta, y0_sagitta, radius_sagitta);
+    
+    if (!sagittaValid) {
+        m_circleFitFailures++; // Count circle fit failures
+        return false;
+    }
+    
+    // Use sagitta method for track parameters
+    double radius = radius_sagitta;
+    double x0 = x0_sagitta;
+    double y0 = y0_sagitta;
+    
+    // Exit if radius is unexpectedly large (very straight track)
+    if (radius > 1e5) {
+        m_parameterFailures++; // Count parameter range failures
+        return false;
+    }
+    
+    // Calculate magnetic field
+    dd4hep::Position fieldPos((p1.x() + p2.x() + p3.x())/3.0, 
+                            (p1.y() + p2.y() + p3.y())/3.0, 
+                            (p1.z() + p2.z() + p3.z())/3.0);
+    
+    double actualBz = 0;
+    try {
+        actualBz = m_field.magneticField(fieldPos).z() / dd4hep::tesla;
+    } catch (...) {
+        actualBz = -1.7; // Default if field calculation fails
+    }
+    
+    const double estimatedBz = (std::abs(actualBz) > 0.1) ? actualBz : -1.7; // Tesla
+    
+    // Determine helix direction and charge
+    double phi1 = std::atan2(p1.y() - y0, p1.x() - x0);
+    double phi2 = std::atan2(p2.y() - y0, p2.x() - x0);
+    double phi3 = std::atan2(p3.y() - y0, p3.x() - x0);
+    
+    // Unwrap angles
+    if (phi2 - phi1 > M_PI) phi2 -= 2*M_PI;
+    if (phi2 - phi1 < -M_PI) phi2 += 2*M_PI;
+    if (phi3 - phi2 > M_PI) phi3 -= 2*M_PI;
+    if (phi3 - phi2 < -M_PI) phi3 += 2*M_PI;
+    
+    bool clockwise = (phi3 < phi1);
+    double charge = clockwise ? 1.0 : -1.0;
+    
+    // Calculate pT
+    double pT = 0.3 * std::abs(estimatedBz) * radius / 100.0; // Convert radius from cm to m
+    
+    // Fit z-component
+    double s1 = 0;
+    double s2 = radius * std::abs(phi2 - phi1);
+    double s3 = radius * std::abs(phi3 - phi1);
+    
+    double a, b;
+    fitLine(s1, p1.z(), s2, p2.z(), s3, p3.z(), a, b);
+    
+    double theta = std::atan2(1.0, a);
+    double eta = -std::log(std::tan(theta/2.0));
+    
+    // Calculate impact parameters 
+    double d0 = calculateImpactParameter(x0, y0, radius, clockwise, 
+                                   2.0, estimatedBz,
+                                   p1, p2, p3);
+    double z0 = b; // z0 calculation 
+    
+    // Apply some reasonable parameter checks
+    bool parametersInRange = true;
+    
+    if (pT < 0.1) {  // Very low momentum
+        parametersInRange = false;
+    }
+    
+    if (!parametersInRange) {
+        m_parameterFailures++; // Count parameter range failures
+        return false;
+    }
+    
+    // Track parameters
+    double phi = std::atan2(y0, x0) + (clockwise ? -M_PI/2 : M_PI/2);
+    
+    // Normalize phi
+    if (phi > M_PI) phi -= 2*M_PI;
+    if (phi < -M_PI) phi += 2*M_PI;
+    
+    // Convert to EDM4hep parameters
+    double d0_mm = d0 * 10.0;  // Convert from cm to mm
+    double z0_mm = z0 * 10.0;  // Convert from cm to mm
+    
+    // omega = 1/R with correct sign (R in mm)
+    double omega = charge / (radius * 10.0);  // 1/mm
+    
+    // tanLambda = tan of dip angle
+    double tanLambda = std::sinh(eta);
+    
+    // Create EDM4hep track
+    auto edm_track = tracks->create();
+    
+    // Create track state at IP
+    edm4hep::TrackState state = createTrackState(
+        d0_mm, phi, omega, z0_mm, tanLambda, edm4hep::TrackState::AtIP);
+    
+    // Add track state to track
+    edm_track.addToTrackStates(state);
+    
+    // Add hits to track
+    edm_track.addToTrackerHits(hit1);
+    edm_track.addToTrackerHits(hit2);
+    edm_track.addToTrackerHits(hit3);
+    
+    // Set chi2 and ndf
+    edm_track.setChi2(0.0);  // Initial seed has no chi2 yet
+    edm_track.setNdf(2 * 3 - 5);  // 2 DOF per hit, 5 parameters
+    
+    // Mark hits as used
+    usedHits[idx1] = true;
+    usedHits[idx2] = true;
+    usedHits[idx3] = true;
+    
+    return true;
+}
+
+// --- Add this method to DisplacedTracking.cpp ---
+// Method to print running statistics
+void DisplacedTracking::printRunStatistics() const {
+    info() << "=========================Event accounting:" << endmsg;
+    info() << "  Total input events: " << m_totalInputEvents << endmsg;
+    info() << "  Events processed: " << m_processedEvents << endmsg;
+    double processedPercent = (m_totalInputEvents > 0) ? 
+                            (100.0 * m_processedEvents / m_totalInputEvents) : 0.0;
+    info() << "  Percentage processed: " << processedPercent << "%" << endmsg;
+    info() << "  Events with too few hits (<3): " << m_eventsWithTooFewHits 
+        << " (" << (100.0 * m_eventsWithTooFewHits / m_totalInputEvents) << "%)" << endmsg;
+    info() << "  Events with too few layers (<3): " << m_eventsWithTooFewLayers 
+        << " (" << (100.0 * m_eventsWithTooFewLayers / m_totalInputEvents) << "%)" << endmsg;
+    info() << "  Events with no tracks found: " << m_eventsWithNoTracks 
+        << " (" << (100.0 * m_eventsWithNoTracks / m_totalInputEvents) << "%)" << endmsg;
+    info() << "  Events with tracks: " << m_eventsWithTracks 
+        << " (" << (100.0 * m_eventsWithTracks / m_totalInputEvents) << "%)" << endmsg;
+    info() << "\n===== TRACKING STATISTICS AFTER " << m_processedEvents << " EVENTS =====" << endmsg;
+    info() << "Total hits processed: " << m_totalHits 
+           << " (avg: " << (m_processedEvents > 0 ? m_totalHits / m_processedEvents : 0) << " per event)" << endmsg;
+    
+    info() << "Triplet candidates: " << m_totalTripletCandidates
+           << " (avg: " << (m_processedEvents > 0 ? m_totalTripletCandidates / m_processedEvents : 0) << " per event)" << endmsg;
+    
+    info() << "Valid triplets: " << m_totalValidTriplets 
+           << " (" << (m_totalTripletCandidates > 0 ? 
+                     (100.0 * m_totalValidTriplets / m_totalTripletCandidates) : 0.0) << "% success rate)" << endmsg;
+    
+    info() << "Track candidates: " << m_totalTrackCandidates
+           << " (" << (m_processedEvents > 0 ? m_totalTrackCandidates / m_processedEvents : 0) << " per event)" << endmsg;
+    
+    info() << "Accepted tracks: " << m_totalAcceptedTracks
+           << " (" << (m_totalTrackCandidates > 0 ? 
+                     (100.0 * m_totalAcceptedTracks / m_totalTrackCandidates) : 0.0) << "% of candidates)" << endmsg;
+    
+    info() << "Rejected tracks: " << m_totalRejectedTracks
+           << " (" << (m_totalTrackCandidates > 0 ? 
+                     (100.0 * m_totalRejectedTracks / m_totalTrackCandidates) : 0.0) << "% of candidates)" << endmsg;
+    
+    info() << "Average tracks per event: " << (m_processedEvents > 0 ? 
+                                             (double)m_totalAcceptedTracks / m_processedEvents : 0) << endmsg;
+        // Add detailed triplet failure statistics
+    info() << "\nTriplet failure reasons:" << endmsg;
+    int totalFailures = m_surfaceFailures + m_distanceFailures + m_angleFailures + 
+                        m_circleFitFailures + m_parameterFailures;
+    
+    if (totalFailures > 0) {
+        info() << "  Surface finding failures: " << m_surfaceFailures 
+               << " (" << (100.0 * m_surfaceFailures / totalFailures) << "%)" << endmsg;
+        
+        info() << "  Distance between hits too large: " << m_distanceFailures 
+               << " (" << (100.0 * m_distanceFailures / totalFailures) << "%)" << endmsg;
+        
+        info() << "  Angle consistency failures: " << m_angleFailures 
+               << " (" << (100.0 * m_angleFailures / totalFailures) << "%)" << endmsg;
+        
+        info() << "  Circle fitting failures: " << m_circleFitFailures 
+               << " (" << (100.0 * m_circleFitFailures / totalFailures) << "%)" << endmsg;
+        
+        info() << "  Parameter range failures: " << m_parameterFailures 
+               << " (" << (100.0 * m_parameterFailures / totalFailures) << "%)" << endmsg;
+    } else {
+        info() << "  No triplet failures recorded." << endmsg;
+    }                                         
+    info() << "===============================================" << endmsg;
+}
+
+/*
 edm4hep::TrackCollection DisplacedTracking::findTracks(
     const edm4hep::TrackerHitPlaneCollection* hits) const {
     
@@ -755,7 +1283,7 @@ edm4hep::TrackCollection DisplacedTracking::findTracks(
     info() << "Selected " << finalTracks.size() << " tracks after hit conflict resolution" << endmsg;
     return std::move(finalTracks);
 }
-
+*/
 // New function to calculate circle center and radius using the Direct Formula Method
 bool DisplacedTracking::calculateCircleCenterDirect(
     double x1, double y1, double x2, double y2, double x3, double y3,
@@ -874,7 +1402,7 @@ bool DisplacedTracking::calculateCircleCenterSagitta(
     
     return true;
 }
-
+/*
 bool DisplacedTracking::createTripletSeed(
     const edm4hep::TrackerHitPlane& hit1,
     const edm4hep::TrackerHitPlane& hit2,
@@ -1110,7 +1638,7 @@ bool DisplacedTracking::createTripletSeed(
     debug() << "Created valid EDM4hep track with 3 hits" << endmsg;
     return true;
 }
-
+*/
 bool DisplacedTracking::fitCircle(double x1, double y1, double x2, double y2, double x3, double y3, 
                              double& x0, double& y0, double& radius) const{
     // Using the algebraic method for circle fitting through 3 points
