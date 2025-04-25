@@ -978,13 +978,11 @@ bool DisplacedTracking::createTripletSeed(
             << estimatedBz << " Tesla for calculation as a temporary solution, due to a problem in k4geo in retrieving the right value of Bz" << endmsg;
     
     // Calculate pT using all methods for comparison
-    //double pT_circle = 0.3 * std::abs(estimatedBz) * radius_circle / 100.0; // Convert radius from cm to m
     double pT_direct = 0.3 * std::abs(estimatedBz) * radius_direct / 100.0;
     double pT_sagitta = 0.3 * std::abs(estimatedBz) * sagittaRadius / 100.0;
     double pT_sagitta_full = 0.3 * std::abs(estimatedBz) * radius_sagitta / 100.0;
     
     debug() << "Comparison of pT estimates:" << endmsg;
-    //debug() << "  Circle fit pT: " << pT_circle << " GeV/c" << endmsg;
     debug() << "  Direct formula pT: " << pT_direct << " GeV/c" << endmsg;
     debug() << "  Sagitta simple pT: " << pT_sagitta << " GeV/c" << endmsg;
     debug() << "  Sagitta full pT: " << pT_sagitta_full << " GeV/c" << endmsg;
@@ -1096,38 +1094,7 @@ bool DisplacedTracking::createTripletSeed(
     debug() << "Created valid EDM4hep track with 3 hits" << endmsg;
     return true;
 }
-/*
-bool DisplacedTracking::fitCircle(double x1, double y1, double x2, double y2, double x3, double y3, 
-                             double& x0, double& y0, double& radius) const{
-    // Using the algebraic method for circle fitting through 3 points
-    
-    // Check if points are collinear (or too close)
-    double det = (x1 - x2) * (y2 - y3) - (x2 - x3) * (y1 - y2);
-    if (std::abs(det) < 1e-6) {
-        return false; // Points are collinear
-    }
-    
-    // Calculate circle parameters
-    double temp1 = x1*x1 + y1*y1;
-    double temp2 = x2*x2 + y2*y2;
-    double temp3 = x3*x3 + y3*y3;
-    
-    // Using determinants to solve the system of equations
-    double a = det * ((temp1 - temp2) * (y2 - y3) - (temp2 - temp3) * (y1 - y2));
-    double b = det * ((x1 - x2) * (temp2 - temp3) - (x2 - x3) * (temp1 - temp2));
-    double c = det * ((x1 - x2) * (y2 - y3) * (temp3 - temp1) + 
-                      (x2 - x3) * (y1 - y2) * (temp1 - temp2));
-    
-    // Calculate center coordinates
-    x0 = -a / (2 * det);
-    y0 = -b / (2 * det);
-    
-    // Calculate radius
-    radius = std::sqrt((x1 - x0)*(x1 - x0) + (y1 - y0)*(y1 - y0));
-    
-    return true;
-}
-*/
+
 // This calculates d0 using a two-segment track model for field transitions
 double DisplacedTracking::calculateImpactParameter(
     double x0, double y0, double radius, bool clockwise,
