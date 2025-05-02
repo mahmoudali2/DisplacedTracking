@@ -149,6 +149,24 @@ StatusCode DisplacedTracking::initialize() {
     info() << "Found " << m_surfaces.size() << " detector surfaces in " 
            << m_surfacesByLayer.size() << " layers" << endmsg;
 
+    // Initialize GenFit if enabled
+    if (m_useGenFit) {
+        try {
+            // Create and register the field adapter
+            m_genFitField = std::make_unique<DD4hepFieldAdapter>(m_field);
+            genfit::FieldManager::getInstance()->init(m_genFitField.get());
+            
+            // Create and register the material adapter
+            m_genFitMaterial = std::make_unique<DD4hepMaterialAdapter>(m_materialManager);
+            genfit::MaterialEffects::getInstance()->init(m_genFitMaterial.get());
+            
+            info() << "GenFit initialized successfully" << endmsg;
+        } catch (const genfit::Exception& e) {
+            error() << "Error initializing GenFit: " << e.what() << endmsg;
+            return StatusCode::FAILURE;
+        }
+    }       
+
     return StatusCode::SUCCESS;
 }
 
@@ -295,6 +313,16 @@ StatusCode DisplacedTracking::finalize() {
     if (m_materialManager) {
         delete m_materialManager;
         m_materialManager = nullptr;
+    }
+    
+    // Clean up GenFit resources if needed
+    if (m_useGenFit) {
+        // Field manager and material effects are singletons
+        // They will be cleaned up automatically at program exit
+        
+        // Release our adapters
+        m_genFitField.reset();
+        m_genFitMaterial.reset();
     }
     
     return Algorithm::finalize();
@@ -727,7 +755,7 @@ edm4hep::TrackCollection DisplacedTracking::findTracks(
             debug() << "Selected track with pT = " << trackInfo.pT << " GeV/c" << endmsg;
         }
     }
-    
+/*   
     // Now create the final collection with only the selected tracks
     edm4hep::TrackCollection finalTracks;
     for (size_t idx : selectedTrackIndices) {
@@ -749,6 +777,77 @@ edm4hep::TrackCollection DisplacedTracking::findTracks(
         // Copy hits
         for (int j = 0; j < origTrack.trackerHits_size(); ++j) {
             newTrack.addToTrackerHits(origTrack.getTrackerHits(j));
+        }
+    }
+*/ 
+        // Now create the final collection, using GenFit for fitting if enabled
+    edm4hep::TrackCollection finalTracks;
+    
+    for (size_t idx : selectedTrackIndices) {
+        // Get the original seed track
+        const auto& seedTrack = trackInfos[idx].track;
+        
+        // Create a new track in the final collection
+        auto newTrack = finalTracks.create();
+        
+        // Copy hits from the seed track
+        std::vector<edm4hep::TrackerHitPlane> trackHits;
+        for (int j = 0; j < seedTrack.trackerHits_size(); ++j) {
+            auto hit = seedTrack.getTrackerHits(j);
+            newTrack.addToTrackerHits(hit);
+            trackHits.push_back(hit);
+        }
+        
+        // If GenFit is enabled, perform track fitting
+        if (m_useGenFit) {
+            // Get the seed state (preferring AtIP if available)
+            edm4hep::TrackState seedState;
+            bool foundState = false;
+            
+            for (int j = 0; j < seedTrack.trackStates_size(); ++j) {
+                if (seedTrack.getTrackStates(j).location == edm4hep::TrackState::AtIP) {
+                    seedState = seedTrack.getTrackStates(j);
+                    foundState = true;
+                    break;
+                }
+            }
+            
+            // If no AtIP state found, use the first state
+            if (!foundState && seedTrack.trackStates_size() > 0) {
+                seedState = seedTrack.getTrackStates(0);
+                foundState = true;
+            }
+            
+            if (foundState) {
+                // Fit the track with GenFit
+                bool fitSuccess = fitTrackWithGenFit(trackHits, seedState, newTrack);
+                
+                if (!fitSuccess) {
+                    warning() << "GenFit fitting failed, falling back to seed track parameters" << endmsg;
+                    // Fall back to seed parameters
+                    newTrack.setChi2(seedTrack.getChi2());
+                    newTrack.setNdf(seedTrack.getNdf());
+                    
+                    // Copy track states from seed
+                    for (int j = 0; j < seedTrack.trackStates_size(); ++j) {
+                        newTrack.addToTrackStates(seedTrack.getTrackStates(j));
+                    }
+                }
+            } else {
+                warning() << "No seed state found for track, cannot fit with GenFit" << endmsg;
+                // If no seed state available, use the original track's parameters
+                newTrack.setChi2(seedTrack.getChi2());
+                newTrack.setNdf(seedTrack.getNdf());
+            }
+        } else {
+            // GenFit not enabled, just copy the seed track parameters
+            newTrack.setChi2(seedTrack.getChi2());
+            newTrack.setNdf(seedTrack.getNdf());
+            
+            // Copy track states from seed
+            for (int j = 0; j < seedTrack.trackStates_size(); ++j) {
+                newTrack.addToTrackStates(seedTrack.getTrackStates(j));
+            }
         }
     }
      
@@ -1379,5 +1478,356 @@ void DisplacedTracking::fitLine(double x1, double y1, double x2, double y2, doub
     } else {
         slope = (n * sumxy - sumx * sumy) / denominator;
         intercept = (sumy - slope * sumx) / n;
+    }
+}
+// -------------- GenFit -------------- //
+// ------------------------------------ //
+genfit::MeasuredStateOnPlane DisplacedTracking::convertToGenFitState(
+    const edm4hep::TrackState& state,
+    genfit::AbsTrackRep* rep) const {
+    
+    // Extract EDM4hep track parameters
+    double d0 = state.D0;          // Impact parameter in mm
+    double phi = state.phi;        // Azimuthal angle at PCA
+    double omega = state.omega;    // Signed curvature (1/R) in 1/mm
+    double z0 = state.Z0;          // Z position at PCA
+    double tanLambda = state.tanLambda; // Tangent of dip angle
+    
+    // Calculate position at point of closest approach (PCA)
+    double x = -d0 * sin(phi);
+    double y = d0 * cos(phi);
+    double z = z0;
+    
+    // Get field at this position to calculate momentum
+    dd4hep::Position fieldPos(x/10.0, y/10.0, z/10.0); // Convert mm to cm for DD4hep
+    double bField = m_field.magneticField(fieldPos).z() / dd4hep::tesla;
+    
+    // Use default field if actual field is too small
+    if (std::abs(bField) < 0.1) {
+        bField = -1.7; // Default field value in Tesla
+    }
+    
+    // Calculate momentum from curvature (p_T = 0.3 * |B| * R)
+    // omega = 1/R, so p_T = 0.3 * |B| / |omega|
+    double pT = 0.3 * std::abs(bField) / std::abs(omega); // GeV/c, omega is in 1/mm
+    
+    // Complete momentum vector
+    double px = pT * cos(phi);
+    double py = pT * sin(phi);
+    double pz = pT * tanLambda;
+    double p = sqrt(px*px + py*py + pz*pz);
+    
+    // Charge from omega sign (EDM4hep convention: omega * charge < 0)
+    double charge = (omega < 0) ? 1.0 : -1.0;
+    
+    // Create GenFit state vectors (position in cm, momentum in GeV/c)
+    TVector3 posVec(x/10.0, y/10.0, z/10.0); // Convert mm to cm
+    TVector3 momVec(px, py, pz);
+    
+    // Create a new GenFit state on the reference plane
+    genfit::MeasuredStateOnPlane state_gf(rep);
+    
+    // Set state parameters
+    state_gf.setPosMom(posVec, momVec);
+    state_gf.setQop(charge / p); // q/p = charge / momentum magnitude
+    
+    // Convert covariance matrix from EDM4hep to GenFit format
+    // This is a simplified conversion - a full conversion would need careful parameter mapping
+    TMatrixDSym covMat(6); // 6x6 symmetric matrix
+    
+    // Get the diagonal elements from EDM4hep
+    double covD0 = state.getCovMatrix(edm4hep::TrackParams::D0, edm4hep::TrackParams::D0);
+    double covPhi = state.getCovMatrix(edm4hep::TrackParams::phi, edm4hep::TrackParams::phi);
+    double covOmega = state.getCovMatrix(edm4hep::TrackParams::omega, edm4hep::TrackParams::omega);
+    double covZ0 = state.getCovMatrix(edm4hep::TrackParams::Z0, edm4hep::TrackParams::Z0);
+    double covTanLambda = state.getCovMatrix(edm4hep::TrackParams::tanLambda, edm4hep::TrackParams::tanLambda);
+    
+    // GenFit covariance is for (q/p, u', v', u, v) where u, v are positions on the reference plane
+    // This is a simplified mapping - a proper mapping would require coordinate transformation
+    covMat(0, 0) = covOmega * (0.3 * std::abs(bField)) * (0.3 * std::abs(bField)) / (p*p*p*p); // Convert from omega to q/p
+    covMat(1, 1) = 0.01; // u' (direction) uncertainty
+    covMat(2, 2) = covTanLambda; // v' is similar to tanLambda
+    covMat(3, 3) = covD0 / 100.0; // Convert from mm² to cm²
+    covMat(4, 4) = covZ0 / 100.0; // Convert from mm² to cm²
+    covMat(5, 5) = covPhi;
+    
+    state_gf.setCov(covMat);
+    
+    return state_gf;
+}
+
+edm4hep::TrackState DisplacedTracking::convertToEDM4hepState(
+    const genfit::MeasuredStateOnPlane& state,
+    int location) const {
+    
+    // Get position and momentum from GenFit state
+    TVector3 pos = state.getPos(); // cm
+    TVector3 mom = state.getMom(); // GeV/c
+    double charge = (state.getQop() > 0) ? 1.0 : -1.0;
+    
+    // Calculate derived quantities
+    double px = mom.X();
+    double py = mom.Y();
+    double pz = mom.Z();
+    double pt = sqrt(px*px + py*py);
+    double p = mom.Mag();
+    
+    // Calculate EDM4hep track parameters
+    double phi = atan2(py, px);
+    double tanLambda = pz / pt;
+    
+    // Get field at this position to calculate curvature
+    dd4hep::Position fieldPos(pos.X(), pos.Y(), pos.Z());
+    double bField = m_field.magneticField(fieldPos).z() / dd4hep::tesla;
+    
+    // Use default field if actual field is too small
+    if (std::abs(bField) < 0.1) {
+        bField = -1.7; // Default field value in Tesla
+    }
+    
+    // Calculate curvature (1/R) from pT and B
+    // pT [GeV/c] = 0.3 * |B| [T] * R [m]
+    // omega [1/mm] = 1/R [1/m] * 0.001
+    double omega = charge * 0.3 * std::abs(bField) / (pt * 1000.0); // 1/mm
+    
+    // Calculate impact parameter d0
+    // For a helix, d0 is the distance from (0,0) to the center of the helix, minus the radius
+    // In this simplified calculation, we project the position onto the x-y plane to get d0
+    double d0 = -pos.Y() * cos(phi) + pos.X() * sin(phi);
+    d0 *= 10.0; // Convert from cm to mm
+    
+    // Calculate z position at PCA
+    double z0 = pos.Z() * 10.0; // Convert from cm to mm
+    
+    // Create EDM4hep track state
+    edm4hep::TrackState outState = createTrackState(
+        d0, phi, omega, z0, tanLambda, location);
+    
+    // Convert the covariance matrix
+    // This is a simplified conversion - a full conversion would need careful parameter mapping
+    const TMatrixDSym& covMat = state.getCov();
+    
+    // Map GenFit covariance elements to EDM4hep format
+    // These indices depend on how the matrices are stored in both formats
+    outState.setCovMatrix(covMat(3,3) * 100.0, edm4hep::TrackParams::D0, edm4hep::TrackParams::D0); // cm² to mm²
+    outState.setCovMatrix(covMat(5,5), edm4hep::TrackParams::phi, edm4hep::TrackParams::phi);
+    outState.setCovMatrix(covMat(0,0) * (pt*pt*pt*pt) / ((0.3 * std::abs(bField)) * (0.3 * std::abs(bField))), 
+                          edm4hep::TrackParams::omega, edm4hep::TrackParams::omega); // q/p to omega
+    outState.setCovMatrix(covMat(4,4) * 100.0, edm4hep::TrackParams::Z0, edm4hep::TrackParams::Z0); // cm² to mm²
+    outState.setCovMatrix(covMat(2,2), edm4hep::TrackParams::tanLambda, edm4hep::TrackParams::tanLambda);
+    
+    return outState;
+}
+
+genfit::AbsMeasurement* DisplacedTracking::createGenFitMeasurement(
+    const edm4hep::TrackerHitPlane& hit,
+    const dd4hep::rec::Surface* surface,
+    int hitId,
+    genfit::TrackPoint* trackPoint) const {
+    
+    // Get hit position and errors
+    const auto& pos = hit.getPosition();
+    const auto& posErr = hit.getPositionError();
+    
+    // Convert position from mm to cm for GenFit
+    TVector3 hitPos(pos[0]/10.0, pos[1]/10.0, pos[2]/10.0);
+    
+    // Get surface normal vector
+    dd4hep::rec::Vector3D surfNormal = surface->normal();
+    TVector3 normal(surfNormal.x(), surfNormal.y(), surfNormal.z());
+    
+    // For a planar surface, define the measurement plane
+    if (surface->type() == dd4hep::rec::SurfaceType::Plane) {
+        // Get plane coordinates
+        dd4hep::rec::Vector3D u = surface->u();
+        dd4hep::rec::Vector3D v = surface->v();
+        
+        TVector3 uVec(u.x(), u.y(), u.z());
+        TVector3 vVec(v.x(), v.y(), v.z());
+        
+        // Normalize direction vectors
+        uVec = uVec.Unit();
+        vVec = vVec.Unit();
+        
+        // Calculate local hit coordinates on the surface
+        // The measurement is usually zero in local coordinates if we're on the surface
+        TVectorD hitCoords(2);
+        hitCoords(0) = 0.0; // u coordinate
+        hitCoords(1) = 0.0; // v coordinate
+        
+        // Create the covariance matrix
+        // Convert from mm² to cm²
+        TMatrixDSym hitCov(2);
+        hitCov(0,0) = posErr[0] * posErr[0] / 100.0;
+        hitCov(1,1) = posErr[1] * posErr[1] / 100.0;
+        
+        // Create a planar measurement
+        return new genfit::PlanarMeasurement(hitCoords, hitCov, hitId, trackPoint, hitPos, uVec, vVec);
+    } 
+    else {
+        // For non-planar surfaces, use a spacepoint measurement
+        TVectorD hitCoords(3);
+        hitCoords(0) = hitPos.X();
+        hitCoords(1) = hitPos.Y();
+        hitCoords(2) = hitPos.Z();
+        
+        // Create the covariance matrix for a spacepoint
+        TMatrixDSym hitCov(3);
+        // Use position errors if available, otherwise use reasonable defaults
+        hitCov(0,0) = posErr[0] * posErr[0] / 100.0; // mm² to cm²
+        hitCov(1,1) = posErr[1] * posErr[1] / 100.0;
+        hitCov(2,2) = posErr[2] * posErr[2] / 100.0;
+        
+        return new genfit::SpacepointMeasurement(hitCoords, hitCov, hitId, trackPoint);
+    }
+}
+
+bool DisplacedTracking::fitTrackWithGenFit(
+    const std::vector<edm4hep::TrackerHitPlane>& hits,
+    const edm4hep::TrackState& seedState,
+    edm4hep::Track& finalTrack) const {
+    
+    if (hits.empty()) {
+        warning() << "Cannot fit track - no hits provided" << endmsg;
+        return false;
+    }
+    
+    // Determine particle type for the track representation
+    int pdgCode = 211; // Default to pion
+    if (m_particleType == "electron") pdgCode = 11;
+    else if (m_particleType == "positron") pdgCode = -11;
+    else if (m_particleType == "muon") pdgCode = 13;
+    else if (m_particleType == "antimuon") pdgCode = -13;
+    else if (m_particleType == "pion") pdgCode = 211;
+    else if (m_particleType == "kaon") pdgCode = 321;
+    else if (m_particleType == "proton") pdgCode = 2212;
+    else if (m_particleType == "antiproton") pdgCode = -2212;
+    
+    debug() << "Using particle type: " << m_particleType << " (PDG code: " << pdgCode << ")" << endmsg;
+    
+    try {
+        // Create a track representation
+        genfit::AbsTrackRep* rep = new genfit::RKTrackRep(pdgCode);
+        
+        // Convert the seed state to GenFit format
+        genfit::MeasuredStateOnPlane seedGFState = convertToGenFitState(seedState, rep);
+        
+        // Create a new GenFit track with the seed state
+        genfit::Track fitTrack(rep, seedGFState);
+        
+        // Add hits to the track
+        debug() << "Adding " << hits.size() << " hits to GenFit track" << endmsg;
+        
+        for (size_t i = 0; i < hits.size(); ++i) {
+            const auto& hit = hits[i];
+            
+            // Find the surface for this hit
+            const dd4hep::rec::Surface* surface = findSurface(hit);
+            if (!surface) {
+                warning() << "Could not find surface for hit " << i << endmsg;
+                continue;
+            }
+            
+            // Create a new track point
+            genfit::TrackPoint* trackPoint = new genfit::TrackPoint();
+            
+            // Create a measurement for this hit
+            genfit::AbsMeasurement* measurement = createGenFitMeasurement(hit, surface, i, trackPoint);
+            if (!measurement) {
+                warning() << "Could not create measurement for hit " << i << endmsg;
+                delete trackPoint;
+                continue;
+            }
+            
+            // Add measurement to track point
+            trackPoint->addRawMeasurement(measurement);
+            
+            // Add track point to track
+            fitTrack.insertPoint(trackPoint);
+        }
+        
+        debug() << "Successfully added " << fitTrack.getNumPoints() 
+                << " measurement points to track" << endmsg;
+        
+        // Create and configure Kalman fitter
+        genfit::KalmanFitter fitter;
+        fitter.setMaxIterations(m_maxFitIterations);
+        fitter.setMinIterations(3);
+        fitter.setDebugLvl(1); // Minimal output
+        
+        // Enable material effects
+        fitter.setMaterialEffects(genfit::MaterialEffects::kEnergyLoss | 
+                                  genfit::MaterialEffects::kMultipleStepping);
+        
+        // Perform the fit
+        debug() << "Starting GenFit Kalman fitting" << endmsg;
+        fitter.processTrack(&fitTrack);
+        
+        // Check fit quality
+        genfit::FitStatus* fitStatus = fitTrack.getFitStatus();
+        if (!fitStatus->isFitted()) {
+            warning() << "GenFit track fitting failed" << endmsg;
+            return false;
+        }
+        
+        // Get fit quality metrics
+        double chi2 = fitStatus->getChi2();
+        int ndf = fitStatus->getNdf();
+        
+        debug() << "Track fitted successfully: chi2=" << chi2 
+                << ", ndf=" << ndf << ", chi2/ndf=" << (chi2/ndf) << endmsg;
+        
+        // Update the EDM4hep track with fit results
+        finalTrack.setChi2(chi2);
+        finalTrack.setNdf(ndf);
+        
+        // Get the track states at key positions and add them to EDM4hep track
+        try {
+            // State at IP (extrapolate back to origin)
+            genfit::MeasuredStateOnPlane stateIP = fitTrack.getFittedState();
+            TVector3 origin(0, 0, 0);
+            rep->extrapolateToPoint(stateIP, origin);
+            edm4hep::TrackState ipState = convertToEDM4hepState(stateIP, 
+                                                               edm4hep::TrackState::AtIP);
+            finalTrack.addToTrackStates(ipState);
+            
+            // State at first hit
+            if (fitTrack.getNumPoints() > 0) {
+                genfit::MeasuredStateOnPlane stateFirst = 
+                    fitTrack.getFittedState(0);
+                edm4hep::TrackState firstState = convertToEDM4hepState(stateFirst, 
+                                                                      edm4hep::TrackState::AtFirstHit);
+                finalTrack.addToTrackStates(firstState);
+            }
+            
+            // State at last hit
+            if (fitTrack.getNumPoints() > 1) {
+                genfit::MeasuredStateOnPlane stateLast = 
+                    fitTrack.getFittedState(fitTrack.getNumPoints() - 1);
+                edm4hep::TrackState lastState = convertToEDM4hepState(stateLast, 
+                                                                     edm4hep::TrackState::AtLastHit);
+                finalTrack.addToTrackStates(lastState);
+            }
+            
+            // State at calorimeter (extrapolate to fixed radius)
+            genfit::MeasuredStateOnPlane stateCalo = fitTrack.getFittedState();
+            rep->extrapolateToCylinder(stateCalo, 800.0, TVector3(0, 0, 0), TVector3(0, 0, 1));
+            edm4hep::TrackState caloState = convertToEDM4hepState(stateCalo, 
+                                                                 edm4hep::TrackState::AtCalorimeter);
+            finalTrack.addToTrackStates(caloState);
+            
+        } catch (genfit::Exception& e) {
+            warning() << "Error extracting track states: " << e.what() << endmsg;
+            // Continue anyway - we'll use what we have
+        }
+        
+        debug() << "Successfully created " << finalTrack.trackStates_size() 
+                << " track states from GenFit fit" << endmsg;
+        
+        return true;
+        
+    } catch (genfit::Exception& e) {
+        error() << "GenFit exception during track fitting: " << e.what() << endmsg;
+        return false;
     }
 }

@@ -25,6 +25,9 @@ kalman.MaxDist = 150.0                                # Maximum distance between
 kalman.ParticleType = "muon"                          # Particle type for material effects
 kalman.EncodingStringParameterName = "MuonSystemReadoutID"
 kalman.OutputLevel = 1  # DEBUG level
+# GenFit configuration options
+kalman.UseGenFit = True                               # Enable GenFit track fitting
+kalman.MaxFitIterations = 4                           # Maximum iterations for the Kalman fit
 
 kalman.InputHitCollection = ["MSTrackerHits"]         # Input digitized hits from DDPlanarDigi
 kalman.OutputTrackCollection = ["KalmanTracks"]       # Output reconstructed tracks

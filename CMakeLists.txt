@@ -9,6 +9,7 @@ find_package(ROOT REQUIRED)
 find_package(EDM4HEP REQUIRED)
 find_package(k4FWCore REQUIRED)
 find_package(podio REQUIRED)
+find_package(GenFit REQUIRED)
 
 #include(cmake/Key4hepConfig.cmake)
 
@@ -30,12 +31,15 @@ gaudi_add_module(DisplacedTracking
         DD4hep::DDCore
         ROOT::Core
         ROOT::MathCore
+        ${GENFIT_LIBRARIES}
+        #genfit::genfit
 )
 
 # Include directories
 target_include_directories(DisplacedTracking PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_LIST_DIR}>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+    ${GENFIT_INCLUDE_DIRS}
 )
 
 # Install the target

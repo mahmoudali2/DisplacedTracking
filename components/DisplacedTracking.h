@@ -37,6 +37,25 @@
 // Interface includes
 #include "k4Interface/IGeoSvc.h"
 
+// GenFit includes
+#include "GenFit/Track.h"
+#include "GenFit/TrackCand.h"
+#include "GenFit/AbsTrackRep.h"
+#include "GenFit/RKTrackRep.h"
+#include "GenFit/KalmanFitter.h"
+#include "GenFit/KalmanFitterInfo.h"
+#include "GenFit/MeasuredStateOnPlane.h"
+#include "GenFit/PlanarMeasurement.h"
+#include "GenFit/SpacepointMeasurement.h"
+#include "GenFit/MaterialEffects.h"
+#include "GenFit/TGeoMaterialInterface.h"
+#include "GenFit/FieldManager.h"
+#include "GenFit/AbsBField.h"
+#include "GenFit/FitStatus.h"
+
+// Include our adapter classes
+#include "GenFitAdapters.h"
+
 // Forward declarations
 namespace dd4hep {
     class OverlayedField;
@@ -165,6 +184,33 @@ private:
 
     // Group surfaces by detector layer
     std::map<int, std::vector<const dd4hep::rec::Surface*>> getSurfacesByLayer() const;
+
+    // GenFit track fitting method
+    bool fitTrackWithGenFit(
+        const std::vector<edm4hep::TrackerHitPlane>& hits,
+        const edm4hep::TrackState& seedState,
+        edm4hep::Track& finalTrack) const;
+    
+    // Convert EDM4hep track state to GenFit track representation
+    genfit::MeasuredStateOnPlane convertToGenFitState(
+        const edm4hep::TrackState& state,
+        genfit::AbsTrackRep* rep) const;
+    
+    // Convert GenFit state back to EDM4hep track state
+    edm4hep::TrackState convertToEDM4hepState(
+        const genfit::MeasuredStateOnPlane& state,
+        int location = edm4hep::TrackState::AtOther) const;
+    
+    // Create a GenFit measurement from an EDM4hep hit
+    genfit::AbsMeasurement* createGenFitMeasurement(
+        const edm4hep::TrackerHitPlane& hit,
+        const dd4hep::rec::Surface* surface,
+        int hitId,
+        genfit::TrackPoint* trackPoint) const;
+
+    // Add field and material adapters as members
+    std::unique_ptr<DD4hepFieldAdapter> m_genFitField;
+    std::unique_ptr<DD4hepMaterialAdapter> m_genFitMaterial;
     
     // Properties
     Gaudi::Property<std::string> m_detectorName{this, "DetectorName", "Tracker", "Name of detector to process"};
@@ -172,6 +218,9 @@ private:
     Gaudi::Property<std::string> m_particleType{this, "ParticleType", "pion", "Particle type for material effects"};
     Gaudi::Property<std::string> m_encodingStringParameter{this, "EncodingStringParameterName", "GlobalTrackerReadoutID", "Name of DD4hep parameter with the encoding string"};
     Gaudi::Property<double> m_maxDist{this, "MaxDist", 150.0, "Maximum distance between two hits (cm)"};
+    // GenFit properties
+    Gaudi::Property<int> m_maxFitIterations{this, "MaxFitIterations", 4, "Maximum iterations for track fitting"};
+    Gaudi::Property<bool> m_useGenFit{this, "UseGenFit", true, "Use GenFit for track fitting"};
 
     // Services
     ServiceHandle<IGeoSvc> m_geoSvc{this, "GeoSvc", "GeoSvc", "Detector geometry service"};
@@ -189,5 +238,6 @@ private:
     // Map of known particle types
     std::map<std::string, ParticleProperties> m_particleMap;
 };
+
 DECLARE_COMPONENT(DisplacedTracking)
 #endif // KALMAN_TRACKER_H
