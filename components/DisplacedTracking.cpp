@@ -1522,7 +1522,7 @@ genfit::MeasuredStateOnPlane DisplacedTracking::convertToGenFitState(
     
     // Calculate momentum from curvature (p_T = 0.3 * |B| * R)
     // omega = 1/R, so p_T = 0.3 * |B| / |omega|
-    double pT = 0.3 * std::abs(bField) / std::abs(omega); // GeV/c, omega is in 1/mm
+    double pT = 0.3 * std::abs(bField) / (std::abs(omega) * 1000.0); // GeV/c, omega is in 1/mm and converted to m
     
     // Complete momentum vector
     double px = pT * cos(phi);
@@ -1612,22 +1612,44 @@ edm4hep::TrackState DisplacedTracking::convertToEDM4hepState(
     // Calculate z position at PCA
     double z0 = pos.Z() * 10.0; // Convert from cm to mm
     
-    // Create EDM4hep track state
-    edm4hep::TrackState outState = createTrackState(
-        d0, phi, omega, z0, tanLambda, location);
+    // Create EDM4hep track state with appropriate parameters
+    edm4hep::TrackState outState;
+    outState.D0 = d0;
+    outState.phi = phi;
+    outState.omega = omega;
+    outState.Z0 = z0;
+    outState.tanLambda = tanLambda;
+    outState.location = location;
     
-    // Convert the covariance matrix
-    // This is a simplified conversion - a full conversion would need careful parameter mapping
+    // Get covariance matrix from GenFit state
     const TMatrixDSym& covMat = state.getCov();
     
-    // Map GenFit covariance elements to EDM4hep format
-    // These indices depend on how the matrices are stored in both formats
-    outState.setCovMatrix(covMat(3,3) * 100.0, edm4hep::TrackParams::d0, edm4hep::TrackParams::d0); // cm² to mm²
-    outState.setCovMatrix(covMat(5,5), edm4hep::TrackParams::phi, edm4hep::TrackParams::phi);
-    outState.setCovMatrix(covMat(0,0) * (pt*pt*pt*pt) / ((0.3 * std::abs(bField)) * (0.3 * std::abs(bField))), 
-                          edm4hep::TrackParams::omega, edm4hep::TrackParams::omega); // q/p to omega
-    outState.setCovMatrix(covMat(4,4) * 100.0, edm4hep::TrackParams::z0, edm4hep::TrackParams::z0); // cm² to mm²
-    outState.setCovMatrix(covMat(2,2), edm4hep::TrackParams::tanLambda, edm4hep::TrackParams::tanLambda);
+    // Convert covariance matrix to EDM4hep format
+    // Only access up to 5x5 dimensions to avoid out-of-bounds errors
+    for (int i = 0; i < 5; ++i) {
+        for (int j = 0; j <= i; ++j) {
+            // Apply appropriate scaling based on parameter type
+            double value = covMat(i, j);
+            
+            // Scale position elements from cm² to mm²
+            if (i >= 3 && j >= 3) {
+                value *= 100.0;  // cm² to mm²
+            }
+            // Scale mixed position-momentum elements
+            else if (i >= 3 || j >= 3) {
+                value *= 10.0;   // cm to mm for mixed terms
+            }
+            
+            // Set covariance matrix element
+            outState.setCovMatrix(value, 
+                               static_cast<edm4hep::TrackParams>(i), 
+                               static_cast<edm4hep::TrackParams>(j));
+        }
+    }
+    
+    debug() << "Converted track state: d0=" << d0 << "mm, phi=" << phi 
+           << ", omega=" << omega << "1/mm, z0=" << z0 
+           << "mm, tanLambda=" << tanLambda << endmsg;
     
     return outState;
 }
@@ -1786,7 +1808,10 @@ bool DisplacedTracking::fitTrackWithGenFit(
         // Update the EDM4hep track with fit results
         finalTrack.setChi2(chi2);
         finalTrack.setNdf(ndf);
-        
+
+        for (size_t i = 0; i < hits.size(); ++i) {
+            finalTrack.addToTrackerHits(hits[i]);
+        }
         // Get the track states at key positions and add them to EDM4hep track
         try {
             // State at first hit
