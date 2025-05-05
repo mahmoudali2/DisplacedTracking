@@ -1,8 +1,8 @@
 #ifndef GENFIT_ADAPTERS_H
 #define GENFIT_ADAPTERS_H
 
-#include "GenFit/AbsBField.h"
-#include "GenFit/AbsMaterialInterface.h"
+#include "AbsBField.h"
+#include "AbsMaterialInterface.h"
 #include "DD4hep/Fields.h"
 #include "DDRec/MaterialManager.h"
 #include "DDRec/Vector3D.h"
@@ -42,38 +42,53 @@ class DD4hepMaterialAdapter : public genfit::AbsMaterialInterface {
 public:
     DD4hepMaterialAdapter(dd4hep::rec::MaterialManager* manager) : m_manager(manager) {}
     
-    void getMaterialParameters(double& density, 
-                               double& Z, 
-                               double& A, 
-                               double& radiationLength, 
-                               double& meanExcitationEnergy,
-                               TVector3& position) override {
-        // Convert TVector3 to dd4hep::Vector3D (position is in cm)
-        dd4hep::rec::Vector3D pos(position.X(), position.Y(), position.Z());
+    /**
+     * Initialize track parameters - matches the exact signature from AbsMaterialInterface
+     */
+    virtual bool initTrack(double posX, double posY, double posZ,
+                          double dirX, double dirY, double dirZ) override {
+        // Store the initial position for later use
+        m_currentPos = dd4hep::rec::Vector3D(posX, posY, posZ);
+        m_currentDir = dd4hep::rec::Vector3D(dirX, dirY, dirZ);
         
-        // Get material at this position
-        dd4hep::Material material = m_manager->materialAt(pos);
-        
-        // Set the requested parameters
-        density = material.density() / (dd4hep::g/dd4hep::cm3); // Convert to g/cm³
-        Z = material.Z();
-        A = material.A() / (dd4hep::g/dd4hep::mole); // Convert to g/mole
-        radiationLength = material.radLength() / dd4hep::cm; // Convert to cm
-        meanExcitationEnergy = 16.0e-9 * pow(Z, 0.9); // Approximation in GeV
-        
-        // No need to modify position
+        return true;
     }
     
-    bool initTrack(double& mom, 
-                   int& pdg, 
-                   TVector3& position) override {
-        // This method is called at the beginning of a track extrapolation
-        // We don't need to modify anything here for DD4hep
-        return true;
+    /**
+     * Get material parameters at current position
+     */
+    virtual genfit::Material getMaterialParameters() override {
+        // Get material at current position
+        dd4hep::Material material = m_manager->materialAt(m_currentPos);
+        
+        // Convert to GenFit Material
+        double density = material.density() / (dd4hep::g/dd4hep::cm3); // Convert to g/cm³
+        double Z = material.Z();
+        double A = material.A() / (dd4hep::g/dd4hep::mole); // Convert to g/mole
+        double radiationLength = material.radLength() / dd4hep::cm; // Convert to cm
+        double meanExcitationEnergy = 16.0e-9 * pow(Z, 0.9); // Approximation in GeV
+        
+        return genfit::Material(density, Z, A, radiationLength, meanExcitationEnergy);
+    }
+    
+    /**
+     * Find distance to next boundary
+     */
+    virtual double findNextBoundary(const genfit::RKTrackRep* rep,
+                                   const genfit::M1x7& state7,
+                                   double step,
+                                   bool varField) override {
+        // This is a simplified implementation that doesn't actually find boundaries
+        // In a real implementation, you would trace the track to find the next material boundary
+        
+        // For now, we'll return a large number to indicate no nearby boundary
+        return 1.0e6; // 10 meters (in cm)
     }
     
 private:
     dd4hep::rec::MaterialManager* m_manager;
+    dd4hep::rec::Vector3D m_currentPos;
+    dd4hep::rec::Vector3D m_currentDir;
 };
 
 #endif // GENFIT_ADAPTERS_H

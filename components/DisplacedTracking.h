@@ -38,20 +38,20 @@
 #include "k4Interface/IGeoSvc.h"
 
 // GenFit includes
-#include "GenFit/Track.h"
-#include "GenFit/TrackCand.h"
-#include "GenFit/AbsTrackRep.h"
-#include "GenFit/RKTrackRep.h"
-#include "GenFit/KalmanFitter.h"
-#include "GenFit/KalmanFitterInfo.h"
-#include "GenFit/MeasuredStateOnPlane.h"
-#include "GenFit/PlanarMeasurement.h"
-#include "GenFit/SpacepointMeasurement.h"
-#include "GenFit/MaterialEffects.h"
-#include "GenFit/TGeoMaterialInterface.h"
-#include "GenFit/FieldManager.h"
-#include "GenFit/AbsBField.h"
-#include "GenFit/FitStatus.h"
+#include "Track.h"
+#include "TrackCand.h"
+#include "AbsTrackRep.h"
+#include "RKTrackRep.h"
+#include "KalmanFitter.h"
+#include "KalmanFitterInfo.h"
+#include "MeasuredStateOnPlane.h"
+#include "PlanarMeasurement.h"
+#include "SpacepointMeasurement.h"
+#include "MaterialEffects.h"
+#include "TGeoMaterialInterface.h"
+#include "FieldManager.h"
+#include "AbsBField.h"
+#include "FitStatus.h"
 
 // Include our adapter classes
 #include "GenFitAdapters.h"
@@ -189,7 +189,7 @@ private:
     bool fitTrackWithGenFit(
         const std::vector<edm4hep::TrackerHitPlane>& hits,
         const edm4hep::TrackState& seedState,
-        edm4hep::Track& finalTrack) const;
+        edm4hep::MutableTrack& finalTrack) const;
     
     // Convert EDM4hep track state to GenFit track representation
     genfit::MeasuredStateOnPlane convertToGenFitState(
