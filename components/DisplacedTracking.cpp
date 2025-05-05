@@ -1638,67 +1638,55 @@ genfit::AbsMeasurement* DisplacedTracking::createGenFitMeasurement(
     int hitId,
     genfit::TrackPoint* trackPoint) const {
     
+    // Get surface properties for measurement plane
+    dd4hep::rec::Vector3D u = surface->u();
+    dd4hep::rec::Vector3D v = surface->v();
+    dd4hep::rec::Vector3D origin = surface->origin();
+    
+    // Convert to ROOT's TVector3
+    TVector3 o(origin.x(), origin.y(), origin.z());  // Note: origin already in cm
+    TVector3 uVec(u.x(), u.y(), u.z());
+    TVector3 vVec(v.x(), v.y(), v.z());
+    
     // Get hit position
-    const auto& pos = hit.getPosition();
+    const auto& pos = hit.getPosition();  // mm
     
-    // Convert position from mm to cm for GenFit
-    TVector3 hitPos(pos[0]/10.0, pos[1]/10.0, pos[2]/10.0);
+    // Convert global position to local position on the surface
+    dd4hep::rec::Vector3D hitGlobal(pos[0], pos[1], pos[2]);  // mm
+    dd4hep::rec::Vector2D hitLocal = surface->globalToLocal(dd4hep::mm * hitGlobal);  // cm
     
-    // Get covariance matrix
-    const auto& cov = hit.getCovMatrix();
+    // Create measurement coordinates
+    TVectorD hitCoords(2);
+    hitCoords[0] = hitLocal[0];  // u coordinate in cm
+    hitCoords[1] = hitLocal[1];  // v coordinate in cm
     
-    // Get surface normal vector
-    dd4hep::rec::Vector3D surfNormal = surface->normal();
-    TVector3 normal(surfNormal.x(), surfNormal.y(), surfNormal.z());
+    // Get measurement errors
+    double sigma_u = hit.getDu();  // mm
+    double sigma_v = hit.getDv();  // mm
     
-    // Check if this is a planar surface by comparing the type's value
-    if (surface->type().isPlane()) {  // Use isPlane() method of SurfaceType
-        // For planar surfaces, create a planar measurement
-        
-        // Local hit coordinates (typically zero in our model)
-        TVectorD hitCoords(2);
-        hitCoords(0) = 0.0; // u coordinate
-        hitCoords(1) = 0.0; // v coordinate
-        
-        // Create the covariance matrix
-        TMatrixDSym hitCov(2);
-        
-        // Convert from mm² to cm²
-        hitCov(0,0) = cov[0] / 100.0; // Typically cov(0,0) corresponds to u
-        hitCov(1,1) = cov[2] / 100.0; // Typically cov(2,2) corresponds to v
-        
-        // Extract detector ID from cell ID
-        int detId = hit.getCellID();
-        
-        // Create a planar measurement using the correct constructor signature
-        return new genfit::PlanarMeasurement(hitCoords, hitCov, detId, hitId, trackPoint);
-    } 
-    else {
-        // For non-planar surfaces, use a spacepoint measurement
-        TVectorD hitCoords(3);
-        hitCoords(0) = hitPos.X();
-        hitCoords(1) = hitPos.Y();
-        hitCoords(2) = hitPos.Z();
-        
-        // Create the covariance matrix for a spacepoint
-        TMatrixDSym hitCov(3);
-        
-        // Convert from mm² to cm²
-        hitCov(0,0) = cov[0] / 100.0; // xx
-        hitCov(1,1) = cov[2] / 100.0; // yy
-        hitCov(2,2) = cov[5] / 100.0; // zz
-        
-        // Assume covariance matrix has off-diagonal terms
-        hitCov(0,1) = hitCov(1,0) = cov[1] / 100.0; // xy
-        hitCov(0,2) = hitCov(2,0) = cov[3] / 100.0; // xz
-        hitCov(1,2) = hitCov(2,1) = cov[4] / 100.0; // yz
-        
-        // Extract detector ID from cell ID
-        int detId = hit.getCellID();
-        
-        // Create a spacepoint measurement with the correct constructor signature
-        return new genfit::SpacepointMeasurement(hitCoords, hitCov, detId, hitId, trackPoint);
-    }
+    // If resolutions are zero or not set, use reasonable defaults
+    if (sigma_u <= 0) sigma_u = 0.1;  // 100 microns default
+    if (sigma_v <= 0) sigma_v = 0.1;  // 100 microns default
+    
+    // Create covariance matrix
+    TMatrixDSym hitCov(2);
+    hitCov(0,0) = std::pow(dd4hep::mm * sigma_u, 2);  // cm²
+    hitCov(0,1) = 0;
+    hitCov(1,0) = 0; 
+    hitCov(1,1) = std::pow(dd4hep::mm * sigma_v, 2);  // cm²
+    
+    // Extract detector ID from cell ID
+    int detId = hit.getCellID();
+    
+    // Create planar measurement
+    genfit::PlanarMeasurement* meas = 
+        new genfit::PlanarMeasurement(hitCoords, hitCov, detId, hitId, trackPoint);
+    
+    // Create and set measurement plane
+    genfit::SharedPlanePtr plane(new genfit::DetPlane(o, uVec, vVec));
+    meas->setPlane(plane, detId);  // Use cellID as planeID as in the example
+    
+    return meas;
 }
 
 bool DisplacedTracking::fitTrackWithGenFit(
@@ -1732,8 +1720,10 @@ bool DisplacedTracking::fitTrackWithGenFit(
         genfit::MeasuredStateOnPlane seedGFState = convertToGenFitState(seedState, rep);
         
         // Create a new GenFit track with the seed state
-        TVectorD stateVec = seedGFState.getState();
-        genfit::Track fitTrack(rep, stateVec);
+        // Extract position and momentum from the MeasuredStateOnPlane
+        TVector3 pos = seedGFState.getPos();
+        TVector3 mom = seedGFState.getMom();
+        genfit::Track fitTrack(rep, pos, mom);
         
         // Add hits to the track
         debug() << "Adding " << hits.size() << " hits to GenFit track" << endmsg;
