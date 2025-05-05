@@ -9,9 +9,11 @@ find_package(ROOT REQUIRED)
 find_package(EDM4HEP REQUIRED)
 find_package(k4FWCore REQUIRED)
 find_package(podio REQUIRED)
-find_package(GenFit REQUIRED)
 
-#include(cmake/Key4hepConfig.cmake)
+# ===> Manually set GenFit paths
+set(GENFIT_INSTALL_DIR "/afs/cern.ch/work/m/maali/public/GenFit/install")
+include_directories(${GENFIT_INSTALL_DIR}/include)
+link_directories(${GENFIT_INSTALL_DIR}/lib64)
 
 # Define sources
 set(sources
@@ -31,15 +33,14 @@ gaudi_add_module(DisplacedTracking
         DD4hep::DDCore
         ROOT::Core
         ROOT::MathCore
-        ${GENFIT_LIBRARIES}
-        #genfit::genfit
+        genfit2
 )
 
 # Include directories
 target_include_directories(DisplacedTracking PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_LIST_DIR}>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
-    ${GENFIT_INCLUDE_DIRS}
+    ${GENFIT_INSTALL_DIR}/include
 )
 
 # Install the target
