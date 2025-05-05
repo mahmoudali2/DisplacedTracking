@@ -233,7 +233,7 @@ std::tuple<edm4hep::TrackCollection> DisplacedTracking::operator()(
         bool foundState = false;
         
         for (int j = 0; j < track.trackStates_size(); ++j) {
-            if (track.getTrackStates(j).location == edm4hep::TrackState::AtIP) {
+            if (track.getTrackStates(j).location == edm4hep::TrackState::AtOther) {
                 state = track.getTrackStates(j);
                 foundState = true;
                 break;
@@ -652,7 +652,7 @@ edm4hep::TrackCollection DisplacedTracking::findTracks(
                                 // Get its track state
                                 edm4hep::TrackState state;
                                 for (int j = 0; j < newTrack.trackStates_size(); ++j) {
-                                    if (newTrack.getTrackStates(j).location == edm4hep::TrackState::AtIP) {
+                                    if (newTrack.getTrackStates(j).location == edm4hep::TrackState::AtOther) {
                                         state = newTrack.getTrackStates(j);
                                         break;
                                     }
@@ -818,7 +818,7 @@ edm4hep::TrackCollection DisplacedTracking::findTracks(
             bool foundState = false;
             
             for (int j = 0; j < seedTrack.trackStates_size(); ++j) {
-                if (seedTrack.getTrackStates(j).location == edm4hep::TrackState::AtIP) {
+                if (seedTrack.getTrackStates(j).location == edm4hep::TrackState::AtOther) {
                     seedState = seedTrack.getTrackStates(j);
                     foundState = true;
                     break;
@@ -1184,7 +1184,7 @@ bool DisplacedTracking::createTripletSeed(
     
     // Create track state at IP
     edm4hep::TrackState state = createTrackState(
-        d0_mm, phi, omega, z0_mm, tanLambda, edm4hep::TrackState::AtIP);
+        d0_mm, phi, omega, z0_mm, tanLambda, edm4hep::TrackState::AtOther);
     
     // Add track state to track
     edm_track.addToTrackStates(state);
@@ -1789,14 +1789,6 @@ bool DisplacedTracking::fitTrackWithGenFit(
         
         // Get the track states at key positions and add them to EDM4hep track
         try {
-            // State at IP (extrapolate back to origin)
-            genfit::MeasuredStateOnPlane stateIP = fitTrack.getFittedState();
-            TVector3 origin(0, 0, 0);
-            rep->extrapolateToPoint(stateIP, origin);
-            edm4hep::TrackState ipState = convertToEDM4hepState(stateIP, 
-                                                               edm4hep::TrackState::AtIP);
-            finalTrack.addToTrackStates(ipState);
-            
             // State at first hit
             if (fitTrack.getNumPoints() > 0) {
                 genfit::MeasuredStateOnPlane stateFirst = 
@@ -1814,13 +1806,6 @@ bool DisplacedTracking::fitTrackWithGenFit(
                                                                      edm4hep::TrackState::AtLastHit);
                 finalTrack.addToTrackStates(lastState);
             }
-            
-            // State at calorimeter (extrapolate to fixed radius)
-            genfit::MeasuredStateOnPlane stateCalo = fitTrack.getFittedState();
-            rep->extrapolateToCylinder(stateCalo, 800.0, TVector3(0, 0, 0), TVector3(0, 0, 1));
-            edm4hep::TrackState caloState = convertToEDM4hepState(stateCalo, 
-                                                                 edm4hep::TrackState::AtCalorimeter);
-            finalTrack.addToTrackStates(caloState);
             
         } catch (genfit::Exception& e) {
             warning() << "Error extracting track states: " << e.what() << endmsg;
