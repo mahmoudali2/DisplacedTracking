@@ -1493,6 +1493,7 @@ void DisplacedTracking::fitLine(double x1, double y1, double x2, double y2, doub
         intercept = (sumy - slope * sumx) / n;
     }
 }
+// ------------------------------------ //
 // -------------- GenFit -------------- //
 // ------------------------------------ //
 genfit::MeasuredStateOnPlane DisplacedTracking::convertToGenFitState(
@@ -1722,7 +1723,7 @@ bool DisplacedTracking::fitTrackWithGenFit(
     }
     
     // Determine particle type for the track representation
-    int pdgCode = 211; // Default to pion
+    int pdgCode = 13; // Default to muon
     if (m_particleType == "electron") pdgCode = 11;
     else if (m_particleType == "positron") pdgCode = -11;
     else if (m_particleType == "muon") pdgCode = 13;
