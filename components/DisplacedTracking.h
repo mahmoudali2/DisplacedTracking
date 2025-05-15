@@ -43,6 +43,7 @@
 #include "AbsTrackRep.h"
 #include "RKTrackRep.h"
 #include "KalmanFitter.h"
+#include "KalmanFitterRefTrack.h"
 #include "KalmanFitterInfo.h"
 #include "MeasuredStateOnPlane.h"
 #include "PlanarMeasurement.h"
@@ -185,11 +186,26 @@ private:
     // Group surfaces by detector layer
     std::map<int, std::vector<const dd4hep::rec::Surface*>> getSurfacesByLayer() const;
 
-    // GenFit track fitting method
+    // Extrapolate a state to a detector surface
+    genfit::MeasuredStateOnPlane extrapolateToSurface(
+        const genfit::MeasuredStateOnPlane& state,
+        genfit::AbsTrackRep* rep,
+        const dd4hep::rec::Surface* targetSurface) const;
+
+    // Find hits compatible with a track state
+    std::vector<std::pair<size_t, edm4hep::TrackerHitPlane>> findCompatibleHitsInLayer(
+        const genfit::MeasuredStateOnPlane& state,
+        genfit::AbsTrackRep* rep,
+        int layerID,
+        const edm4hep::TrackerHitPlaneCollection& allHits,
+        double maxChi2) const;
+
+    // fitTrackWithGenFit with extrapolation support
     bool fitTrackWithGenFit(
         const std::vector<edm4hep::TrackerHitPlane>& hits,
         const edm4hep::TrackState& seedState,
-        edm4hep::MutableTrack& finalTrack) const;
+        edm4hep::MutableTrack& finalTrack,
+        const edm4hep::TrackerHitPlaneCollection* allHits = nullptr) const;
     
     // Convert EDM4hep track state to GenFit track representation
     genfit::MeasuredStateOnPlane convertToGenFitState(
@@ -234,6 +250,14 @@ private:
     std::map<int, std::vector<const dd4hep::rec::Surface*>> m_surfacesByLayer; // Surfaces grouped by layer
     ParticleProperties m_particleProperties;  // Particle properties for material effects
     std::unique_ptr<dd4hep::DDSegmentation::BitFieldCoder> m_bitFieldCoder; // For cell ID decoding
+
+    edm4hep::TrackState getSeedState(const edm4hep::Track& track) const;
+    std::vector<edm4hep::TrackerHitPlane> getOriginalHits(
+        const edm4hep::Track& track,
+        const edm4hep::TrackerHitPlaneCollection& allHits) const;
+    int getHighestLayerID(const std::vector<edm4hep::TrackerHitPlane>& hits) const;
+    void copyTrackParameters(const edm4hep::Track& source, edm4hep::MutableTrack& target) const;
+    int getPDGCode() const;
     
     // Map of known particle types
     std::map<std::string, ParticleProperties> m_particleMap;

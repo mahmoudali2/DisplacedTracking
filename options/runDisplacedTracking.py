@@ -24,7 +24,7 @@ kalman.MaxChi2 = 10.0                                 # Maximum chi-square for h
 kalman.MaxDist = 150.0                                # Maximum distance between two hits (cm)
 kalman.ParticleType = "muon"                          # Particle type for material effects
 kalman.EncodingStringParameterName = "MuonSystemReadoutID"
-kalman.OutputLevel = 1  # DEBUG level
+kalman.OutputLevel = 0  # DEBUG level
 # GenFit configuration options
 kalman.UseGenFit = True                               # Enable GenFit track fitting
 kalman.MaxFitIterations = 4                           # Maximum iterations for the Kalman fit

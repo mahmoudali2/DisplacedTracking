@@ -551,7 +551,7 @@ edm4hep::TrackState DisplacedTracking::createTrackState(
 edm4hep::TrackCollection DisplacedTracking::findTracks(
     const edm4hep::TrackerHitPlaneCollection* hits) const {
     
-    // Create output collection for all track candidates
+    // Create output collection for track candidates
     edm4hep::TrackCollection candidateTracks;
     
     // Check if we have enough hits for tracking
@@ -578,293 +578,284 @@ edm4hep::TrackCollection DisplacedTracking::findTracks(
     
     info() << "Found hits in " << hitsByLayer.size() << " layers" << endmsg;
     
-    // Check if we have at least 3 layers with hits
-    if (hitsByLayer.size() < 3) {
+    // Display hit distribution by layer
+    if (msgLevel(MSG::DEBUG)) {
+        debug() << "Hit distribution by layer:" << endmsg;
+        for (const auto& [layer, layerHits] : hitsByLayer) {
+            debug() << "  Layer " << layer << ": " << layerHits.size() << " hits" << endmsg;
+        }
+    }
+    
+    // Get sorted layer IDs
+    std::vector<int> layerIDs;
+    for (const auto& layer : hitsByLayer) {
+        layerIDs.push_back(layer.first);
+    }
+    std::sort(layerIDs.begin(), layerIDs.end());
+    
+    // Report seeding configuration
+    if (layerIDs.size() >= 3) {
+        info() << "Seeding with " << std::min(layerIDs.size(), size_t(3)) << " layers" << endmsg;
+        
+        if (layerIDs.size() > 3) {
+            info() << "Additional layers available for extension" << endmsg;
+        }
+    } else {
         info() << "Not enough layers with hits for triplet seeding (need 3, found " 
-               << hitsByLayer.size() << ")" << endmsg;
+               << layerIDs.size() << ")" << endmsg;
         return std::move(candidateTracks);
     }
     
-    // Debug output - print hit distribution by layer
-    if (msgLevel(MSG::DEBUG)) {
-        debug() << "Hit distribution by layer:" << endmsg;
-        for (const auto& [layer, hits] : hitsByLayer) {
-            debug() << "  Layer " << layer << ": " << hits.size() << " hits" << endmsg;
-        }
-    }
+    // Keep track of which hits are used
+    std::vector<bool> usedHits(hits->size(), false);
     
-    // Vector to track which hits are used during seeding
-    std::vector<bool> tempUsedHits(hits->size(), false);
-    
-    // Structure to hold track candidate info for later selection
-    struct TrackInfo {
+    // Structure to hold track candidates
+    struct TrackCandidate {
         edm4hep::Track track;
         double pT;
         std::vector<size_t> hitIndices;
+        int highestLayerID;
         
-        TrackInfo(edm4hep::Track t, double p) : track(t), pT(p) {}
+        TrackCandidate(edm4hep::Track t, double pt, const std::vector<size_t>& indices, int layerID)
+            : track(t), pT(pt), hitIndices(indices), highestLayerID(layerID) {}
     };
     
-    // Vector to collect all track candidates with their info
-    std::vector<TrackInfo> trackInfos;
+    std::vector<TrackCandidate> trackCandidates;
     
-    // For each possible triplet combination
-    for (auto it1 = hitsByLayer.begin(); it1 != hitsByLayer.end(); ++it1) {
-        int layer1 = it1->first;
-        const auto& hitList1 = it1->second;
+    // Try consecutive layer triplets first
+    for (size_t i = 0; i <= layerIDs.size() - 3; ++i) {
+        int layer1 = layerIDs[i];
+        int layer2 = layerIDs[i+1];
+        int layer3 = layerIDs[i+2];
         
-        for (auto it2 = std::next(it1); it2 != hitsByLayer.end(); ++it2) {
-            int layer2 = it2->first;
-            const auto& hitList2 = it2->second;
-            
-            for (auto it3 = std::next(it2); it3 != hitsByLayer.end(); ++it3) {
-                int layer3 = it3->first;
-                const auto& hitList3 = it3->second;
-                
-                debug() << "Testing hit triplets from layers " << layer1 << ", " 
-                        << layer2 << ", " << layer3 << endmsg;
-                
-                int tripletCandidates = 0;
-                int validTriplets = 0;
-                
-                // Try all hit combinations
-                for (const auto& [idx1, hit1] : hitList1) {
-                    for (const auto& [idx2, hit2] : hitList2) {
-                        for (const auto& [idx3, hit3] : hitList3) {
-                            tripletCandidates++;
-                            
-                            // Reset the temporary used hits vector for each candidate
-                            std::fill(tempUsedHits.begin(), tempUsedHits.end(), false);
-                            
-                            // Get previous size to check if a track was created
-                            size_t prevSize = candidateTracks.size();
-                            
-                            // Create triplet seed
-                            bool seedValid = createTripletSeed(
-                                hit1, hit2, hit3, &candidateTracks, tempUsedHits, idx1, idx2, idx3);
-                            
-                            if (seedValid && candidateTracks.size() > prevSize) {
-                                validTriplets++;
-                                
-                                // Get the newly created track
-                                auto newTrack = candidateTracks[candidateTracks.size() - 1];
-                                
-                                // Get its track state
-                                edm4hep::TrackState state;
-                                for (int j = 0; j < newTrack.trackStates_size(); ++j) {
-                                    if (newTrack.getTrackStates(j).location == edm4hep::TrackState::AtOther) {
-                                        state = newTrack.getTrackStates(j);
-                                        break;
-                                    }
-                                }
-                                
-                                // Get magnetic field at track position
-                                dd4hep::Position fieldPos(0, 0, 0);  // Start with center position
-                                if (newTrack.trackerHits_size() > 0) {
-                                    // Use average position of hits for better field estimate
-                                    double sumX = 0, sumY = 0, sumZ = 0;
-                                    for (int j = 0; j < newTrack.trackerHits_size(); j++) {
-                                        auto hit = newTrack.getTrackerHits(j);
-                                        sumX += hit.getPosition()[0] / 10.0;  // mm to cm
-                                        sumY += hit.getPosition()[1] / 10.0;
-                                        sumZ += hit.getPosition()[2] / 10.0;
-                                    }
-                                    fieldPos = dd4hep::Position(
-                                        sumX / newTrack.trackerHits_size(),
-                                        sumY / newTrack.trackerHits_size(),
-                                        sumZ / newTrack.trackerHits_size()
-                                    );
-                                }
-
-                                // Extract field value in Tesla
-                                double bField = 0.0;
-                                try {
-                                    bField = m_field.magneticField(fieldPos).z() / dd4hep::tesla;
-                                } catch (...) {
-                                    bField = 0.0;  // Handle any field access errors
-                                }
-
-                                // Use default if field is too small
-                                if (std::abs(bField) < 0.1) {
-                                    debug() << "Magnetic field too small (" << bField 
-                                            << " T), using default value -1.7 T" << endmsg;
-                                    bField = -1.7;  // Default field value
-                                } else {
-                                    debug() << "Using magnetic field value: " << bField << " T" << endmsg;
-                                }
-                                
-                                // Calculate pT from track parameters
+        debug() << "Testing hit triplets from layers " << layer1 << ", " 
+                << layer2 << ", " << layer3 << endmsg;
+        
+        int tripletCandidates = 0;
+        int validTriplets = 0;
+        
+        // Try all hit combinations from these three layers
+        for (const auto& [idx1, hit1] : hitsByLayer[layer1]) {
+            for (const auto& [idx2, hit2] : hitsByLayer[layer2]) {
+                for (const auto& [idx3, hit3] : hitsByLayer[layer3]) {
+                    tripletCandidates++;
+                    
+                    // Create a temporary vector for tracking used hits
+                    std::vector<bool> tempUsedHits = usedHits;
+                    
+                    // Try to create a triplet seed
+                    size_t prevSize = candidateTracks.size();
+                    bool seedValid = createTripletSeed(
+                        hit1, hit2, hit3, &candidateTracks, tempUsedHits, idx1, idx2, idx3);
+                    
+                    if (seedValid && candidateTracks.size() > prevSize) {
+                        validTriplets++;
+                        
+                        // Get the new track
+                        auto newTrack = candidateTracks[candidateTracks.size() - 1];
+                        
+                        // Calculate pT
+                        double pT = 0.0;
+                        for (int j = 0; j < newTrack.trackStates_size(); ++j) {
+                            auto state = newTrack.getTrackStates(j);
+                            if (state.location == edm4hep::TrackState::AtOther) {
+                                // omega is 1/R in 1/mm, convert to GeV/c assuming 1.7T field
                                 double omega = state.omega;
-                                double pT =  0.3 * std::abs(bField) / std::abs(omega) * 0.001; // GeV/c
-
-                                // Create TrackInfo with the track and pT
-                                TrackInfo info(newTrack, pT);
-                                
-                                // Add hit indices
-                                info.hitIndices.push_back(idx1);
-                                info.hitIndices.push_back(idx2);
-                                info.hitIndices.push_back(idx3);
-                                
-                                trackInfos.push_back(info);
+                                pT = 0.3 * 1.7 / std::abs(omega) * 0.001; // GeV/c
+                                break;
                             }
                         }
+                        
+                        // Store hit indices
+                        std::vector<size_t> hitIndices = {idx1, idx2, idx3};
+                        
+                        // Add to track candidates
+                        trackCandidates.emplace_back(newTrack, pT, hitIndices, layer3);
                     }
                 }
-                
-                debug() << "Tested " << tripletCandidates << " triplet candidates, found " 
-                        << validTriplets << " valid triplets" << endmsg;
             }
         }
+        
+        debug() << "Tested " << tripletCandidates << " triplet candidates, found " 
+                << validTriplets << " valid triplets" << endmsg;
     }
     
-    info() << "Found " << trackInfos.size() << " track candidates" << endmsg;
+    info() << "Found " << trackCandidates.size() << " triplet track candidates" << endmsg;
     
-    // Now select tracks by prioritizing high-pT tracks and avoiding hit conflicts
+    // Create the final collection for high-quality tracks
+    edm4hep::TrackCollection finalTracks;
     
-    // Sort candidates by descending pT (highest pT first)
-    std::sort(trackInfos.begin(), trackInfos.end(), 
-              [](const TrackInfo& a, const TrackInfo& b) {
+    // Sort candidates by decreasing pT
+    std::sort(trackCandidates.begin(), trackCandidates.end(),
+              [](const TrackCandidate& a, const TrackCandidate& b) {
                   return a.pT > b.pT;
               });
     
-    // Vector to track which hits are used in final tracks
-    std::vector<bool> usedHits(hits->size(), false);
-    
-    // use a vector of indices to select tracks
-    std::vector<size_t> selectedTrackIndices;
-    
-    // Select tracks by prioritizing high-pT tracks and ensuring hits aren't reused
-    for (size_t i = 0; i < trackInfos.size(); ++i) {
-        const auto& trackInfo = trackInfos[i];
-        
-        // Check if any of the hits in this candidate are already used
+    // Process candidates in order of pT, avoiding conflicts
+    for (const auto& candidate : trackCandidates) {
+        // Skip if any hits are already used
         bool hasConflict = false;
-        for (size_t idx : trackInfo.hitIndices) {
+        for (size_t idx : candidate.hitIndices) {
             if (usedHits[idx]) {
                 hasConflict = true;
                 break;
             }
         }
         
-        // If there's no conflict, select this track
-        if (!hasConflict) {
-            selectedTrackIndices.push_back(i);
+        if (hasConflict) {
+            continue;
+        }
+        
+        // Get the seed track and its state
+        const auto& seedTrack = candidate.track;
+        
+        // Find a suitable seed state
+        edm4hep::TrackState seedState;
+        bool foundState = false;
+        
+        for (int j = 0; j < seedTrack.trackStates_size(); ++j) {
+            if (seedTrack.getTrackStates(j).location == edm4hep::TrackState::AtOther) {
+                seedState = seedTrack.getTrackStates(j);
+                foundState = true;
+                break;
+            }
+        }
+        
+        if (!foundState && seedTrack.trackStates_size() > 0) {
+            seedState = seedTrack.getTrackStates(0);
+            foundState = true;
+        }
+        
+        if (!foundState) {
+            warning() << "No seed state found for track, skipping" << endmsg;
+            continue;
+        }
+        
+        // Get the original hits
+        std::vector<edm4hep::TrackerHitPlane> trackHits;
+        for (int j = 0; j < seedTrack.trackerHits_size(); ++j) {
+            auto trackHit = seedTrack.getTrackerHits(j);
             
+            // Find the matching hit in the collection
+            for (size_t i = 0; i < hits->size(); ++i) {
+                const auto& hit = (*hits)[i];
+                if (hit.getCellID() == trackHit.getCellID()) {
+                    trackHits.push_back(hit);
+                    break;
+                }
+            }
+        }
+        
+        // Create a new track
+        auto finalTrack = finalTracks.create();
+        
+        // Fit the track with GenFit, passing the full hit collection
+        bool fitSuccess = fitTrackWithGenFit(
+            trackHits, seedState, finalTrack, hits);
+        
+        if (fitSuccess) {
+            info() << "Successfully fitted track with " << finalTrack.trackerHits_size() 
+                   << " hits, chi2/ndf = " << finalTrack.getChi2() / finalTrack.getNdf() << endmsg;
+                   
             // Mark hits as used
-            for (size_t idx : trackInfo.hitIndices) {
+            for (size_t idx : candidate.hitIndices) {
                 usedHits[idx] = true;
             }
             
-            debug() << "Selected track with pT = " << trackInfo.pT << " GeV/c" << endmsg;
-        }
-    }
-/*   
-    // Now create the final collection with only the selected tracks
-    edm4hep::TrackCollection finalTracks;
-    for (size_t idx : selectedTrackIndices) {
-        // Create a new track in the final collection
-        auto newTrack = finalTracks.create();
-        
-        // Get the original track
-        const auto& origTrack = trackInfos[idx].track;
-        
-        // Copy properties
-        newTrack.setChi2(origTrack.getChi2());
-        newTrack.setNdf(origTrack.getNdf());
-        
-        // Copy track states
-        for (int j = 0; j < origTrack.trackStates_size(); ++j) {
-            newTrack.addToTrackStates(origTrack.getTrackStates(j));
-        }
-        
-        // Copy hits
-        for (int j = 0; j < origTrack.trackerHits_size(); ++j) {
-            newTrack.addToTrackerHits(origTrack.getTrackerHits(j));
-        }
-    }
-*/ 
-        // Now create the final collection, using GenFit for fitting if enabled
-    edm4hep::TrackCollection finalTracks;
-    
-    for (size_t idx : selectedTrackIndices) {
-        // Get the original seed track
-        const auto& seedTrack = trackInfos[idx].track;
-        
-        // Create a new track in the final collection
-        auto newTrack = finalTracks.create();
-        
-        // Copy hits from the seed track
-        std::vector<edm4hep::TrackerHitPlane> trackHits;
-        for (int j = 0; j < seedTrack.trackerHits_size(); ++j) {
-            // Get the hit from the track
-            auto trackHit = seedTrack.getTrackerHits(j);
-            
-            // Find the matching hit in the original collection by ID
-            for (size_t k = 0; k < hits->size(); ++k) {
-                const auto& hitPlane = (*hits)[k];
-                
-                // Check if this is the same hit (by ID or position)
-                if (hitPlane.getCellID() == trackHit.getCellID()) {
-                    trackHits.push_back(hitPlane);
-                    break;
-                }
-            }
-        }
-        
-        // If GenFit is enabled, perform track fitting
-        if (m_useGenFit) {
-            // Get the seed state (preferring AtIP if available)
-            edm4hep::TrackState seedState;
-            bool foundState = false;
-            
-            for (int j = 0; j < seedTrack.trackStates_size(); ++j) {
-                if (seedTrack.getTrackStates(j).location == edm4hep::TrackState::AtOther) {
-                    seedState = seedTrack.getTrackStates(j);
-                    foundState = true;
-                    break;
-                }
-            }
-            
-            // If no AtIP state found, use the first state
-            if (!foundState && seedTrack.trackStates_size() > 0) {
-                seedState = seedTrack.getTrackStates(0);
-                foundState = true;
-            }
-            
-            if (foundState) {
-                // Fit the track with GenFit
-                bool fitSuccess = fitTrackWithGenFit(trackHits, seedState, newTrack);
-                
-                if (!fitSuccess) {
-                    warning() << "GenFit fitting failed, falling back to seed track parameters" << endmsg;
-                    // Fall back to seed parameters
-                    newTrack.setChi2(seedTrack.getChi2());
-                    newTrack.setNdf(seedTrack.getNdf());
+            // If the track was extended with an additional hit, mark that hit as used too
+            if (finalTrack.trackerHits_size() > trackHits.size()) {
+                info() << "Track was extended with " 
+                       << (finalTrack.trackerHits_size() - trackHits.size()) 
+                       << " additional hit(s)" << endmsg;
+                       
+                // We need to find which hit was added and mark it as used
+                for (int j = 0; j < finalTrack.trackerHits_size(); ++j) {
+                    auto finalHit = finalTrack.getTrackerHits(j);
                     
-                    // Copy track states from seed
-                    for (int j = 0; j < seedTrack.trackStates_size(); ++j) {
-                        newTrack.addToTrackStates(seedTrack.getTrackStates(j));
+                    // Check if this hit is in the original trackHits
+                    bool isOriginalHit = false;
+                    for (const auto& origHit : trackHits) {
+                        if (finalHit.getCellID() == origHit.getCellID()) {
+                            isOriginalHit = true;
+                            break;
+                        }
+                    }
+                    
+                    // If not in original hits, find and mark as used
+                    if (!isOriginalHit) {
+                        // Find the hit index in the original collection
+                        for (size_t i = 0; i < hits->size(); ++i) {
+                            if ((*hits)[i].getCellID() == finalHit.getCellID() && !usedHits[i]) {
+                                usedHits[i] = true;
+                                debug() << "Marked added hit at index " << i << " as used" << endmsg;
+                                break;
+                            }
+                        }
                     }
                 }
-            } else {
-                warning() << "No seed state found for track, cannot fit with GenFit" << endmsg;
-                // If no seed state available, use the original track's parameters
-                newTrack.setChi2(seedTrack.getChi2());
-                newTrack.setNdf(seedTrack.getNdf());
             }
         } else {
-            // GenFit not enabled, just copy the seed track parameters
-            newTrack.setChi2(seedTrack.getChi2());
-            newTrack.setNdf(seedTrack.getNdf());
+            warning() << "Track fitting failed, using seed parameters" << endmsg;
             
-            // Copy track states from seed
+            // Fall back to seed parameters
+            finalTrack.setChi2(seedTrack.getChi2());
+            finalTrack.setNdf(seedTrack.getNdf());
+            
+            // Copy track states
             for (int j = 0; j < seedTrack.trackStates_size(); ++j) {
-                newTrack.addToTrackStates(seedTrack.getTrackStates(j));
+                finalTrack.addToTrackStates(seedTrack.getTrackStates(j));
+            }
+            
+            // Add hits to track
+            for (const auto& hit : trackHits) {
+                finalTrack.addToTrackerHits(hit);
+            }
+            
+            // Mark hits as used
+            for (size_t idx : candidate.hitIndices) {
+                usedHits[idx] = true;
             }
         }
     }
-     
-    info() << "Selected " << finalTracks.size() << " tracks after hit conflict resolution" << endmsg;
+    
+    info() << "Found " << finalTracks.size() << " tracks" << endmsg;
+    
+    // Print track details
+    for (size_t i = 0; i < finalTracks.size(); ++i) {
+        const auto& track = finalTracks[i];
+        
+        // Get track state at IP if available
+        edm4hep::TrackState state;
+        bool foundState = false;
+        
+        for (int j = 0; j < track.trackStates_size(); ++j) {
+            if (track.getTrackStates(j).location == edm4hep::TrackState::AtOther) {
+                state = track.getTrackStates(j);
+                foundState = true;
+                break;
+            }
+        }
+        
+        if (!foundState && track.trackStates_size() > 0) {
+            state = track.getTrackStates(0);
+            foundState = true;
+        }
+        
+        if (foundState) {
+            // Calculate parameters for display
+            double omega = state.omega;
+            double bField = -1.7; // Tesla
+            double pT = 0.3 * std::abs(bField) / std::abs(omega) * 0.001; // GeV/c
+            
+            double tanLambda = state.tanLambda;
+            double theta = std::atan2(1.0, tanLambda);
+            double eta = -std::log(std::tan(theta/2.0));
+            
+            double d0 = state.D0 / 10.0;  // mm to cm
+            double z0 = state.Z0 / 10.0;  // mm to cm
+        }
+    }
+    
     return std::move(finalTracks);
 }
 
@@ -1027,12 +1018,13 @@ bool DisplacedTracking::createTripletSeed(
     Eigen::Vector3d v2 = p3 - p2;
     v1.normalize();
     v2.normalize();
+    /*
     double cosAngle = v1.dot(v2);
-    if (cosAngle < 0.9) { // Allow up to about 25 degrees deviation
+    if (cosAngle < 0.75) { // Allow up to about 25 degrees deviation
         debug() << "Hits not along a consistent path, angle too large" << endmsg;
         return false;
     }
-    
+    */
     debug() << "Fitting circle through points (cm): " 
             << "(" << p1.x() << "," << p1.y() << "), "
             << "(" << p2.x() << "," << p2.y() << "), "
@@ -1142,10 +1134,13 @@ bool DisplacedTracking::createTripletSeed(
     double innerFieldStrength = 2.0;   // 2T inside solenoid
     double outerFieldStrength = -1.7;  // -1.7T outside solenoid
 
+    double d0 = std::sqrt(std::pow(x0, 2) + std::pow(y0, 2)) - radius;
+    /*
     // Use the two-segment model for d0 calculation
     double d0 = calculateImpactParameter(x0, y0, radius, clockwise, 
                                    innerFieldStrength, outerFieldStrength,
                                    p1, p2, p3);
+    */
     double z0 = b; // z0 calculation remains the same
     
     debug() << "Impact parameters: d0=" << d0 << " cm, z0=" << z0 << " cm" << endmsg;
@@ -1178,14 +1173,18 @@ bool DisplacedTracking::createTripletSeed(
     debug() << "EDM4hep parameters: d0=" << d0_mm << " mm, phi=" << phi 
             << ", omega=" << omega << " 1/mm, z0=" << z0_mm 
             << " mm, tanLambda=" << tanLambda << endmsg;
-    
+
     // Create EDM4hep track
     auto edm_track = tracks->create();
     
     // Create track state at IP
     edm4hep::TrackState state = createTrackState(
         d0_mm, phi, omega, z0_mm, tanLambda, edm4hep::TrackState::AtOther);
-    
+
+    // Set reference point to the first hit position
+    const auto& firstHitPos = hit1.getPosition();
+    state.referencePoint = edm4hep::Vector3f(firstHitPos[0], firstHitPos[1], firstHitPos[2]);
+
     // Add track state to track
     edm_track.addToTrackStates(state);
     
@@ -1195,8 +1194,8 @@ bool DisplacedTracking::createTripletSeed(
     edm_track.addToTrackerHits(hit3);
     
     // Set chi2 and ndf
-    edm_track.setChi2(0.0);  // Initial seed has no chi2 yet
-    edm_track.setNdf(2 * 3 - 5);  // 2 DOF per hit, 5 parameters
+    //edm_track.setChi2(0.0);  // Initial seed has no chi2 yet
+    //edm_track.setNdf(2 * 3 - 5);  // 2 DOF per hit, 5 parameters
     
     // Mark hits as used
     usedHits[idx1] = true;
@@ -1206,7 +1205,7 @@ bool DisplacedTracking::createTripletSeed(
     debug() << "Created valid EDM4hep track with 3 hits" << endmsg;
     return true;
 }
-
+/*
 // This calculates d0 using a two-segment track model for field transitions
 double DisplacedTracking::calculateImpactParameter(
     double x0, double y0, double radius, bool clockwise,
@@ -1470,7 +1469,7 @@ double DisplacedTracking::calculateImpactParameter(
     
     return d0;
 }
-
+*/
 void DisplacedTracking::fitLine(double x1, double y1, double x2, double y2, double x3, double y3,
                            double& slope, double& intercept) const{
     // Fit line using least squares method
@@ -1507,10 +1506,10 @@ genfit::MeasuredStateOnPlane DisplacedTracking::convertToGenFitState(
     double z0 = state.Z0;          // Z position at PCA
     double tanLambda = state.tanLambda; // Tangent of dip angle
     
-    // Calculate position at point of closest approach (PCA)
-    double x = -d0 * sin(phi);
-    double y = d0 * cos(phi);
-    double z = z0;
+    // Use reference point (first hit position)
+    double x = state.referencePoint[0];
+    double y = state.referencePoint[1];
+    double z = state.referencePoint[2];
     
     // Get field at this position to calculate momentum
     dd4hep::Position fieldPos(x/10.0, y/10.0, z/10.0); // Convert mm to cm for DD4hep
@@ -1521,22 +1520,62 @@ genfit::MeasuredStateOnPlane DisplacedTracking::convertToGenFitState(
         bField = -1.7; // Default field value in Tesla
     }
     
-    // Calculate momentum from curvature (p_T = 0.3 * |B| * R)
-    // omega = 1/R, so p_T = 0.3 * |B| / |omega|
-    double pT = 0.3 * std::abs(bField) / (std::abs(omega) * 1000.0); // GeV/c, omega is in 1/mm and converted to m
+    // Calculate pT from curvature
+    double pT = 0.3 * std::abs(bField) / (std::abs(omega) * 1000.0); // GeV/c
     
-    // Complete momentum vector
-    double px = pT * cos(phi);
-    double py = pT * sin(phi);
+    // Calculate center of helix
+    double radius = 1.0 / std::abs(omega); // mm
+    double centerX, centerY;
+    
+    if (omega < 0) { // Positive charge
+        centerX = -d0 * sin(phi) - radius * cos(phi);
+        centerY = d0 * cos(phi) - radius * sin(phi);
+    } else { // Negative charge
+        centerX = -d0 * sin(phi) + radius * cos(phi);
+        centerY = d0 * cos(phi) + radius * sin(phi);
+    }
+    debug() << "Circle Radius: " << radius;
+    debug() << "Circle center, x: " << centerX;
+    debug() << "Circle center, y: " << centerY;
+
+    // Calculate momentum direction at the first hit
+    double hitX = x/10.0; // convert mm to cm
+    double hitY = y/10.0;
+    
+    // Vector from center to hit position
+    double vecX = hitX - centerX/10.0; // convert center to cm
+    double vecY = hitY - centerY/10.0;
+    double vecMag = sqrt(vecX*vecX + vecY*vecY);
+    
+    // Normalize vector
+    vecX /= vecMag;
+    vecY /= vecMag;
+    
+    // Rotate 90 degrees to get tangent direction (momentum)
+    double momDirX, momDirY;
+    if (omega < 0) { // Positive charge -> clockwise
+        momDirX = -vecY;
+        momDirY = vecX;
+    } else { // Negative charge -> counter-clockwise
+        momDirX = vecY;
+        momDirY = -vecX;
+    }
+    
+    // Create momentum vector at the hit
+    double px = pT * momDirX;
+    double py = pT * momDirY;
     double pz = pT * tanLambda;
     double p = sqrt(px*px + py*py + pz*pz);
     
-    // Charge from omega sign (EDM4hep convention: omega * charge < 0)
+    // Charge from omega sign
     double charge = (omega < 0) ? 1.0 : -1.0;
     
-    // Create GenFit state vectors (position in cm, momentum in GeV/c)
+    // Create GenFit state vectors
     TVector3 posVec(x/10.0, y/10.0, z/10.0); // Convert mm to cm
     TVector3 momVec(px, py, pz);
+    
+    //debug() << "Pos initialization:\n" << posVec.Print();
+    //debug() << "Mom initialization:\n" << momVec.Print();
     
     // Create a new GenFit state on the reference plane
     genfit::MeasuredStateOnPlane state_gf(rep);
@@ -1548,22 +1587,21 @@ genfit::MeasuredStateOnPlane DisplacedTracking::convertToGenFitState(
     // Convert covariance matrix from EDM4hep to GenFit format
     // This is a simplified conversion - a full conversion would need careful parameter mapping
     TMatrixDSym covMat(6); // 6x6 symmetric matrix
-    
+    /*
     // Get the diagonal elements from EDM4hep
     double covD0 = state.getCovMatrix(edm4hep::TrackParams::d0, edm4hep::TrackParams::d0);
     double covPhi = state.getCovMatrix(edm4hep::TrackParams::phi, edm4hep::TrackParams::phi);
     double covOmega = state.getCovMatrix(edm4hep::TrackParams::omega, edm4hep::TrackParams::omega);
     double covZ0 = state.getCovMatrix(edm4hep::TrackParams::z0, edm4hep::TrackParams::z0);
     double covTanLambda = state.getCovMatrix(edm4hep::TrackParams::tanLambda, edm4hep::TrackParams::tanLambda);
-    
-    // GenFit covariance is for (q/p, u', v', u, v) where u, v are positions on the reference plane
+    */
     // This is a simplified mapping - a proper mapping would require coordinate transformation
-    covMat(0, 0) = covOmega * (0.3 * std::abs(bField)) * (0.3 * std::abs(bField)) / (p*p*p*p); // Convert from omega to q/p
-    covMat(1, 1) = 0.01; // u' (direction) uncertainty
-    covMat(2, 2) = covTanLambda; // v' is similar to tanLambda
-    covMat(3, 3) = covD0 / 100.0; // Convert from mm² to cm²
-    covMat(4, 4) = covZ0 / 100.0; // Convert from mm² to cm²
-    covMat(5, 5) = covPhi;
+    covMat(0, 0) = 0.004; //xx
+    covMat(1, 1) = 0.004; //yy
+    covMat(2, 2) = 0.004; //zz
+    covMat(3, 3) = 0.01; //pxpx
+    covMat(4, 4) = 0.01; //pypy
+    covMat(5, 5) = 0.01; //pzpz
     
     state_gf.setCov(covMat);
     
@@ -1715,7 +1753,8 @@ genfit::AbsMeasurement* DisplacedTracking::createGenFitMeasurement(
 bool DisplacedTracking::fitTrackWithGenFit(
     const std::vector<edm4hep::TrackerHitPlane>& hits,
     const edm4hep::TrackState& seedState,
-    edm4hep::MutableTrack& finalTrack) const {
+    edm4hep::MutableTrack& finalTrack,
+    const edm4hep::TrackerHitPlaneCollection* allHits) const {
     
     if (hits.empty()) {
         warning() << "Cannot fit track - no hits provided" << endmsg;
@@ -1723,15 +1762,7 @@ bool DisplacedTracking::fitTrackWithGenFit(
     }
     
     // Determine particle type for the track representation
-    int pdgCode = 13; // Default to muon
-    if (m_particleType == "electron") pdgCode = 11;
-    else if (m_particleType == "positron") pdgCode = -11;
-    else if (m_particleType == "muon") pdgCode = 13;
-    else if (m_particleType == "antimuon") pdgCode = -13;
-    else if (m_particleType == "pion") pdgCode = 211;
-    else if (m_particleType == "kaon") pdgCode = 321;
-    else if (m_particleType == "proton") pdgCode = 2212;
-    else if (m_particleType == "antiproton") pdgCode = -2212;
+    int pdgCode = getPDGCode();
     
     debug() << "Using particle type: " << m_particleType << " (PDG code: " << pdgCode << ")" << endmsg;
     
@@ -1746,10 +1777,20 @@ bool DisplacedTracking::fitTrackWithGenFit(
         // Extract position and momentum from the MeasuredStateOnPlane
         TVector3 pos = seedGFState.getPos();
         TVector3 mom = seedGFState.getMom();
+
+        debug() << "Pos initialization:" << endmsg;
+        pos.Print();
+        debug() << "Mom initialization:" << endmsg;
+        mom.Print();
+        
         genfit::Track fitTrack(rep, pos, mom);
         
         // Add hits to the track
         debug() << "Adding " << hits.size() << " hits to GenFit track" << endmsg;
+        
+        // Map to keep track of hit's layer ID - useful for extrapolation
+        std::map<int, std::vector<const dd4hep::rec::Surface*>> hitLayerMap;
+        int highestLayerID = -1;
         
         for (size_t i = 0; i < hits.size(); ++i) {
             const auto& hit = hits[i];
@@ -1760,6 +1801,11 @@ bool DisplacedTracking::fitTrackWithGenFit(
                 warning() << "Could not find surface for hit " << i << endmsg;
                 continue;
             }
+            
+            // Keep track of which layers we have hits in
+            int layerID = getLayerID(hit.getCellID());
+            hitLayerMap[layerID].push_back(surface);
+            highestLayerID = std::max(highestLayerID, layerID);
             
             // Create a new track point
             genfit::TrackPoint* trackPoint = new genfit::TrackPoint();
@@ -1804,15 +1850,180 @@ bool DisplacedTracking::fitTrackWithGenFit(
         int ndf = fitStatus->getNdf();
         
         debug() << "Track fitted successfully: chi2=" << chi2 
-                << ", ndf=" << ndf << ", chi2/ndf=" << (chi2/ndf) << endmsg;
+                << ", ndf=" << ndf << ", chi2/ndf=" << (chi2/(ndf*1.0)) << endmsg;
+        
+        // Create a collection of hits to be used for the final fit
+        std::vector<edm4hep::TrackerHitPlane> finalHits = hits;
+        bool extended = false;
+        
+        // Extrapolate to next layer and find compatible hits if allHits is provided
+        if (allHits != nullptr) {
+            // Determine the next layer ID
+            int nextLayerID = highestLayerID;
+            
+            // Check if there's a defined next layer
+            auto nextLayerIter = m_surfacesByLayer.find(nextLayerID);
+            if (nextLayerIter != m_surfacesByLayer.end() && !nextLayerIter->second.empty()) {
+                debug() << "Attempting to find compatible hits in next layer: " << nextLayerID << endmsg;
+                
+                // Get the state at the last hit
+                if (fitTrack.getNumPoints() > 0) {
+                    try {
+                        // Get the fitted state at the last point
+                        genfit::MeasuredStateOnPlane lastState = 
+                            fitTrack.getFittedState(fitTrack.getNumPoints() - 1);
+                        
+                        // Find typical surface in next layer - use first one for extrapolation
+                        const dd4hep::rec::Surface* nextLayerSurface = nextLayerIter->second.front();
+                        
+                        // Extrapolate to next layer
+                        genfit::MeasuredStateOnPlane extrapolatedState = 
+                            extrapolateToSurface(lastState, rep, nextLayerSurface);
+                        
+                        // Convert to EDM4hep and add to track
+                        edm4hep::TrackState nextLayerState = 
+                            convertToEDM4hepState(extrapolatedState, edm4hep::TrackState::AtOther);
+                        finalTrack.addToTrackStates(nextLayerState);
+                        
+                        debug() << "Successfully extrapolated to layer " << nextLayerID << endmsg;
+                        
+                        // Manual approach to find compatible hits in the next layer
+                        std::vector<std::pair<double, edm4hep::TrackerHitPlane>> compatibleHits;
+                        
+                        // For each hit in the collection
+                        for (size_t i = 0; i < allHits->size(); ++i) {
+                            const auto& hit = (*allHits)[i];
+                            
+                            // Check if hit is in the target layer
+                            int hitLayerID = getLayerID(hit.getCellID());
+                            if (hitLayerID != nextLayerID) continue;
+                            
+                            // Find surface for this hit
+                            const dd4hep::rec::Surface* surface = findSurface(hit);
+                            if (!surface) continue;
+                            
+                            try {
+                                // Get hit position in local coordinates
+                                const auto& pos = hit.getPosition(); // mm
+                                dd4hep::rec::Vector3D hitGlobal(pos[0], pos[1], pos[2]);
+                                dd4hep::rec::Vector2D hitLocal = surface->globalToLocal(dd4hep::mm * hitGlobal);
+                                
+                                // Get extrapolated position in local coordinates
+                                TVector3 extrapPos = extrapolatedState.getPos(); // cm
+                                dd4hep::rec::Vector3D extrapGlobal(extrapPos.X() * 10.0, extrapPos.Y() * 10.0, extrapPos.Z() * 10.0); // convert to mm
+                                dd4hep::rec::Vector2D extrapLocal = surface->globalToLocal(extrapGlobal);
+                                
+                                // Calculate chi-square
+                                double du = hit.getDu() > 0 ? hit.getDu() : 0.1; // mm
+                                double dv = hit.getDv() > 0 ? hit.getDv() : 0.1; // mm
+                                
+                                double resU = (hitLocal[0] - extrapLocal[0] / 10.0); // convert extrapLocal from cm to mm
+                                double resV = (hitLocal[1] - extrapLocal[1] / 10.0);
+                                
+                                double chi2 = (resU*resU)/(du*du) + (resV*resV)/(dv*dv);
+                                
+                                if (chi2 < m_maxChi2) {
+                                    compatibleHits.push_back(std::make_pair(chi2, hit));
+                                    debug() << "Found compatible hit in layer " << nextLayerID 
+                                           << " with chi2 = " << chi2 << endmsg;
+                                }
+                            } catch (genfit::Exception&) {
+                                continue; // Skip if extrapolation fails
+                            }
+                        }
+                        
+                        debug() << "Found " << compatibleHits.size() 
+                                << " compatible hits in next layer" << endmsg;
+                                
+                        if (!compatibleHits.empty()) {
+                            // Sort by increasing chi-square
+                            std::sort(compatibleHits.begin(), compatibleHits.end(),
+                                    [](const auto& a, const auto& b) {
+                                        return a.first < b.first; // chi2 comparison
+                                    });
+                            
+                            // Add the best hit to our track
+                            const auto& bestHit = compatibleHits.front().second;
+                            finalHits.push_back(bestHit);
+                            extended = true;
+                            
+                            debug() << "Added compatible hit from layer " << nextLayerID 
+                                   << " with chi2 = " << compatibleHits.front().first << endmsg;
+                        }
+                        
+                    } catch (genfit::Exception& e) {
+                        warning() << "Error extrapolating to next layer: " << e.what() << endmsg;
+                    }
+                }
+            } else {
+                debug() << "No next layer available (current highest: " << highestLayerID << ")" << endmsg;
+            }
+        }
+        
+        // If we found a compatible hit in the next layer, refit the track
+        if (extended) {
+            debug() << "Refitting track with additional hit(s)" << endmsg;
+            
+            // Create a new track with updated hits
+            genfit::Track extendedTrack(rep, pos, mom);
+            
+            // Add all hits to the track
+            for (size_t i = 0; i < finalHits.size(); ++i) {
+                const auto& hit = finalHits[i];
+                
+                // Find the surface for this hit
+                const dd4hep::rec::Surface* surface = findSurface(hit);
+                if (!surface) {
+                    warning() << "Could not find surface for hit " << i << " during refit" << endmsg;
+                    continue;
+                }
+                
+                // Create a new track point
+                genfit::TrackPoint* trackPoint = new genfit::TrackPoint();
+                
+                // Create a measurement for this hit
+                genfit::AbsMeasurement* measurement = createGenFitMeasurement(hit, surface, i, trackPoint);
+                if (!measurement) {
+                    warning() << "Could not create measurement for hit " << i << " during refit" << endmsg;
+                    delete trackPoint;
+                    continue;
+                }
+                
+                // Add measurement to track point
+                trackPoint->addRawMeasurement(measurement);
+                
+                // Add track point to track
+                extendedTrack.insertPoint(trackPoint);
+            }
+            
+            // Refit the extended track
+            fitter.processTrack(&extendedTrack);
+            
+            // Check if refit was successful
+            if (extendedTrack.getFitStatus()->isFitted()) {
+                // Use the extended track for output
+                fitTrack = extendedTrack;
+                chi2 = extendedTrack.getFitStatus()->getChi2();
+                ndf = extendedTrack.getFitStatus()->getNdf();
+                
+                debug() << "Extended track refit successful: chi2=" << chi2 
+                       << ", ndf=" << ndf << ", chi2/ndf=" << (chi2/(ndf*1.0)) << endmsg;
+            } else {
+                warning() << "Refit of extended track failed, using original fit" << endmsg;
+                // Fall back to original fit
+                extended = false;
+            }
+        }
         
         // Update the EDM4hep track with fit results
         finalTrack.setChi2(chi2);
         finalTrack.setNdf(ndf);
 
-        for (size_t i = 0; i < hits.size(); ++i) {
-            finalTrack.addToTrackerHits(hits[i]);
+        // Add final hits to the track
+        for (const auto& hit : (extended ? finalHits : hits)) {
+            finalTrack.addToTrackerHits(hit);
         }
+        
         // Get the track states at key positions and add them to EDM4hep track
         try {
             // State at first hit
@@ -1833,6 +2044,11 @@ bool DisplacedTracking::fitTrackWithGenFit(
                 finalTrack.addToTrackStates(lastState);
             }
             
+            // Add state at IP or other reference point
+            edm4hep::TrackState refState = convertToEDM4hepState(seedGFState, 
+                                                               edm4hep::TrackState::AtOther);
+            finalTrack.addToTrackStates(refState);
+            
         } catch (genfit::Exception& e) {
             warning() << "Error extracting track states: " << e.what() << endmsg;
             // Continue anyway - we'll use what we have
@@ -1846,5 +2062,185 @@ bool DisplacedTracking::fitTrackWithGenFit(
     } catch (genfit::Exception& e) {
         error() << "GenFit exception during track fitting: " << e.what() << endmsg;
         return false;
+    }
+}
+
+// Extrapolate the track to +3 layers
+genfit::MeasuredStateOnPlane DisplacedTracking::extrapolateToSurface(
+    const genfit::MeasuredStateOnPlane& state,
+    genfit::AbsTrackRep* rep,
+    const dd4hep::rec::Surface* targetSurface) const {
+    
+    // Extract surface properties
+    dd4hep::rec::Vector3D normal = targetSurface->normal();
+    dd4hep::rec::Vector3D origin = targetSurface->origin();
+    
+    // Convert to ROOT's TVector3
+    TVector3 planeOrigin(origin.x(), origin.y(), origin.z());  // Already in cm
+    TVector3 planeNormal(normal.x(), normal.y(), normal.z());
+    
+    // Create destination plane
+    genfit::SharedPlanePtr destPlane(new genfit::DetPlane(planeOrigin, planeNormal));
+    
+    // Clone state to avoid modifying the original
+    genfit::MeasuredStateOnPlane newState(state);
+    
+    try {
+        // Extrapolate to the destination plane
+        rep->extrapolateToPlane(newState, destPlane);
+        return newState;
+    }
+    catch(genfit::Exception& e) {
+        warning() << "Extrapolation failed: " << e.what() << endmsg;
+        throw; // Re-throw to allow caller to handle the error
+    }
+}
+
+std::vector<std::pair<size_t, edm4hep::TrackerHitPlane>> DisplacedTracking::findCompatibleHitsInLayer(
+    const genfit::MeasuredStateOnPlane& state,
+    genfit::AbsTrackRep* rep,
+    int layerID,
+    const edm4hep::TrackerHitPlaneCollection& allHits,
+    double maxChi2) const {
+    
+    std::vector<std::pair<size_t, edm4hep::TrackerHitPlane>> compatibleHits;
+    
+    // Get all surfaces in the target layer
+    auto layerIter = m_surfacesByLayer.find(layerID);
+    if (layerIter == m_surfacesByLayer.end()) {
+        return compatibleHits; // No surfaces in this layer
+    }
+    
+    const auto& layerSurfaces = layerIter->second;
+    
+    // For each hit in the collection
+    for (size_t i = 0; i < allHits.size(); ++i) {
+        const auto& hit = allHits[i];
+        
+        // Check if hit is in the target layer
+        int hitLayerID = getLayerID(hit.getCellID());
+        if (hitLayerID != layerID) continue;
+        
+        // Find surface for this hit
+        const dd4hep::rec::Surface* surface = findSurface(hit);
+        if (!surface) continue;
+        
+        try {
+            // Extrapolate state to this surface
+            genfit::MeasuredStateOnPlane extrapolatedState = 
+                extrapolateToSurface(state, rep, surface);
+            
+            // Get hit position and error
+            const auto& pos = hit.getPosition();
+            dd4hep::rec::Vector3D hitGlobal(pos[0], pos[1], pos[2]);
+            dd4hep::rec::Vector2D hitLocal = surface->globalToLocal(dd4hep::mm * hitGlobal);
+            
+            // Get extrapolated position on surface
+            TVector3 extrapPos = extrapolatedState.getPos();
+            dd4hep::rec::Vector3D extrapGlobal(extrapPos.X(), extrapPos.Y(), extrapPos.Z());
+            dd4hep::rec::Vector2D extrapLocal = surface->globalToLocal(extrapGlobal);
+            
+            // Calculate chi2
+            double du = hit.getDu() > 0 ? hit.getDu() : 0.1; // Default if not set
+            double dv = hit.getDv() > 0 ? hit.getDv() : 0.1; // Default if not set
+            
+            // Convert from mm to cm for comparison
+            du /= 10.0;
+            dv /= 10.0;
+            
+            double residualU = (hitLocal[0] - extrapLocal[0]);
+            double residualV = (hitLocal[1] - extrapLocal[1]);
+            
+            double chi2 = (residualU*residualU)/(du*du) + (residualV*residualV)/(dv*dv);
+            
+            if (chi2 < maxChi2) {
+                compatibleHits.push_back(std::make_pair(i, hit));
+            }
+        }
+        catch (genfit::Exception&) {
+            // Extrapolation failed for this surface, continue to next hit
+            continue;
+        }
+    }
+    
+    return compatibleHits;
+}
+
+// Helper to get PDG code
+int DisplacedTracking::getPDGCode() const {
+    // Map particle type to PDG code
+    if (m_particleType == "electron") return 11;
+    else if (m_particleType == "positron") return -11;
+    else if (m_particleType == "muon") return 13;
+    else if (m_particleType == "antimuon") return -13;
+    else if (m_particleType == "pion") return 211;
+    else if (m_particleType == "kaon") return 321;
+    else if (m_particleType == "proton") return 2212;
+    else if (m_particleType == "antiproton") return -2212;
+    else return 13; // Default to muon
+}
+// Helper to get seed state
+edm4hep::TrackState DisplacedTracking::getSeedState(const edm4hep::Track& track) const {
+    // Find a state location AtOther (our seed)
+    for (int i = 0; i < track.trackStates_size(); ++i) {
+        if (track.getTrackStates(i).location == edm4hep::TrackState::AtOther) {
+            return track.getTrackStates(i);
+        }
+    }
+    
+    // Fall back to first state
+    if (track.trackStates_size() > 0) {
+        return track.getTrackStates(0);
+    }
+    
+    // Create empty state if none found
+    edm4hep::TrackState emptyState;
+    return emptyState;
+}
+
+// Helper to get original hits
+std::vector<edm4hep::TrackerHitPlane> DisplacedTracking::getOriginalHits(
+    const edm4hep::Track& track,
+    const edm4hep::TrackerHitPlaneCollection& allHits) const {
+    
+    std::vector<edm4hep::TrackerHitPlane> hits;
+    
+    for (int j = 0; j < track.trackerHits_size(); ++j) {
+        auto trackHit = track.getTrackerHits(j);
+        
+        // Find matching hit in collection by ID
+        for (size_t i = 0; i < allHits.size(); ++i) {
+            if (allHits[i].getCellID() == trackHit.getCellID()) {
+                hits.push_back(allHits[i]);
+                break;
+            }
+        }
+    }
+    
+    return hits;
+}
+
+// Helper to get highest layer
+int DisplacedTracking::getHighestLayerID(const std::vector<edm4hep::TrackerHitPlane>& hits) const {
+    int highest = -1;
+    
+    for (const auto& hit : hits) {
+        int layer = getLayerID(hit.getCellID());
+        highest = std::max(highest, layer);
+    }
+    return highest;
+}
+
+// Helper to copy parameters
+void DisplacedTracking::copyTrackParameters(
+    const edm4hep::Track& source, 
+    edm4hep::MutableTrack& target) const {
+    
+    target.setChi2(source.getChi2());
+    target.setNdf(source.getNdf());
+    
+    // Copy track states
+    for (int i = 0; i < source.trackStates_size(); ++i) {
+        target.addToTrackStates(source.getTrackStates(i));
     }
 }

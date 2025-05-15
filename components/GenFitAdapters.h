@@ -72,17 +72,16 @@ public:
     }
     
     /**
-     * Find distance to next boundary
-     */
+    * Find distance to next material boundary
+    * For the moment putting no near boundaries 
+    */
     virtual double findNextBoundary(const genfit::RKTrackRep* rep,
-                                   const genfit::M1x7& state7,
-                                   double step,
-                                   bool varField) override {
-        // This is a simplified implementation that doesn't actually find boundaries
-        // In a real implementation, you would trace the track to find the next material boundary
-        
-        // For now, we'll return a large number to indicate no nearby boundary
-        return 1.0e6; // 10 meters (in cm)
+                                const genfit::M1x7& state7,
+                                double step,
+                                bool varField) override {
+
+       // Default large distance (10m)
+       return 1.0e6; 
     }
     
 private:
