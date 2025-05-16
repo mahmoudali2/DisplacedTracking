@@ -7,6 +7,7 @@
 #include <cmath>
 #include <limits>
 #include <memory>
+#include <utility>
 
 #include "GaudiKernel/Algorithm.h"
 #include "Gaudi/Property.h"
@@ -158,12 +159,12 @@ public:
 private:
     // Helper method to find surface for a given cell ID
     const dd4hep::rec::Surface* findSurfaceByID(uint64_t cellID) const;
-    
+    // Extract type ID from cell ID
+    int getTypeID(uint64_t cellID) const;
     // Extract layer ID from cell ID
     int getLayerID(uint64_t cellID) const;
-    
-    Eigen::Vector3d getMomentum(const edm4hep::TrackState& state) const;
-    
+    // Get PT
+    double getPT(const edm4hep::TrackState& state) const;
     // Get position vector from track state
     Eigen::Vector3d getPosition(const edm4hep::TrackState& state) const;
     
