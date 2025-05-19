@@ -18,6 +18,8 @@ link_directories(${GENFIT_INSTALL_DIR}/lib64)
 # Define sources
 set(sources
     components/DisplacedTracking.cpp
+    components/GenfitField.cpp
+    components/GenfitMaterialInterface.cpp
 )
 
 # Create the module

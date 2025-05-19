@@ -152,6 +152,17 @@ StatusCode DisplacedTracking::initialize() {
     // Initialize GenFit if enabled
     if (m_useGenFit) {
         try {
+            //materialEffects = genfit::MaterialEffects::getInstance();
+            //materialEffects->init(new genfit::TGeoMaterialInterface());
+                    
+            m_detector = m_geoSvc->getDetector();
+            m_field = m_detector->field();
+            m_genfitField=new GenfitField(m_field);
+            m_geoMaterial=GenfitMaterialInterface::getInstance(m_detector);
+
+            fieldManager = genfit::FieldManager::getInstance();
+            fieldManager->init(m_genfitField); // kGauss
+            /*
             // Create and register the field adapter
             m_genFitField = std::unique_ptr<DD4hepFieldAdapter>(new DD4hepFieldAdapter(m_field));
             genfit::FieldManager::getInstance()->init(m_genFitField.get());
@@ -159,7 +170,7 @@ StatusCode DisplacedTracking::initialize() {
             // Create and register the material adapter
             m_genFitMaterial = std::unique_ptr<DD4hepMaterialAdapter>(new DD4hepMaterialAdapter(m_materialManager));
             genfit::MaterialEffects::getInstance()->init(m_genFitMaterial.get());
-            
+ */           
             // Optionally set the multiple scattering model
             genfit::MaterialEffects::getInstance()->setMscModel("GEANE");
             
@@ -1215,7 +1226,7 @@ bool DisplacedTracking::createTripletSeed(
     edm_track.addToTrackerHits(hit3);
     
     // Set chi2 and ndf
-    //edm_track.setChi2(0.0);  // Initial seed has no chi2 yet
+    edm_track.setChi2(-1.0);  // Initial seed has no chi2 yet
     //edm_track.setNdf(2 * 3 - 5);  // 2 DOF per hit, 5 parameters
     
     // Mark hits as used
@@ -1804,228 +1815,17 @@ bool DisplacedTracking::fitTrackWithGenFit(
         mom.Print();
         
         //------------------------------------------------------------------
-        // 1. Use triplet seed to extrapolate through all layers
+        // Create a GenFit track with the seed hits (no extrapolation)
         //------------------------------------------------------------------
         
-        // Create an initial GenFit track with just the seed state
-        genfit::Track seedTrack(rep, pos, mom);
-        
-        // Find the highest layer in the triplet
-        int highestLayerID = -1;
-        std::map<int, bool> seedLayers;
-        
-        for (const auto& hit : hits) {
-            int layerID = getLayerID(hit.getCellID());
-            seedLayers[layerID] = true;
-            highestLayerID = std::max(highestLayerID, layerID);
-        }
-        
-        debug() << "Highest layer in seed: " << highestLayerID << endmsg;
-        
-        // Identify additional layers to search
-        std::vector<int> layersToSearch;
-        int maxLayerID = -1;
-        
-        // Find the maximum layer ID in the detector
-        for (const auto& [layerID, surfaces] : m_surfacesByLayer) {
-            if (!surfaces.empty()) {
-                maxLayerID = std::max(maxLayerID, layerID);
-            }
-        }
-        
-        // Add all layers not in the seed to our search list
-        for (int layer = 0; layer <= maxLayerID; ++layer) {
-            // Skip layers that are already in the seed
-            if (seedLayers.find(layer) != seedLayers.end()) {
-                continue;
-            }
-            
-            // Skip layer 1000 which is causing geometry errors
-            if (layer >= 1000) {
-                debug() << "Skipping layer 1000 - known to be outside material volume" << endmsg;
-                continue;
-            }
-            
-            // Skip layers with no surfaces
-            auto layerIter = m_surfacesByLayer.find(layer);
-            if (layerIter == m_surfacesByLayer.end() || layerIter->second.empty()) {
-                continue;
-            }
-            
-            layersToSearch.push_back(layer);
-        }
-        
-        debug() << "Found " << layersToSearch.size() << " additional layers to search" << endmsg;
-        
-        //------------------------------------------------------------------
-        // 2. Find nearby hits at each layer
-        //------------------------------------------------------------------
-        
-        // Create a vector for all hits we'll add to the track
-        std::vector<edm4hep::TrackerHitPlane> extendedHits = hits;
-        
-        // Mark hits already in the seed
-        std::vector<bool> usedHits(allHits ? allHits->size() : 0, false);
-        if (allHits) {
-            for (const auto& seedHit : hits) {
-                for (size_t i = 0; i < allHits->size(); ++i) {
-                    if ((*allHits)[i].getCellID() == seedHit.getCellID()) {
-                        usedHits[i] = true;
-                        break;
-                    }
-                }
-            }
-        }
-        
-        // Only try to find additional hits if we have the full collection
-        if (allHits != nullptr) {
-            // Create a Kalman fitter for extrapolation
-            genfit::KalmanFitter extrapolationFitter;
-            extrapolationFitter.setMaxIterations(2);  // Just need rough extrapolation
-            
-            // Add seed hits to track
-            for (size_t i = 0; i < hits.size(); ++i) {
-                const auto& hit = hits[i];
-                
-                // Find the surface for this hit
-                const dd4hep::rec::Surface* surface = findSurface(hit);
-                if (!surface) {
-                    warning() << "Could not find surface for seed hit " << i << endmsg;
-                    continue;
-                }
-                
-                // Create a new track point
-                genfit::TrackPoint* trackPoint = new genfit::TrackPoint();
-                
-                // Create a measurement for this hit
-                genfit::AbsMeasurement* measurement = createGenFitMeasurement(hit, surface, i, trackPoint);
-                if (!measurement) {
-                    warning() << "Could not create measurement for seed hit " << i << endmsg;
-                    delete trackPoint;
-                    continue;
-                }
-                
-                // Add measurement to track point
-                trackPoint->addRawMeasurement(measurement);
-                
-                // Add track point to track
-                seedTrack.insertPoint(trackPoint);
-            }
-            
-            // Fit the seed track to get a good extrapolation state
-            debug() << "Fitting seed track for extrapolation" << endmsg;
-            
-            try {
-                extrapolationFitter.processTrack(&seedTrack);
-                
-                if (!seedTrack.getFitStatus()->isFitted()) {
-                    warning() << "Seed track fitting failed, cannot extrapolate" << endmsg;
-                } else {
-                    // Get the last fitted state for extrapolation
-                    genfit::MeasuredStateOnPlane lastState = 
-                        seedTrack.getFittedState(seedTrack.getNumPoints() - 1);
-                    int layerID = 3;
-                    // For each additional layer, find closest hit
-                    //for (int layerID : layersToSearch) {
-                        auto layerIter = m_surfacesByLayer.find(layerID);
-                        //if (layerIter == m_surfacesByLayer.end() || layerIter->second.empty()) {
-                        //    continue; // Skip if layer doesn't exist
-                        //}
-                        
-                        debug() << "Searching for hits in layer " << layerID << endmsg;
-                        
-                        // Find typical surface in this layer for extrapolation
-                        const dd4hep::rec::Surface* layerSurface = layerIter->second.front();
-                        
-                        try {
-                            // Extrapolate to this layer
-                            genfit::MeasuredStateOnPlane extrapolatedState = 
-                                extrapolateToSurface(lastState, rep, layerSurface);
-                            
-                            // Get extrapolated position
-                            TVector3 extrapPos = extrapolatedState.getPos(); // Position in cm
-                            
-                            // Collection for compatible hits in this layer
-                            std::vector<std::pair<double, size_t>> compatibleHits;
-                            
-                            // Look for hits in this layer
-                            for (size_t i = 0; i < allHits->size(); ++i) {
-                                // Skip already used hits
-                                if (usedHits[i]) continue;
-                                
-                                const auto& hit = (*allHits)[i];
-                                
-                                // Check if hit is in the target layer
-                                int hitLayerID = getLayerID(hit.getCellID());
-                                if (hitLayerID != layerID) continue;
-                                
-                                // Find surface for this hit
-                                const dd4hep::rec::Surface* surface = findSurface(hit);
-                                if (!surface) continue;
-                                
-                                // Get hit position 
-                                const auto& hitPos = hit.getPosition(); // mm
-                                
-                                // Convert hit position from mm to cm for comparison
-                                double hitX = hitPos[0] / 10.0;
-                                double hitY = hitPos[1] / 10.0;
-                                double hitZ = hitPos[2] / 10.0;
-                                
-                                // Calculate direct spatial distance
-                                double dx = hitX - extrapPos.X();
-                                double dy = hitY - extrapPos.Y();
-                                double dz = hitZ - extrapPos.Z();
-                                double dist = std::sqrt(dx*dx + dy*dy + dz*dz);
-                                
-                                // Apply a spatial cut
-                                if (dist < 10.0) {
-                                    compatibleHits.push_back(std::make_pair(dist, i));
-                                    debug() << "Found potentially compatible hit in layer " << layerID 
-                                           << " with distance = " << dist << " cm" << endmsg;
-                                }
-                            }
-                            
-                            // If we found compatible hits, add the closest one
-                            if (!compatibleHits.empty()) {
-                                // Sort by distance
-                                std::sort(compatibleHits.begin(), compatibleHits.end());
-                                
-                                // Get the closest hit
-                                size_t bestHitIdx = compatibleHits.front().second;
-                                const auto& bestHit = (*allHits)[bestHitIdx];
-                                
-                                // Add to extended hits
-                                extendedHits.push_back(bestHit);
-                                usedHits[bestHitIdx] = true;
-                                
-                                debug() << "Added hit from layer " << layerID 
-                                       << " to track (distance = " 
-                                       << compatibleHits.front().first << " cm)" << endmsg;
-                            }
-                            
-                        } catch (genfit::Exception& e) {
-                            warning() << "Failed to extrapolate to layer " << layerID 
-                                     << ": " << e.what() << endmsg;
-                        }
-                   // }
-                }
-            } catch (genfit::Exception& e) {
-                warning() << "Error during seed track fitting: " << e.what() << endmsg;
-            }
-        }
-        
-        //------------------------------------------------------------------
-        // 3. Add all candidate hits to the track
-        //------------------------------------------------------------------
-        
-        debug() << "Building final track with " << extendedHits.size() << " hits" << endmsg;
+        debug() << "Building final track with " << hits.size() << " seed hits (no extrapolation)" << endmsg;
         
         // Create a new GenFit track
         genfit::Track finalGFTrack(rep, pos, mom);
         
-        // Add all hits to the track
-        for (size_t i = 0; i < extendedHits.size(); ++i) {
-            const auto& hit = extendedHits[i];
+        // Add all seed hits to the track
+        for (size_t i = 0; i < hits.size(); ++i) {
+            const auto& hit = hits[i];
             
             // Find the surface for this hit
             const dd4hep::rec::Surface* surface = findSurface(hit);
@@ -2064,7 +1864,7 @@ bool DisplacedTracking::fitTrackWithGenFit(
         }
         
         //------------------------------------------------------------------
-        // 4. Fit the whole track in one go
+        // Fit the track with GenFit
         //------------------------------------------------------------------
         
         // Create and configure Kalman fitter
@@ -2074,59 +1874,13 @@ bool DisplacedTracking::fitTrackWithGenFit(
         fitter.setDebugLvl(1); // Minimal output
         
         // Perform the fit
-        debug() << "Starting final GenFit Kalman fitting with " << finalGFTrack.getNumPoints() << " hits" << endmsg;
+        debug() << "Starting GenFit Kalman fitting with " << finalGFTrack.getNumPoints() << " hits" << endmsg;
         fitter.processTrack(&finalGFTrack);
         
         // Check fit quality
         if (!finalGFTrack.getFitStatus()->isFitted()) {
-            warning() << "Final GenFit track fitting failed" << endmsg;
-            
-            // If we added hits but the fit failed, try again with just the original hits
-            if (extendedHits.size() > hits.size()) {
-                debug() << "Attempting to fit with just the original " << hits.size() << " hits" << endmsg;
-                
-                // Create a track with just the original hits
-                genfit::Track fallbackTrack(rep, pos, mom);
-                
-                // Add original hits
-                for (size_t i = 0; i < hits.size(); ++i) {
-                    const auto& hit = hits[i];
-                    
-                    // Find the surface for this hit
-                    const dd4hep::rec::Surface* surface = findSurface(hit);
-                    if (!surface) continue;
-                    
-                    // Create a new track point
-                    genfit::TrackPoint* trackPoint = new genfit::TrackPoint();
-                    
-                    // Create a measurement for this hit
-                    genfit::AbsMeasurement* measurement = createGenFitMeasurement(hit, surface, i, trackPoint);
-                    if (!measurement) {
-                        delete trackPoint;
-                        continue;
-                    }
-                    
-                    // Add measurement to track point
-                    trackPoint->addRawMeasurement(measurement);
-                    
-                    // Add track point to track
-                    fallbackTrack.insertPoint(trackPoint);
-                }
-                
-                // Fit with original hits
-                fitter.processTrack(&fallbackTrack);
-                
-                if (fallbackTrack.getFitStatus()->isFitted()) {
-                    debug() << "Original hit track fitted successfully" << endmsg;
-                    finalGFTrack = fallbackTrack;
-                    extendedHits = hits; // Reset to original hits
-                } else {
-                    warning() << "Both extended and original track fitting failed" << endmsg;
-                    return false;
-                }
-            } else {
-                return false;
-            }
+            warning() << "GenFit track fitting failed" << endmsg;
+            return false;
         }
         
         // Get fit quality metrics
@@ -2141,10 +1895,14 @@ bool DisplacedTracking::fitTrackWithGenFit(
         finalTrack.setNdf(ndf);
 
         // Add hits to the EDM4hep track
-        for (const auto& hit : extendedHits) {
+        for (const auto& hit : hits) {
             finalTrack.addToTrackerHits(hit);
         }
-        
+        // Add the original seed state to the track
+        edm4hep::TrackState seedStateCopy = seedState;
+        seedStateCopy.location = edm4hep::TrackState::AtOther;  // Mark it as "other" location
+        finalTrack.addToTrackStates(seedStateCopy);
+
         // Get the track states at key positions and add them to EDM4hep track
         try {
             // State at first hit
@@ -2155,7 +1913,7 @@ bool DisplacedTracking::fitTrackWithGenFit(
                                                                       edm4hep::TrackState::AtFirstHit);
                 finalTrack.addToTrackStates(firstState);
             }
-            
+/*           
             // State at last hit
             if (finalGFTrack.getNumPoints() > 1) {
                 genfit::MeasuredStateOnPlane stateLast = 
@@ -2164,20 +1922,11 @@ bool DisplacedTracking::fitTrackWithGenFit(
                                                                      edm4hep::TrackState::AtLastHit);
                 finalTrack.addToTrackStates(lastState);
             }
-            
+ **/            
             // Add state at IP or other reference point
-            edm4hep::TrackState refState = convertToEDM4hepState(seedGFState, 
-                                                               edm4hep::TrackState::AtOther);
-            finalTrack.addToTrackStates(refState);
-            
-            // If we added extra hits, add a state at the "calorimeter"
-            if (extendedHits.size() > hits.size() && finalGFTrack.getNumPoints() > hits.size()) {
-                genfit::MeasuredStateOnPlane extendedState = 
-                    finalGFTrack.getFittedState(hits.size()); // First extended hit
-                edm4hep::TrackState extState = convertToEDM4hepState(extendedState,
-                                                                    edm4hep::TrackState::AtCalorimeter);
-                finalTrack.addToTrackStates(extState);
-            }
+            //edm4hep::TrackState refState = convertToEDM4hepState(seedGFState, 
+            //                                                   edm4hep::TrackState::AtOther);
+            //finalTrack.addToTrackStates(refState);
             
         } catch (genfit::Exception& e) {
             warning() << "Error extracting track states: " << e.what() << endmsg;

@@ -57,6 +57,8 @@
 
 // Include our adapter classes
 #include "GenFitAdapters.h"
+#include "GenfitField.hpp"
+#include "GenfitMaterialInterface.h"
 
 // Forward declarations
 namespace dd4hep {
@@ -157,6 +159,10 @@ public:
     const dd4hep::rec::Surface* findSurface(const edm4hep::TrackerHitPlane& hit) const;
     
 private:
+    genfit::MaterialEffects* materialEffects;
+    genfit::FieldManager* fieldManager;
+    GenfitMaterialInterface* m_geoMaterial;
+    GenfitField* m_genfitField;
     // Helper method to find surface for a given cell ID
     const dd4hep::rec::Surface* findSurfaceByID(uint64_t cellID) const;
     // Extract type ID from cell ID
