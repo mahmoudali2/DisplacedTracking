@@ -1606,9 +1606,6 @@ genfit::MeasuredStateOnPlane DisplacedTracking::convertToGenFitState(
     TVector3 posVec(x/10.0, y/10.0, z/10.0); // Convert mm to cm
     TVector3 momVec(px, py, pz);
     
-    //debug() << "Pos initialization:\n" << posVec.Print();
-    //debug() << "Mom initialization:\n" << momVec.Print();
-    
     // Create a new GenFit state on the reference plane
     genfit::MeasuredStateOnPlane state_gf(rep);
     
@@ -1619,14 +1616,7 @@ genfit::MeasuredStateOnPlane DisplacedTracking::convertToGenFitState(
     // Convert covariance matrix from EDM4hep to GenFit format
     // This is a simplified conversion - a full conversion would need careful parameter mapping
     TMatrixDSym covMat(6); // 6x6 symmetric matrix
-    /*
-    // Get the diagonal elements from EDM4hep
-    double covD0 = state.getCovMatrix(edm4hep::TrackParams::d0, edm4hep::TrackParams::d0);
-    double covPhi = state.getCovMatrix(edm4hep::TrackParams::phi, edm4hep::TrackParams::phi);
-    double covOmega = state.getCovMatrix(edm4hep::TrackParams::omega, edm4hep::TrackParams::omega);
-    double covZ0 = state.getCovMatrix(edm4hep::TrackParams::z0, edm4hep::TrackParams::z0);
-    double covTanLambda = state.getCovMatrix(edm4hep::TrackParams::tanLambda, edm4hep::TrackParams::tanLambda);
-    */
+
     // This is a simplified mapping - a proper mapping would require coordinate transformation
     covMat(0, 0) = 0.004; //xx
     covMat(1, 1) = 0.004; //yy
@@ -1639,6 +1629,7 @@ genfit::MeasuredStateOnPlane DisplacedTracking::convertToGenFitState(
     
     return state_gf;
 }
+
 
 edm4hep::TrackState DisplacedTracking::convertToEDM4hepState(
     const genfit::MeasuredStateOnPlane& state,
@@ -1804,7 +1795,7 @@ bool DisplacedTracking::fitTrackWithGenFit(
         
         // Convert the seed state to GenFit format
         genfit::MeasuredStateOnPlane seedGFState = convertToGenFitState(seedState, rep);
-        
+
         // Extract position and momentum from the MeasuredStateOnPlane
         TVector3 pos = seedGFState.getPos();
         TVector3 mom = seedGFState.getMom();
@@ -1868,10 +1859,11 @@ bool DisplacedTracking::fitTrackWithGenFit(
         //------------------------------------------------------------------
         
         // Create and configure Kalman fitter
-        genfit::KalmanFitter fitter;
+        genfit::KalmanFitterRefTrack fitter;
         fitter.setMaxIterations(m_maxFitIterations);
-        fitter.setMinIterations(3);
+        fitter.setMinIterations(2);
         fitter.setDebugLvl(1); // Minimal output
+        fitter.setBlowUpMaxVal(1000.0);
         
         // Perform the fit
         debug() << "Starting GenFit Kalman fitting with " << finalGFTrack.getNumPoints() << " hits" << endmsg;
@@ -1925,7 +1917,7 @@ bool DisplacedTracking::fitTrackWithGenFit(
  **/            
             // Add state at IP or other reference point
             //edm4hep::TrackState refState = convertToEDM4hepState(seedGFState, 
-            //                                                   edm4hep::TrackState::AtOther);
+            //                                                    edm4hep::TrackState::AtOther);
             //finalTrack.addToTrackStates(refState);
             
         } catch (genfit::Exception& e) {

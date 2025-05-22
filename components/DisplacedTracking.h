@@ -218,6 +218,10 @@ private:
     genfit::MeasuredStateOnPlane convertToGenFitState(
         const edm4hep::TrackState& state,
         genfit::AbsTrackRep* rep) const;
+
+    genfit::MeasuredStateOnPlane convertToGenFitState2(
+        const edm4hep::TrackState& state,
+        genfit::AbsTrackRep* rep) const;
     
     // Convert GenFit state back to EDM4hep track state
     edm4hep::TrackState convertToEDM4hepState(
