@@ -538,23 +538,23 @@ edm4hep::TrackState DisplacedTracking::createTrackState(
     state.location = location;
     
     // Create covariance matrix with 21 elements (6x6 symmetric)
-    std::array<float, 21> covValues = {0};  // Initialize all to zero
+    //std::array<float, 21> covValues = {0};  // Initialize all to zero
     
     // Set diagonal elements for our 5 track parameters
     // The indices would be different in a 6x6 matrix, so we need to map them correctly
-    covValues[0] = 1.0;   // d0 variance
-    covValues[2] = 0.01;  // phi variance
-    covValues[5] = 1e-6;  // omega variance 
-    covValues[9] = 1.0;   // z0 variance
-    covValues[14] = 0.01; // tanLambda variance
-    
+    state.setCovMatrix(1.0,      edm4hep::TrackParams::d0,        edm4hep::TrackParams::d0);        // d0 variance (mm²)
+    state.setCovMatrix(0.01,     edm4hep::TrackParams::phi,       edm4hep::TrackParams::phi);       // phi variance (rad²)
+    state.setCovMatrix(1e-8,     edm4hep::TrackParams::omega,     edm4hep::TrackParams::omega);     // omega variance (1/mm²)
+    state.setCovMatrix(1.0,      edm4hep::TrackParams::z0,        edm4hep::TrackParams::z0);        // z0 variance (mm²)
+    state.setCovMatrix(0.01,     edm4hep::TrackParams::tanLambda, edm4hep::TrackParams::tanLambda); // tanLambda variance
+
     // Create covariance matrix with individual elements
     // Note: EDM4hep expects us to set each element individually
-    for (int i = 0; i < 6; ++i) {
+    for (int i = 0; i < 5; ++i) {
         for (int j = 0; j <= i; ++j) {
             int index = i*(i+1)/2 + j;
             if (index < 21) {
-                state.setCovMatrix(covValues[index], static_cast<edm4hep::TrackParams>(i), 
+                state.setCovMatrix(0.0, static_cast<edm4hep::TrackParams>(i), 
                                                     static_cast<edm4hep::TrackParams>(j));
             }
         }
@@ -1227,7 +1227,7 @@ bool DisplacedTracking::createTripletSeed(
     
     // Set chi2 and ndf
     edm_track.setChi2(-1.0);  // Initial seed has no chi2 yet
-    //edm_track.setNdf(2 * 3 - 5);  // 2 DOF per hit, 5 parameters
+    edm_track.setNdf(-1);  // 
     
     // Mark hits as used
     usedHits[idx1] = true;
@@ -1612,7 +1612,7 @@ genfit::MeasuredStateOnPlane DisplacedTracking::convertToGenFitState(
     // Set state parameters
     state_gf.setPosMom(posVec, momVec);
     state_gf.setQop(charge / p); // q/p = charge / momentum magnitude
-    
+/*   
     // Convert covariance matrix from EDM4hep to GenFit format
     // This is a simplified conversion - a full conversion would need careful parameter mapping
     TMatrixDSym covMat(6); // 6x6 symmetric matrix
@@ -1626,7 +1626,7 @@ genfit::MeasuredStateOnPlane DisplacedTracking::convertToGenFitState(
     covMat(5, 5) = 0.01; //pzpz
     
     state_gf.setCov(covMat);
-    
+*/     
     return state_gf;
 }
 
@@ -1682,7 +1682,7 @@ edm4hep::TrackState DisplacedTracking::convertToEDM4hepState(
     outState.Z0 = z0;
     outState.tanLambda = tanLambda;
     outState.location = location;
-    
+/*   
     // Get covariance matrix from GenFit state
     const TMatrixDSym& covMat = state.getCov();
     
@@ -1708,7 +1708,7 @@ edm4hep::TrackState DisplacedTracking::convertToEDM4hepState(
                                static_cast<edm4hep::TrackParams>(j));
         }
     }
-    
+*/     
     debug() << "Converted track state: d0=" << d0 << "mm, phi=" << phi 
            << ", omega=" << omega << "1/mm, z0=" << z0 
            << "mm, tanLambda=" << tanLambda << endmsg;
@@ -1792,7 +1792,7 @@ bool DisplacedTracking::fitTrackWithGenFit(
     try {
         // Create a track representation
         genfit::AbsTrackRep* rep = new genfit::RKTrackRep(pdgCode);
-        
+        //genfit::AbsTrackRep* rep = new genfit::GeaneTrackRep();
         // Convert the seed state to GenFit format
         genfit::MeasuredStateOnPlane seedGFState = convertToGenFitState(seedState, rep);
 
@@ -1859,9 +1859,10 @@ bool DisplacedTracking::fitTrackWithGenFit(
         //------------------------------------------------------------------
         
         // Create and configure Kalman fitter
-        genfit::KalmanFitterRefTrack fitter;
+        //genfit::KalmanFitterRefTrack fitter;
+        genfit::DAF fitter;
         fitter.setMaxIterations(m_maxFitIterations);
-        fitter.setMinIterations(2);
+        fitter.setMinIterations(3);
         fitter.setDebugLvl(1); // Minimal output
         fitter.setBlowUpMaxVal(1000.0);
         

@@ -43,8 +43,10 @@
 #include "TrackCand.h"
 #include "AbsTrackRep.h"
 #include "RKTrackRep.h"
+//#include "GeaneTrackRep.h"
 #include "KalmanFitter.h"
 #include "KalmanFitterRefTrack.h"
+#include <DAF.h>
 #include "KalmanFitterInfo.h"
 #include "MeasuredStateOnPlane.h"
 #include "PlanarMeasurement.h"
