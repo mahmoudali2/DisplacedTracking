@@ -56,6 +56,7 @@
 #include "FieldManager.h"
 #include "AbsBField.h"
 #include "FitStatus.h"
+#include <EventDisplay.h>
 
 // Include our adapter classes
 #include "GenFitAdapters.h"

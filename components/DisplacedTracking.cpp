@@ -47,6 +47,10 @@ DisplacedTracking::DisplacedTracking(const std::string& name, ISvcLocator* pSvcL
 StatusCode DisplacedTracking::initialize() {
     StatusCode sc = Algorithm::initialize();
     if (!sc.isSuccess()) return sc;
+   
+    // Get detector
+    //new TGeoManager("Geometry", "IDEA MS geometry");
+    //TGeoManager::Import("/eos/work/m/maali/public/detector.root");
 
     // Get detector service
     if (!m_geoSvc.retrieve()) {
@@ -75,7 +79,7 @@ StatusCode DisplacedTracking::initialize() {
 
     // Get magnetic field
     m_field = m_detector->field();
-    
+   
     dd4hep::Position center(0, 0, 0);
     // check the field strength at different point at the detector
     dd4hep::Direction bfield = m_field.magneticField(center);
@@ -151,29 +155,35 @@ StatusCode DisplacedTracking::initialize() {
 
     // Initialize GenFit if enabled
     if (m_useGenFit) {
-        try {
-            //materialEffects = genfit::MaterialEffects::getInstance();
-            //materialEffects->init(new genfit::TGeoMaterialInterface());
-                    
+        try {   
+        
+            // Initialize the Genfit
             m_detector = m_geoSvc->getDetector();
             m_field = m_detector->field();
             m_genfitField=new GenfitField(m_field);
-            m_geoMaterial=GenfitMaterialInterface::getInstance(m_detector);
 
             fieldManager = genfit::FieldManager::getInstance();
             fieldManager->init(m_genfitField); // kGauss
-            /*
+
+            m_geoMaterial=GenfitMaterialInterface::getInstance(m_detector);
+            //m_geoMaterial->setMinSafetyDistanceCut(m_extMinDistCut);
+            //m_geoMaterial->setSkipWireMaterial(m_skipWireMaterial);
+
+            genfit::MaterialEffects::getInstance()->setEnergyLossBrems(false);
+            genfit::MaterialEffects::getInstance()->setNoiseBrems(false);
+            genfit::MaterialEffects::getInstance()->setMscModel("GEANE");
+            //genfit::MaterialEffects::getInstance()->setMscModel("Highland");
+
+/*          
             // Create and register the field adapter
             m_genFitField = std::unique_ptr<DD4hepFieldAdapter>(new DD4hepFieldAdapter(m_field));
             genfit::FieldManager::getInstance()->init(m_genFitField.get());
-            
+
             // Create and register the material adapter
             m_genFitMaterial = std::unique_ptr<DD4hepMaterialAdapter>(new DD4hepMaterialAdapter(m_materialManager));
             genfit::MaterialEffects::getInstance()->init(m_genFitMaterial.get());
- */           
-            // Optionally set the multiple scattering model
-            genfit::MaterialEffects::getInstance()->setMscModel("GEANE");
-            
+*/             
+
             info() << "GenFit initialized successfully" << endmsg;
         } catch (const genfit::Exception& e) {
             error() << "Error initializing GenFit: " << e.what() << endmsg;
@@ -244,7 +254,7 @@ std::tuple<edm4hep::TrackCollection> DisplacedTracking::operator()(
         bool foundState = false;
         
         for (int j = 0; j < track.trackStates_size(); ++j) {
-            if (track.getTrackStates(j).location == edm4hep::TrackState::AtOther) {
+            if (track.getTrackStates(j).location == edm4hep::TrackState::AtFirstHit) {
                 state = track.getTrackStates(j);
                 foundState = true;
                 break;
@@ -861,7 +871,7 @@ edm4hep::TrackCollection DisplacedTracking::findTracks(
         bool foundState = false;
         
         for (int j = 0; j < track.trackStates_size(); ++j) {
-            if (track.getTrackStates(j).location == edm4hep::TrackState::AtOther) {
+            if (track.getTrackStates(j).location == edm4hep::TrackState::AtFirstHit) {
                 state = track.getTrackStates(j);
                 foundState = true;
                 break;
@@ -1227,7 +1237,7 @@ bool DisplacedTracking::createTripletSeed(
     
     // Set chi2 and ndf
     edm_track.setChi2(-1.0);  // Initial seed has no chi2 yet
-    edm_track.setNdf(-1);  // 
+   // edm_track.setNdf(-1);  // 
     
     // Mark hits as used
     usedHits[idx1] = true;
@@ -1859,8 +1869,8 @@ bool DisplacedTracking::fitTrackWithGenFit(
         //------------------------------------------------------------------
         
         // Create and configure Kalman fitter
-        //genfit::KalmanFitterRefTrack fitter;
-        genfit::DAF fitter;
+        genfit::KalmanFitterRefTrack fitter;
+        //genfit::DAF fitter;
         fitter.setMaxIterations(m_maxFitIterations);
         fitter.setMinIterations(3);
         fitter.setDebugLvl(1); // Minimal output
@@ -1907,6 +1917,31 @@ bool DisplacedTracking::fitTrackWithGenFit(
                 finalTrack.addToTrackStates(firstState);
             }
 /*           
+            try {
+                // Create a plane at the IP (origin)
+                TVector3 ipOrigin(0.0, 0.0, 0.0);  // IP at origin in cm
+                TVector3 ipNormal(0.0, 0.0, 1.0);  // Normal vector pointing in z-direction
+                genfit::SharedPlanePtr ipPlane(new genfit::DetPlane(ipOrigin, ipNormal));
+                
+                // Clone the state to avoid modifying the original
+                genfit::MeasuredStateOnPlane stateAtIP(firstState);
+                
+                // Extrapolate to the IP plane
+                rep->extrapolateToPlane(stateAtIP, ipPlane);
+                
+                // Convert to EDM4hep format and save
+                edm4hep::TrackState ipState = convertToEDM4hepState(stateAtIP, 
+                                                                edm4hep::TrackState::AtIP);
+                finalTrack.addToTrackStates(ipState);
+                
+                debug() << "Successfully saved states at first hit and IP" << endmsg;
+                
+            } catch (genfit::Exception& e) {
+                warning() << "Failed to extrapolate to IP: " << e.what() 
+                        << " - only first hit state saved" << endmsg;
+            }
+*/             
+/*           
             // State at last hit
             if (finalGFTrack.getNumPoints() > 1) {
                 genfit::MeasuredStateOnPlane stateLast = 
@@ -1916,11 +1951,6 @@ bool DisplacedTracking::fitTrackWithGenFit(
                 finalTrack.addToTrackStates(lastState);
             }
  **/            
-            // Add state at IP or other reference point
-            //edm4hep::TrackState refState = convertToEDM4hepState(seedGFState, 
-            //                                                    edm4hep::TrackState::AtOther);
-            //finalTrack.addToTrackStates(refState);
-            
         } catch (genfit::Exception& e) {
             warning() << "Error extracting track states: " << e.what() << endmsg;
             // Continue anyway - we'll use what we have
