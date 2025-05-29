@@ -196,19 +196,11 @@ private:
     // Group surfaces by detector layer
     std::map<int, std::vector<const dd4hep::rec::Surface*>> getSurfacesByLayer() const;
 
-    // Extrapolate a state to a detector surface
-    genfit::MeasuredStateOnPlane extrapolateToSurface(
-        const genfit::MeasuredStateOnPlane& state,
-        genfit::AbsTrackRep* rep,
-        const dd4hep::rec::Surface* targetSurface) const;
-
-    // Find hits compatible with a track state
-    std::vector<std::pair<size_t, edm4hep::TrackerHitPlane>> findCompatibleHitsInLayer(
-        const genfit::MeasuredStateOnPlane& state,
-        genfit::AbsTrackRep* rep,
-        int layerID,
-        const edm4hep::TrackerHitPlaneCollection& allHits,
-        double maxChi2) const;
+    // Looking for compatible hits in the +3 layer (initially extra 4th layer)
+    bool findCompatibleExtraHit(
+        std::vector<edm4hep::TrackerHitPlane>& trackHits,
+        const edm4hep::TrackerHitPlaneCollection* allHits,
+        std::vector<bool>& usedHits) const;
 
     // fitTrackWithGenFit with extrapolation support
     bool fitTrackWithGenFit(
@@ -219,10 +211,6 @@ private:
     
     // Convert EDM4hep track state to GenFit track representation
     genfit::MeasuredStateOnPlane convertToGenFitState(
-        const edm4hep::TrackState& state,
-        genfit::AbsTrackRep* rep) const;
-
-    genfit::MeasuredStateOnPlane convertToGenFitState2(
         const edm4hep::TrackState& state,
         genfit::AbsTrackRep* rep) const;
     

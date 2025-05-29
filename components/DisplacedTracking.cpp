@@ -652,21 +652,21 @@ edm4hep::TrackCollection DisplacedTracking::findTracks(
     };
     
     std::vector<TrackCandidate> trackCandidates;
-    
+    int tripletCandidates = 0;
+    int validTriplets = 0;
     // Try consecutive layer triplets first
     for (size_t i = 0; i <= layerIDs.size() - 3; ++i) {
         int layer1 = layerIDs[i];
         int layer2 = layerIDs[i+1];
         int layer3 = layerIDs[i+2];
 
-        int tripletCandidates = 0;
-        int validTriplets = 0;
-
         if (layer3 == 3 && validTriplets >= 1){
             debug() << "Skipping due to found valid triplets in first 3 layers " << endmsg;
             break;
         } else {
             debug() << "Keep searching for valid triplets in +3 layers " << endmsg;
+            debug() << "Layer #= :  " << layer3 << endmsg;
+            debug() << "validTriplets = :  " << validTriplets << endmsg;
         }
 
         debug() << "Testing hit triplets from layers " << layer1 << ", " 
@@ -773,7 +773,7 @@ edm4hep::TrackCollection DisplacedTracking::findTracks(
             continue;
         }
         
-        // Get the original hits
+        // Get the original hits from the triplet seed
         std::vector<edm4hep::TrackerHitPlane> trackHits;
         for (int j = 0; j < seedTrack.trackerHits_size(); ++j) {
             auto trackHit = seedTrack.getTrackerHits(j);
@@ -788,54 +788,33 @@ edm4hep::TrackCollection DisplacedTracking::findTracks(
             }
         }
         
+        // Try to extend the track with a 4th hit
+        bool foundExtraHit = findCompatibleExtraHit(trackHits, hits, usedHits);
+        
+        if (foundExtraHit) {
+            info() << "Extended track from 3 to 4 hits" << endmsg;
+        } else {
+            info() << "Keeping track with 3 hits (no compatible 4th hit found)" << endmsg;
+        }
+        
         // Create a new track
         auto finalTrack = finalTracks.create();
         
-        // Fit the track with GenFit, passing the full hit collection
+        // Fit the track with GenFit, passing the extended track hits
         bool fitSuccess = fitTrackWithGenFit(
             trackHits, seedState, finalTrack, hits);
         
         if (fitSuccess) {
             info() << "Successfully fitted track with " << finalTrack.trackerHits_size() 
-                   << " hits, chi2/ndf = " << finalTrack.getChi2() / finalTrack.getNdf() << endmsg;
-                   
-            // Mark hits as used
+                << " hits, chi2/ndf = " << finalTrack.getChi2() / finalTrack.getNdf() << endmsg;
+                
+            // Mark original triplet hits as used
             for (size_t idx : candidate.hitIndices) {
                 usedHits[idx] = true;
             }
             
-            // If the track was extended with an additional hit, mark that hit as used too
-            if (finalTrack.trackerHits_size() > trackHits.size()) {
-                info() << "Track was extended with " 
-                       << (finalTrack.trackerHits_size() - trackHits.size()) 
-                       << " additional hit(s)" << endmsg;
-                       
-                // We need to find which hit was added and mark it as used
-                for (int j = 0; j < finalTrack.trackerHits_size(); ++j) {
-                    auto finalHit = finalTrack.getTrackerHits(j);
-                    
-                    // Check if this hit is in the original trackHits
-                    bool isOriginalHit = false;
-                    for (const auto& origHit : trackHits) {
-                        if (finalHit.getCellID() == origHit.getCellID()) {
-                            isOriginalHit = true;
-                            break;
-                        }
-                    }
-                    
-                    // If not in original hits, find and mark as used
-                    if (!isOriginalHit) {
-                        // Find the hit index in the original collection
-                        for (size_t i = 0; i < hits->size(); ++i) {
-                            if ((*hits)[i].getCellID() == finalHit.getCellID() && !usedHits[i]) {
-                                usedHits[i] = true;
-                                debug() << "Marked added hit at index " << i << " as used" << endmsg;
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
+            // Note: The 4th hit is already marked as used in findCompatibleFourthHit() if found
+            
         } else {
             warning() << "Track fitting failed, using seed parameters" << endmsg;
             
@@ -848,7 +827,7 @@ edm4hep::TrackCollection DisplacedTracking::findTracks(
                 finalTrack.addToTrackStates(seedTrack.getTrackStates(j));
             }
             
-            // Add hits to track
+            // Add hits to track (including 4th hit if found)
             for (const auto& hit : trackHits) {
                 finalTrack.addToTrackerHits(hit);
             }
@@ -857,6 +836,7 @@ edm4hep::TrackCollection DisplacedTracking::findTracks(
             for (size_t idx : candidate.hitIndices) {
                 usedHits[idx] = true;
             }
+            // 4th hit already marked as used if found
         }
     }
     
@@ -1802,7 +1782,7 @@ bool DisplacedTracking::fitTrackWithGenFit(
     try {
         // Create a track representation
         genfit::AbsTrackRep* rep = new genfit::RKTrackRep(pdgCode);
-        //genfit::AbsTrackRep* rep = new genfit::GeaneTrackRep();
+        //genfit::AbsTrackRep* rep = new genfit::GeaneTrackRep();  // takes more time, but more efficient with material and particle independent.
         // Convert the seed state to GenFit format
         genfit::MeasuredStateOnPlane seedGFState = convertToGenFitState(seedState, rep);
 
@@ -1967,105 +1947,72 @@ bool DisplacedTracking::fitTrackWithGenFit(
     }
 }
 
-// Extrapolate the track to +3 layers
-genfit::MeasuredStateOnPlane DisplacedTracking::extrapolateToSurface(
-    const genfit::MeasuredStateOnPlane& state,
-    genfit::AbsTrackRep* rep,
-    const dd4hep::rec::Surface* targetSurface) const {
+// Looking for compatible hits in the +3 layer (initially extra 4th layer)
+bool DisplacedTracking::findCompatibleExtraHit(
+    std::vector<edm4hep::TrackerHitPlane>& trackHits,
+    const edm4hep::TrackerHitPlaneCollection* allHits,
+    std::vector<bool>& usedHits) const {
     
-    // Extract surface properties
-    dd4hep::rec::Vector3D normal = targetSurface->normal();
-    dd4hep::rec::Vector3D origin = targetSurface->origin();
-    
-    // Convert to ROOT's TVector3
-    TVector3 planeOrigin(origin.x(), origin.y(), origin.z());  // Already in cm
-    TVector3 planeNormal(normal.x(), normal.y(), normal.z());
-    
-    // Create destination plane
-    genfit::SharedPlanePtr destPlane(new genfit::DetPlane(planeOrigin, planeNormal));
-    
-    // Clone state to avoid modifying the original
-    genfit::MeasuredStateOnPlane newState(state);
-    
-    try {
-        // Extrapolate to the destination plane
-        rep->extrapolateToPlane(newState, destPlane);
-        return newState;
-    }
-    catch(genfit::Exception& e) {
-        warning() << "Extrapolation failed: " << e.what() << endmsg;
-        throw; // Re-throw to allow caller to handle the error
-    }
-}
-
-std::vector<std::pair<size_t, edm4hep::TrackerHitPlane>> DisplacedTracking::findCompatibleHitsInLayer(
-    const genfit::MeasuredStateOnPlane& state,
-    genfit::AbsTrackRep* rep,
-    int layerID,
-    const edm4hep::TrackerHitPlaneCollection& allHits,
-    double maxChi2) const {
-    
-    std::vector<std::pair<size_t, edm4hep::TrackerHitPlane>> compatibleHits;
-    
-    // Get all surfaces in the target layer
-    auto layerIter = m_surfacesByLayer.find(layerID);
-    if (layerIter == m_surfacesByLayer.end()) {
-        return compatibleHits; // No surfaces in this layer
+    if (trackHits.size() != 3) {
+        debug() << "Expected 3 hits for extension, got " << trackHits.size() << endmsg;
+        return false;
     }
     
-    const auto& layerSurfaces = layerIter->second;
+    // Get the last hit (3rd hit) position
+    const auto& lastHit = trackHits[2];
+    const auto& lastPos = lastHit.getPosition();
+    Eigen::Vector3d lastHitPos(lastPos[0] / 10.0, lastPos[1] / 10.0, lastPos[2] / 10.0); // mm to cm
     
-    // For each hit in the collection
-    for (size_t i = 0; i < allHits.size(); ++i) {
-        const auto& hit = allHits[i];
+    // Get the layer ID of the last hit
+    int lastLayerID = getLayerID(lastHit.getCellID());
+    int targetLayerID = lastLayerID + 1; // Look for hits in the next layer
+    
+    debug() << "Looking for compatible hits in layer " << targetLayerID 
+            << " (last hit in layer " << lastLayerID << ")" << endmsg;
+    
+    double bestDistance = 1e6;
+    int bestHitIndex = -1;
+    edm4hep::TrackerHitPlane bestHit;
+    
+    // Search through all hits for candidates in the target layer
+    for (size_t i = 0; i < allHits->size(); ++i) {
+        if (usedHits[i]) continue; // Skip already used hits
         
-        // Check if hit is in the target layer
-        int hitLayerID = getLayerID(hit.getCellID());
-        if (hitLayerID != layerID) continue;
+        const auto& candidateHit = (*allHits)[i];
+        int candidateLayerID = getLayerID(candidateHit.getCellID());
         
-        // Find surface for this hit
-        const dd4hep::rec::Surface* surface = findSurface(hit);
-        if (!surface) continue;
+        if (candidateLayerID != targetLayerID) continue; // Not in target layer
         
-        try {
-            // Extrapolate state to this surface
-            genfit::MeasuredStateOnPlane extrapolatedState = 
-                extrapolateToSurface(state, rep, surface);
-            
-            // Get hit position and error
-            const auto& pos = hit.getPosition();
-            dd4hep::rec::Vector3D hitGlobal(pos[0], pos[1], pos[2]);
-            dd4hep::rec::Vector2D hitLocal = surface->globalToLocal(dd4hep::mm * hitGlobal);
-            
-            // Get extrapolated position on surface
-            TVector3 extrapPos = extrapolatedState.getPos();
-            dd4hep::rec::Vector3D extrapGlobal(extrapPos.X(), extrapPos.Y(), extrapPos.Z());
-            dd4hep::rec::Vector2D extrapLocal = surface->globalToLocal(extrapGlobal);
-            
-            // Calculate chi2
-            double du = hit.getDu() > 0 ? hit.getDu() : 0.1; // Default if not set
-            double dv = hit.getDv() > 0 ? hit.getDv() : 0.1; // Default if not set
-            
-            // Convert from mm to cm for comparison
-            du /= 10.0;
-            dv /= 10.0;
-            
-            double residualU = (hitLocal[0] - extrapLocal[0]);
-            double residualV = (hitLocal[1] - extrapLocal[1]);
-            
-            double chi2 = (residualU*residualU)/(du*du) + (residualV*residualV)/(dv*dv);
-            
-            if (chi2 < maxChi2) {
-                compatibleHits.push_back(std::make_pair(i, hit));
-            }
-        }
-        catch (genfit::Exception&) {
-            // Extrapolation failed for this surface, continue to next hit
-            continue;
+        // Calculate distance to last hit
+        const auto& candidatePos = candidateHit.getPosition();
+        Eigen::Vector3d candidateHitPos(candidatePos[0] / 10.0, candidatePos[1] / 10.0, candidatePos[2] / 10.0); // mm to cm
+        
+        double distance = (candidateHitPos - lastHitPos).norm();
+        
+        debug() << "Candidate hit at distance " << distance << " cm" << endmsg;
+        
+        // Check if distance is within acceptable range
+        if (distance < 70.0 && distance < bestDistance) { // 70 cm threshold
+            bestDistance = distance;
+            bestHitIndex = i;
+            bestHit = candidateHit;
         }
     }
     
-    return compatibleHits;
+    if (bestHitIndex >= 0) {
+        debug() << "Found compatible 4th hit at distance " << bestDistance << " cm" << endmsg;
+        
+        // Add the best hit to the track
+        trackHits.push_back(bestHit);
+        
+        // Mark it as used
+        usedHits[bestHitIndex] = true;
+        
+        return true;
+    } else {
+        debug() << "No compatible 4th hit found within 70 cm" << endmsg;
+        return false;
+    }
 }
 
 // Helper to get PDG code
