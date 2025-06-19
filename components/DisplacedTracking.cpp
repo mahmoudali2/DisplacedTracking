@@ -660,17 +660,17 @@ edm4hep::TrackCollection DisplacedTracking::findTracks(
         int layer2 = layerIDs[i+1];
         int layer3 = layerIDs[i+2];
 
+        debug() << "Testing hit triplets from layers " << layer1 << ", " 
+                << layer2 << ", " << layer3 << endmsg;
+        
         if (layer3 == 3 && validTriplets >= 1){
             debug() << "Skipping due to found valid triplets in first 3 layers " << endmsg;
             break;
         } else {
-            debug() << "Keep searching for valid triplets in +3 layers " << endmsg;
-            debug() << "Layer #= :  " << layer3 << endmsg;
-            debug() << "validTriplets = :  " << validTriplets << endmsg;
+            //debug() << "Keep searching for valid triplets in +3 layers " << endmsg;
+            //debug() << "Layer #= :  " << layer3 << endmsg;
+            //debug() << "validTriplets = :  " << validTriplets << endmsg;
         }
-
-        debug() << "Testing hit triplets from layers " << layer1 << ", " 
-                << layer2 << ", " << layer3 << endmsg;
         
         // Try all hit combinations from these three layers
         for (const auto& [idx1, hit1] : hitsByLayer[layer1]) {
@@ -1114,11 +1114,17 @@ bool DisplacedTracking::createTripletSeed(
     debug() << "  Sagitta full pT: " << pT_sagitta_full << " GeV/c" << endmsg;
     
     // Use sagitta method for track parameters
+    double radius = radius_direct;
+    double x0 = x0_direct;
+    double y0 = y0_direct;
+    double pT = pT_direct;
+    /*
+    // Use sagitta method for track parameters
     double radius = radius_sagitta;
     double x0 = x0_sagitta;
     double y0 = y0_sagitta;
     double pT = pT_sagitta_full;
-    
+    */
     // Determine helix direction and charge
     double phi1 = std::atan2(p1.y() - y0, p1.x() - x0);
     double phi2 = std::atan2(p2.y() - y0, p2.x() - x0);
@@ -1799,7 +1805,7 @@ bool DisplacedTracking::fitTrackWithGenFit(
         // Create a GenFit track with the seed hits (no extrapolation)
         //------------------------------------------------------------------
         
-        debug() << "Building final track with " << hits.size() << " seed hits (no extrapolation)" << endmsg;
+        debug() << "Building final track with " << hits.size() << " seed hits" << endmsg;
         
         // Create a new GenFit track
         genfit::Track finalGFTrack(rep, pos, mom);
@@ -1853,7 +1859,7 @@ bool DisplacedTracking::fitTrackWithGenFit(
         //genfit::DAF fitter;
         fitter.setMaxIterations(m_maxFitIterations);
         fitter.setMinIterations(3);
-        fitter.setDebugLvl(1); // Minimal output
+        fitter.setDebugLvl(m_debugLevel); // Minimal output
         fitter.setBlowUpMaxVal(1000.0);
         
         // Perform the fit

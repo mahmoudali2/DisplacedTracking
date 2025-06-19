@@ -239,6 +239,7 @@ private:
     // GenFit properties
     Gaudi::Property<int> m_maxFitIterations{this, "MaxFitIterations", 4, "Maximum iterations for track fitting"};
     Gaudi::Property<bool> m_useGenFit{this, "UseGenFit", true, "Use GenFit for track fitting"};
+    Gaudi::Property<int> m_debugLevel{this, "DebugLevel", 0, "Debug level of GenFit"};
 
     // Services
     ServiceHandle<IGeoSvc> m_geoSvc{this, "GeoSvc", "GeoSvc", "Detector geometry service"};
