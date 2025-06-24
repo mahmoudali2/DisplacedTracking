@@ -171,8 +171,11 @@ StatusCode DisplacedTracking::initialize() {
 
             genfit::MaterialEffects::getInstance()->setEnergyLossBrems(false);
             genfit::MaterialEffects::getInstance()->setNoiseBrems(false);
+            //genfit::MaterialEffects::getInstance()->setNoiseCoulomb(false);  // Disable MS only
             genfit::MaterialEffects::getInstance()->setMscModel("GEANE");
             //genfit::MaterialEffects::getInstance()->setMscModel("Highland");
+            genfit::MaterialEffects::getInstance()->setEnergyLossBetheBloch(true);
+            genfit::MaterialEffects::getInstance()->setNoiseBetheBloch(true);
 
 /*          
             // Create and register the field adapter
@@ -1112,19 +1115,19 @@ bool DisplacedTracking::createTripletSeed(
     debug() << "  Direct formula pT: " << pT_direct << " GeV/c" << endmsg;
     debug() << "  Sagitta simple pT: " << pT_sagitta << " GeV/c" << endmsg;
     debug() << "  Sagitta full pT: " << pT_sagitta_full << " GeV/c" << endmsg;
-    
+    /*
     // Use sagitta method for track parameters
     double radius = radius_direct;
     double x0 = x0_direct;
     double y0 = y0_direct;
     double pT = pT_direct;
-    /*
+    */
     // Use sagitta method for track parameters
     double radius = radius_sagitta;
     double x0 = x0_sagitta;
     double y0 = y0_sagitta;
     double pT = pT_sagitta_full;
-    */
+    
     // Determine helix direction and charge
     double phi1 = std::atan2(p1.y() - y0, p1.x() - x0);
     double phi2 = std::atan2(p2.y() - y0, p2.x() - x0);
@@ -1902,15 +1905,15 @@ bool DisplacedTracking::fitTrackWithGenFit(
                                                                       edm4hep::TrackState::AtFirstHit);
                 finalTrack.addToTrackStates(firstState);
             }
-/*           
+          
             try {
                 // Create a plane at the IP (origin)
                 TVector3 ipOrigin(0.0, 0.0, 0.0);  // IP at origin in cm
                 TVector3 ipNormal(0.0, 0.0, 1.0);  // Normal vector pointing in z-direction
                 genfit::SharedPlanePtr ipPlane(new genfit::DetPlane(ipOrigin, ipNormal));
                 
-                // Clone the state to avoid modifying the original
-                genfit::MeasuredStateOnPlane stateAtIP(firstState);
+                // Get state at first hit and extrapolate to IP
+                genfit::MeasuredStateOnPlane stateAtIP = finalGFTrack.getFittedState(0);
                 
                 // Extrapolate to the IP plane
                 rep->extrapolateToPlane(stateAtIP, ipPlane);
@@ -1920,14 +1923,14 @@ bool DisplacedTracking::fitTrackWithGenFit(
                                                                 edm4hep::TrackState::AtIP);
                 finalTrack.addToTrackStates(ipState);
                 
-                debug() << "Successfully saved states at first hit and IP" << endmsg;
+                debug() << "Successfully saved state at IP" << endmsg;
                 
             } catch (genfit::Exception& e) {
                 warning() << "Failed to extrapolate to IP: " << e.what() 
                         << " - only first hit state saved" << endmsg;
             }
-*/             
-/*           
+            
+           
             // State at last hit
             if (finalGFTrack.getNumPoints() > 1) {
                 genfit::MeasuredStateOnPlane stateLast = 
@@ -1936,7 +1939,7 @@ bool DisplacedTracking::fitTrackWithGenFit(
                                                                      edm4hep::TrackState::AtLastHit);
                 finalTrack.addToTrackStates(lastState);
             }
- **/            
+             
         } catch (genfit::Exception& e) {
             warning() << "Error extracting track states: " << e.what() << endmsg;
             // Continue anyway - we'll use what we have
