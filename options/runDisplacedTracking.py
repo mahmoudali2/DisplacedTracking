@@ -17,20 +17,21 @@ geoservice.detectors = ["./k4geo/FCCee/IDEA/compact/IDEA_o1_v03/IDEA_o1_v03.xml"
 geoservice.OutputLevel = INFO
 geoservice.EnableGeant4Geo = False
 
-# Kalman tracker algorithm
-kalman = DisplacedTracking()
-kalman.DetectorName = "Muon-System"                   # Name of the detector to process      
-kalman.MaxChi2 = 10.0                                 # Maximum chi-square for hit acceptance
-kalman.MaxDist = 150.0                                # Maximum distance between two hits (cm)
-kalman.ParticleType = "muon"                          # Particle type for material effects
-kalman.EncodingStringParameterName = "MuonSystemReadoutID"
-kalman.OutputLevel = 0  # DEBUG level
+# displaced tracker algorithm
+displaced = DisplacedTracking()
+displaced.DetectorName = "Muon-System"                   # Name of the detector to process      
+displaced.MaxChi2 = 100.0                                # Maximum chi-square for hit acceptance
+displaced.MaxDist = 150.0                                # Maximum distance between two hits (cm)
+displaced.ParticleType = "muon"                          # Particle type for material effects
+displaced.EncodingStringParameterName = "MuonSystemReadoutID"
+displaced.OutputLevel = 1                                # DEBUG level
 # GenFit configuration options
-kalman.UseGenFit = True                               # Enable GenFit track fitting
-kalman.MaxFitIterations = 4                           # Maximum iterations for the Kalman fit
+displaced.UseGenFit = True                                # Enable GenFit track fitting
+displaced.MaxFitIterations = 8                            # Maximum iterations for the displaced fit
+displaced.DebugLevel = 0                                  # DEBUG level of GenFit
 
-kalman.InputHitCollection = ["MSTrackerHits"]         # Input digitized hits from DDPlanarDigi
-kalman.OutputTrackCollection = ["KalmanTracks"]       # Output reconstructed tracks
+displaced.InputHitCollection = ["MSTrackerHits"]         # Input digitized hits from DDPlanarDigi
+displaced.OutputTrackCollection = ["DisplacedTracks"]       # Output reconstructed tracks
 
 # Input/Output service
 iosvc = IOSvc()
@@ -39,7 +40,7 @@ iosvc.Output = "output_tracks_test.root"              # Output file for reconstr
 
 # Application manager configuration
 ApplicationMgr(
-    TopAlg=[kalman],                            # Algorithms to run
+    TopAlg=[displaced],                         # Algorithms to run
     EvtSel="NONE",                              # Event selection policy
     EvtMax=-1,                                  # Process all events (-1)
     ExtSvc=[EventDataSvc("EventDataSvc")],      # Event data service
