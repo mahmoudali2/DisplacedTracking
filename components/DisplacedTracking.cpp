@@ -802,6 +802,46 @@ edm4hep::TrackCollection DisplacedTracking::findTracks(
         
         // Create a new track
         auto finalTrack = finalTracks.create();
+
+        // NEW: Test circle fitting if we have 4 hits
+        if (trackHits.size() == 4) {
+            double x0, y0, radius, chi2;
+            bool fit4Hits = fitCircleToFourHits(trackHits, x0, y0, radius, chi2);
+            
+            if (fit4Hits) {
+                info() << "4-hit circle fit successful!" << endmsg;
+                info() << "  Center: (" << x0 << ", " << y0 << ") cm" << endmsg;
+                info() << "  Radius: " << radius << " cm" << endmsg;
+                info() << "  Chi2/DOF: " << chi2 << endmsg;
+                
+                // Optional: Reject very poor fits
+                if (chi2 > 50.0) {  // Arbitrary threshold for testing
+                    warning() << "Poor circle fit, removing 4th hit" << endmsg;
+                    trackHits.pop_back();  // Remove the 4th hit
+                }
+
+                //Save 4-hit circle fit as additional track state
+                // Calculate parameters (same way as your triplet seed)
+                double pT = 0.3 * 1.7 * radius / 100.0; // GeV/c
+                double d0 = std::sqrt(x0*x0 + y0*y0) - radius;
+                double phi = std::atan2(y0, x0) - M_PI/2; // Simplified
+                double omega = 1.0 / (radius * 10.0); // Simplified, assuming positive charge
+                            
+                // Create track state (using your existing function!)
+                edm4hep::TrackState circleFitState = createTrackState(
+                    d0*10.0, phi, omega, seedState.Z0, seedState.tanLambda, 
+                    edm4hep::TrackState::AtCalorimeter); // Use AtCalorimeter as marker
+                            
+                // Add to final track
+                finalTrack.addToTrackStates(circleFitState);
+                            
+                info() << "Added circle fit track state: pT=" << pT << " GeV/c, d0=" 
+                    << d0*10.0 << " mm, chi2=" << chi2 << endmsg;
+
+            } else {
+                warning() << "4-hit circle fit failed" << endmsg;
+            }
+        }
         
         // Fit the track with GenFit, passing the extended track hits
         bool fitSuccess = fitTrackWithGenFit(
@@ -2022,6 +2062,185 @@ bool DisplacedTracking::findCompatibleExtraHit(
         debug() << "No compatible 4th hit found within 70 cm" << endmsg;
         return false;
     }
+}
+
+bool DisplacedTracking::fitCircleToFourHits(
+    const std::vector<edm4hep::TrackerHitPlane>& hits,
+    double& x0, double& y0, double& radius, double& chi2) const {
+    
+    if (hits.size() != 4) {
+        warning() << "fitCircleToFourHits expects exactly 4 hits, got " << hits.size() << endmsg;
+        return false;
+    }
+    
+    // Extract hit positions in cm
+    std::vector<Eigen::Vector2d> points;
+    std::vector<double> uncertainties;
+    
+    for (const auto& hit : hits) {
+        const auto& pos = hit.getPosition();
+        points.emplace_back(pos[0] / 10.0, pos[1] / 10.0); // Convert mm to cm
+        
+        // Get measurement uncertainties
+        double sigma_u = hit.getDu(); // mm
+        double sigma_v = hit.getDv(); // mm
+        
+        // Use defaults if not set
+        if (sigma_u <= 0) sigma_u = 0.4; // 100 microns
+        if (sigma_v <= 0) sigma_v = 0.4; // 100 microns
+        
+        // Use average uncertainty (could be improved with proper error propagation)
+        double avgSigma = std::sqrt(sigma_u * sigma_u + sigma_v * sigma_v) / 10.0; // Convert to cm
+        uncertainties.push_back(avgSigma);
+    }
+    
+    debug() << "Fitting circle to 4 points:" << endmsg;
+    for (size_t i = 0; i < points.size(); ++i) {
+        debug() << "  Point " << i << ": (" << points[i].x() << ", " << points[i].y() 
+                << ") cm, σ = " << uncertainties[i] << " cm" << endmsg;
+    }
+    
+    // Method 1: Algebraic circle fit using least squares
+    // Circle equation: x² + y² + Dx + Ey + F = 0
+    // Where D = -2x0, E = -2y0, F = x0² + y0² - R²
+    
+    Eigen::MatrixXd A(4, 3);
+    Eigen::VectorXd b(4);
+    Eigen::VectorXd weights(4);
+    
+    // Setup the linear system
+    for (int i = 0; i < 4; ++i) {
+        double x = points[i].x();
+        double y = points[i].y();
+        double w = 1.0 / (uncertainties[i] * uncertainties[i]); // Weight = 1/σ²
+        
+        A(i, 0) = w * x;           // D coefficient
+        A(i, 1) = w * y;           // E coefficient  
+        A(i, 2) = w * 1.0;         // F coefficient
+        b(i) = -w * (x*x + y*y);   // RHS
+        weights(i) = w;
+    }
+    
+    // Solve the weighted least squares system: A^T W A x = A^T W b
+    Eigen::Vector3d solution = (A.transpose() * A).ldlt().solve(A.transpose() * b);
+    
+    double D = solution(0);
+    double E = solution(1); 
+    double F = solution(2);
+    
+    // Convert back to center and radius
+    x0 = -D / 2.0;
+    y0 = -E / 2.0;
+    
+    double discriminant = D*D + E*E - 4*F;
+    if (discriminant <= 0) {
+        debug() << "Invalid circle fit: discriminant = " << discriminant << endmsg;
+        return false;
+    }
+    
+    radius = std::sqrt(discriminant) / 2.0;
+    
+    debug() << "Algebraic fit result: center=(" << x0 << ", " << y0 
+            << "), radius=" << radius << " cm" << endmsg;
+    
+    // Method 2: Geometric refinement using Gauss-Newton
+    // This improves the fit by minimizing geometric distance rather than algebraic distance
+    
+    // Initial guess from algebraic fit
+    Eigen::Vector3d params(x0, y0, radius);
+    
+    // Gauss-Newton iterations
+    const int maxIterations = 10;
+    const double tolerance = 1e-6;
+    
+    for (int iter = 0; iter < maxIterations; ++iter) {
+        Eigen::MatrixXd J(4, 3); // Jacobian matrix
+        Eigen::VectorXd residuals(4);
+        
+        double currentX0 = params(0);
+        double currentY0 = params(1);
+        double currentR = params(2);
+        
+        // Calculate residuals and Jacobian
+        for (int i = 0; i < 4; ++i) {
+            double x = points[i].x();
+            double y = points[i].y();
+            double w = std::sqrt(weights(i));
+            
+            // Distance from point to circle center
+            double dx = x - currentX0;
+            double dy = y - currentY0;
+            double dist = std::sqrt(dx*dx + dy*dy);
+            
+            // Residual: weighted geometric distance from point to circle
+            residuals(i) = w * (dist - currentR);
+            
+            // Jacobian elements (derivatives of residual w.r.t. parameters)
+            if (dist > 1e-12) { // Avoid division by zero
+                J(i, 0) = -w * dx / dist;  // ∂r/∂x0
+                J(i, 1) = -w * dy / dist;  // ∂r/∂y0
+                J(i, 2) = -w;              // ∂r/∂R
+            } else {
+                J(i, 0) = J(i, 1) = J(i, 2) = 0;
+            }
+        }
+        
+        // Gauss-Newton update: Δp = -(J^T J)^(-1) J^T r
+        Eigen::Vector3d delta = -(J.transpose() * J).ldlt().solve(J.transpose() * residuals);
+        params += delta;
+        
+        // Check convergence
+        if (delta.norm() < tolerance) {
+            debug() << "Geometric refinement converged after " << iter + 1 << " iterations" << endmsg;
+            break;
+        }
+    }
+    
+    // Update final parameters
+    x0 = params(0);
+    y0 = params(1);
+    radius = params(2);
+    double estimatedBz = -1.7;
+    double pT = 0.3 * std::abs(estimatedBz) * radius / 100.0;
+
+    debug() << "Refined fit result: center=(" << x0 << ", " << y0 
+            << "), radius=" << radius << " cm, pT=" << pT << " GeV" << endmsg;
+    
+    // Calculate chi2
+    chi2 = 0.0;
+    for (int i = 0; i < 4; ++i) {
+        double x = points[i].x();
+        double y = points[i].y();
+        double sigma = uncertainties[i];
+        
+        // Calculate distance from point to circle
+        double dx = x - x0;
+        double dy = y - y0;
+        double distToCenter = std::sqrt(dx*dx + dy*dy);
+        double residual = std::abs(distToCenter - radius);
+        
+        // Add to chi2
+        chi2 += (residual * residual) / (sigma * sigma);
+        
+        debug() << "  Point " << i << ": residual = " << residual 
+                << " cm, σ = " << sigma << " cm, contribution = " 
+                << (residual * residual) / (sigma * sigma) << endmsg;
+    }
+    
+    // Degrees of freedom = number of points - number of parameters
+    int ndf = 3; // 3 degree of freedom for 4 hits (4 hits * 2 D measurements - 5 track parameters)
+    chi2 = chi2/ndf;
+    
+    debug() << "Circle fit chi2 = " << chi2 << ", ndf = " << ndf 
+            << ", chi2/ndf = " << chi2 / ndf << endmsg;
+    
+    if (chi2 / ndf > 100) { // Very poor fit
+        debug() << "Poor circle fit: chi2/ndf = " << chi2 / ndf << endmsg;
+        return false;
+    }
+    
+    debug() << "Circle fit successful!" << endmsg;
+    return true;
 }
 
 // Helper to get PDG code

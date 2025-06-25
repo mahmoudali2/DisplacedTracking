@@ -201,6 +201,10 @@ private:
         std::vector<edm4hep::TrackerHitPlane>& trackHits,
         const edm4hep::TrackerHitPlaneCollection* allHits,
         std::vector<bool>& usedHits) const;
+        
+    // Fit circle to 4 hits using least squares and calculate chi2
+    bool fitCircleToFourHits(const std::vector<edm4hep::TrackerHitPlane>& hits,
+                            double& x0, double& y0, double& radius, double& chi2) const;
 
     // fitTrackWithGenFit with extrapolation support
     bool fitTrackWithGenFit(
