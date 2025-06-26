@@ -169,8 +169,8 @@ StatusCode DisplacedTracking::initialize() {
             //m_geoMaterial->setMinSafetyDistanceCut(m_extMinDistCut);
             //m_geoMaterial->setSkipWireMaterial(m_skipWireMaterial);
 
-            genfit::MaterialEffects::getInstance()->setEnergyLossBrems(false);
-            genfit::MaterialEffects::getInstance()->setNoiseBrems(false);
+            genfit::MaterialEffects::getInstance()->setEnergyLossBrems(true);
+            genfit::MaterialEffects::getInstance()->setNoiseBrems(true);
             //genfit::MaterialEffects::getInstance()->setNoiseCoulomb(false);  // Disable MS only
             genfit::MaterialEffects::getInstance()->setMscModel("GEANE");
             //genfit::MaterialEffects::getInstance()->setMscModel("Highland");
@@ -799,7 +799,7 @@ edm4hep::TrackCollection DisplacedTracking::findTracks(
         } else {
             info() << "Keeping track with 3 hits (no compatible 4th hit found)" << endmsg;
         }
-        
+
         // Create a new track
         auto finalTrack = finalTracks.create();
 
@@ -834,7 +834,8 @@ edm4hep::TrackCollection DisplacedTracking::findTracks(
                             
                 // Add to final track
                 finalTrack.addToTrackStates(circleFitState);
-                            
+                finalTrack.setChi2(chi2);
+                         
                 info() << "Added circle fit track state: pT=" << pT << " GeV/c, d0=" 
                     << d0*10.0 << " mm, chi2=" << chi2 << endmsg;
 
@@ -862,7 +863,7 @@ edm4hep::TrackCollection DisplacedTracking::findTracks(
             warning() << "Track fitting failed, using seed parameters" << endmsg;
             
             // Fall back to seed parameters
-            finalTrack.setChi2(seedTrack.getChi2());
+            //finalTrack.setChi2(seedTrack.getChi2());
             finalTrack.setNdf(seedTrack.getNdf());
             
             // Copy track states
@@ -1635,7 +1636,7 @@ genfit::MeasuredStateOnPlane DisplacedTracking::convertToGenFitState(
     // Create momentum vector at the hit
     double px = pT * momDirX;
     double py = pT * momDirY;
-    double pz = pT * tanLambda;
+    double pz = 0.0;
     double p = sqrt(px*px + py*py + pz*pz);
     
     // Charge from omega sign
@@ -1651,7 +1652,7 @@ genfit::MeasuredStateOnPlane DisplacedTracking::convertToGenFitState(
     // Set state parameters
     state_gf.setPosMom(posVec, momVec);
     state_gf.setQop(charge / p); // q/p = charge / momentum magnitude
-/*   
+   
     // Convert covariance matrix from EDM4hep to GenFit format
     // This is a simplified conversion - a full conversion would need careful parameter mapping
     TMatrixDSym covMat(6); // 6x6 symmetric matrix
@@ -1665,7 +1666,7 @@ genfit::MeasuredStateOnPlane DisplacedTracking::convertToGenFitState(
     covMat(5, 5) = 0.01; //pzpz
     
     state_gf.setCov(covMat);
-*/     
+     
     return state_gf;
 }
 
@@ -1788,8 +1789,8 @@ genfit::AbsMeasurement* DisplacedTracking::createGenFitMeasurement(
     double sigma_v = hit.getDv();  // mm
     
     // If resolutions are zero or not set, use reasonable defaults
-    if (sigma_u <= 0) sigma_u = 0.1;  // 100 microns default
-    if (sigma_v <= 0) sigma_v = 0.1;  // 100 microns default
+    if (sigma_u <= 0) sigma_u = 0.4;  // 400 microns default
+    if (sigma_v <= 0) sigma_v = 0.4;  // 400 microns default
     
     // Create covariance matrix
     TMatrixDSym hitCov(2);
@@ -1908,7 +1909,17 @@ bool DisplacedTracking::fitTrackWithGenFit(
         // Perform the fit
         debug() << "Starting GenFit Kalman fitting with " << finalGFTrack.getNumPoints() << " hits" << endmsg;
         fitter.processTrack(&finalGFTrack);
-        
+
+        //Process forward fit
+        genfit::Track forwardTrack = finalGFTrack;
+        //genfitFitter_->processTrack(&forwardTrack);
+
+
+        // Process backward fit
+        genfit::Track backwardTrack = forwardTrack;
+        backwardTrack.reverseTrack();
+        fitter.processTrack(&backwardTrack);
+
         // Check fit quality
         if (!finalGFTrack.getFitStatus()->isFitted()) {
             warning() << "GenFit track fitting failed" << endmsg;
@@ -1923,7 +1934,7 @@ bool DisplacedTracking::fitTrackWithGenFit(
                 << ", ndf=" << ndf << ", chi2/ndf=" << (chi2/(ndf*1.0)) << endmsg;
         
         // Update the EDM4hep track with fit results
-        finalTrack.setChi2(chi2);
+        //finalTrack.setChi2(chi2);
         finalTrack.setNdf(ndf);
 
         // Add hits to the EDM4hep track
@@ -1949,15 +1960,25 @@ bool DisplacedTracking::fitTrackWithGenFit(
             try {
                 // Create a plane at the IP (origin)
                 TVector3 ipOrigin(0.0, 0.0, 0.0);  // IP at origin in cm
-                TVector3 ipNormal(0.0, 0.0, 1.0);  // Normal vector pointing in z-direction
-                genfit::SharedPlanePtr ipPlane(new genfit::DetPlane(ipOrigin, ipNormal));
-                
-                // Get state at first hit and extrapolate to IP
-                genfit::MeasuredStateOnPlane stateAtIP = finalGFTrack.getFittedState(0);
-                
+                //TVector3 ipNormal(0.0, 0.0, 1.0);  // Normal vector pointing in z-direction
+                //genfit::SharedPlanePtr ipPlane(new genfit::DetPlane(ipOrigin, ipNormal));
+
+                genfit::AbsTrackRep* backwardRep = backwardTrack.getTrackRep(0);
+
+                auto stateAtIP = backwardTrack.getFittedState(backwardTrack.getNumPoints()-1);
+                //backwardRep->extrapolateToPoint(fittedState, IP);
+
                 // Extrapolate to the IP plane
-                rep->extrapolateToPlane(stateAtIP, ipPlane);
-                
+                //rep->extrapolateToPlane(stateAtIP, ipPlane);
+                backwardRep->extrapolateToPoint(stateAtIP, ipOrigin);
+                /*
+                fittedState.getPosMomCov(gen_position, gen_momentum, covariancePosMom);
+                auto stateVecIP = fittedState.getState();
+
+                    gen_momentum.SetX(-gen_momentum.X());
+                    gen_momentum.SetY(-gen_momentum.Y());
+                    gen_momentum.SetZ(-gen_momentum.Z());
+                */
                 // Convert to EDM4hep format and save
                 edm4hep::TrackState ipState = convertToEDM4hepState(stateAtIP, 
                                                                 edm4hep::TrackState::AtIP);
@@ -2086,8 +2107,8 @@ bool DisplacedTracking::fitCircleToFourHits(
         double sigma_v = hit.getDv(); // mm
         
         // Use defaults if not set
-        if (sigma_u <= 0) sigma_u = 0.4; // 100 microns
-        if (sigma_v <= 0) sigma_v = 0.4; // 100 microns
+        if (sigma_u <= 0) sigma_u = 0.4; // 400 microns
+        if (sigma_v <= 0) sigma_v = 0.4; // 400 microns
         
         // Use average uncertainty (could be improved with proper error propagation)
         double avgSigma = std::sqrt(sigma_u * sigma_u + sigma_v * sigma_v) / 10.0; // Convert to cm
