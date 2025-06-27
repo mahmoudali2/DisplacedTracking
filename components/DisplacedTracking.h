@@ -258,12 +258,6 @@ private:
     ParticleProperties m_particleProperties;  // Particle properties for material effects
     std::unique_ptr<dd4hep::DDSegmentation::BitFieldCoder> m_bitFieldCoder; // For cell ID decoding
 
-    edm4hep::TrackState getSeedState(const edm4hep::Track& track) const;
-    std::vector<edm4hep::TrackerHitPlane> getOriginalHits(
-        const edm4hep::Track& track,
-        const edm4hep::TrackerHitPlaneCollection& allHits) const;
-    int getHighestLayerID(const std::vector<edm4hep::TrackerHitPlane>& hits) const;
-    void copyTrackParameters(const edm4hep::Track& source, edm4hep::MutableTrack& target) const;
     int getPDGCode() const;
     
     // Map of known particle types
