@@ -89,17 +89,21 @@ StatusCode DisplacedTracking::initialize() {
         << bfield.z() / dd4hep::tesla << ") Tesla" << endmsg;
 
     // Check field at several points
-    const std::vector<dd4hep::Position> testPoints = {
-        dd4hep::Position(0, 0, 0),              
-        dd4hep::Position(450, 0, 0),           // it expects dimensions in cm
+    const std::vector<dd4hep::Position> testPoints = { // in cm
+        dd4hep::Position(0, 0, 0),  
+        dd4hep::Position(100, 100, 100),            
+        dd4hep::Position(450, 0, 0),
         dd4hep::Position(0, 450, 0),           
-        dd4hep::Position(0, 0, 450),           
+        dd4hep::Position(0, 0, 450), 
+        dd4hep::Position(0, 0, -450),          
         dd4hep::Position(500, 500, 0),
         dd4hep::Position(500, 600, 100),
         dd4hep::Position(600, 500, 200),
         dd4hep::Position(500, 500, 250),
+        dd4hep::Position(500, 500, -250),
         dd4hep::Position(100, 300, 350),
-        dd4hep::Position(500, 500, 500)    
+        dd4hep::Position(500, 500, 500),
+        dd4hep::Position(-500, -500, -500)     
     };
 
     info() << "Magnetic field at different positions:" << endmsg;
@@ -165,18 +169,69 @@ StatusCode DisplacedTracking::initialize() {
             fieldManager = genfit::FieldManager::getInstance();
             fieldManager->init(m_genfitField); // kGauss
 
-            m_geoMaterial=GenfitMaterialInterface::getInstance(m_detector);
+            genfit::MaterialEffects::getInstance()->init(new genfit::TGeoMaterialInterface());
+            //genfit::MaterialEffects::getInstance()->setDebugLvl(2);
+            //m_geoMaterial=GenfitMaterialInterface::getInstance(m_detector);
             //m_geoMaterial->setMinSafetyDistanceCut(m_extMinDistCut);
             //m_geoMaterial->setSkipWireMaterial(m_skipWireMaterial);
 
             genfit::MaterialEffects::getInstance()->setEnergyLossBrems(true);
             genfit::MaterialEffects::getInstance()->setNoiseBrems(true);
-            //genfit::MaterialEffects::getInstance()->setNoiseCoulomb(false);  // Disable MS only
+            //genfit::MaterialEffects::getInstance()->setNoiseCoulomb(false);  //Used to Disable Multiple scattering
             genfit::MaterialEffects::getInstance()->setMscModel("GEANE");
             //genfit::MaterialEffects::getInstance()->setMscModel("Highland");
             genfit::MaterialEffects::getInstance()->setEnergyLossBetheBloch(true);
             genfit::MaterialEffects::getInstance()->setNoiseBetheBloch(true);
 
+            // Add material verification debug messages
+            info() << "=== Testing Material Interface ===" << endmsg;
+            
+            // Test material at several detector positions
+            std::vector<dd4hep::Position> testPositions = {
+                //dd4hep::Position(0, 0, 0),      // Origin
+                dd4hep::Position(100, 0, 0),    
+                dd4hep::Position(200, 50, 100), 
+                dd4hep::Position(300, 100, 200), 
+                dd4hep::Position(500, 300, 400),
+                dd4hep::Position(510, 0, 0),
+                dd4hep::Position(520, 0, 0),
+                dd4hep::Position(520, 300, 400),
+                dd4hep::Position(520, 310, 400),
+                dd4hep::Position(520, 290, 400),
+                dd4hep::Position(520, 310, 400),
+                dd4hep::Position(520, 320, 400)
+            };
+            
+            for (const auto& pos : testPositions) {
+                // Test material manager
+                if (m_materialManager) {
+                    dd4hep::rec::Vector3D testPos(pos.x(), pos.y(), pos.z());
+                    dd4hep::Material mat = m_materialManager->materialAt(testPos);
+                    
+                    info() << "Material at (" << pos.x() << ", " << pos.y() << ", " << pos.z() << "):" << endmsg;
+                    info() << "  Density: " << mat.density()/(dd4hep::g/dd4hep::cm3) << " g/cm³" << endmsg;
+                    info() << "  Z: " << mat.Z() << endmsg;
+                    info() << "  A: " << mat.A()/(dd4hep::g/dd4hep::mole) << " g/mol" << endmsg;
+                    info() << "  RadLength: " << mat.radLength()/dd4hep::cm << " cm" << endmsg;
+                }
+            /*    
+                // Test GenFit material interface
+                if (m_geoMaterial) {
+                    auto node = gGeoManager->FindNode(pos.x(),pos.y(),pos.z());
+                    //auto mat = gGeoManager->GetCurrentVolume()->GetMedium()->GetMaterial();
+
+                    bool initSuccess = m_geoMaterial->initTrack(pos.x(), pos.y(), pos.z(), 1.0, 0.0, 0.0);
+                    info() << "  GenFit initTrack success: " << (initSuccess ? "YES" : "NO") << endmsg;
+                    
+                    if (initSuccess) {
+                        genfit::Material gfMat = m_geoMaterial->getMaterialParameters();
+                        info() << "  GenFit Material - Density: " << gfMat.density << " g/cm³" << endmsg;
+                        info() << "  GenFit Material - Z: " << gfMat.Z << endmsg;
+                        info() << "  GenFit Material - RadLength: " << gfMat.radiationLength << " cm" << endmsg;
+                    }
+                }*/ 
+            }
+            info() << "=== End Material Test ===" << endmsg;
 /*          
             // Create and register the field adapter
             m_genFitField = std::unique_ptr<DD4hepFieldAdapter>(new DD4hepFieldAdapter(m_field));
@@ -2251,9 +2306,6 @@ bool DisplacedTracking::fitCircleToFourHits(
     // Degrees of freedom = number of points - number of parameters
     int ndf = 3; // 3 degree of freedom for 4 hits (4 hits * 2 D measurements - 5 track parameters)
     chi2 = chi2/ndf;
-    
-    debug() << "Circle fit chi2 = " << chi2 << ", ndf = " << ndf 
-            << ", chi2/ndf = " << chi2 / ndf << endmsg;
     
     if (chi2 / ndf > 100) { // Very poor fit
         debug() << "Poor circle fit: chi2/ndf = " << chi2 / ndf << endmsg;
