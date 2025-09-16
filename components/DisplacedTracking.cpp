@@ -168,21 +168,24 @@ StatusCode DisplacedTracking::initialize() {
 
             fieldManager = genfit::FieldManager::getInstance();
             fieldManager->init(m_genfitField); // kGauss
+            
+            genfit::MaterialEffects* matEff = genfit::MaterialEffects::getInstance();
 
-            genfit::MaterialEffects::getInstance()->init(new genfit::TGeoMaterialInterface());
-            //genfit::MaterialEffects::getInstance()->setDebugLvl(2);
-            //m_geoMaterial=GenfitMaterialInterface::getInstance(m_detector);
-            //m_geoMaterial->setMinSafetyDistanceCut(m_extMinDistCut);
-            //m_geoMaterial->setSkipWireMaterial(m_skipWireMaterial);
+            // Initialize material interface only once
+            matEff->init(new genfit::TGeoMaterialInterface());
 
-            genfit::MaterialEffects::getInstance()->setEnergyLossBrems(true);
-            genfit::MaterialEffects::getInstance()->setNoiseBrems(true);
-            //genfit::MaterialEffects::getInstance()->setNoiseCoulomb(false);  //Used to Disable Multiple scattering
-            genfit::MaterialEffects::getInstance()->setMscModel("GEANE");
-            //genfit::MaterialEffects::getInstance()->setMscModel("Highland");
-            genfit::MaterialEffects::getInstance()->setEnergyLossBetheBloch(true);
-            genfit::MaterialEffects::getInstance()->setNoiseBetheBloch(true);
+            // Set material effects options
+            matEff->setMscModel("GEANE");          // or "Highland"
+            matEff->setEnergyLossBetheBloch(true);
+            matEff->setNoiseBetheBloch(true);
+            // matEff->setEnergyLossBrems(true);
+            // matEff->setNoiseBrems(true);
+            // matEff->setNoiseCoulomb(false);     // disable multiple scattering
 
+            // Silence prints
+            matEff->setDebugLvl(0);
+ 
+            /*
             // Add material verification debug messages
             info() << "=== Testing Material Interface ===" << endmsg;
             
@@ -201,7 +204,7 @@ StatusCode DisplacedTracking::initialize() {
                 dd4hep::Position(520, 310, 400),
                 dd4hep::Position(520, 320, 400)
             };
-            
+             
             for (const auto& pos : testPositions) {
                 // Test material manager
                 if (m_materialManager) {
@@ -214,7 +217,7 @@ StatusCode DisplacedTracking::initialize() {
                     info() << "  A: " << mat.A()/(dd4hep::g/dd4hep::mole) << " g/mol" << endmsg;
                     info() << "  RadLength: " << mat.radLength()/dd4hep::cm << " cm" << endmsg;
                 }
-            /*    
+               
                 // Test GenFit material interface
                 if (m_geoMaterial) {
                     auto node = gGeoManager->FindNode(pos.x(),pos.y(),pos.z());
@@ -229,10 +232,11 @@ StatusCode DisplacedTracking::initialize() {
                         info() << "  GenFit Material - Z: " << gfMat.Z << endmsg;
                         info() << "  GenFit Material - RadLength: " << gfMat.radiationLength << " cm" << endmsg;
                     }
-                }*/ 
+                 
             }
             info() << "=== End Material Test ===" << endmsg;
-/*          
+            }*/
+            /*
             // Create and register the field adapter
             m_genFitField = std::unique_ptr<DD4hepFieldAdapter>(new DD4hepFieldAdapter(m_field));
             genfit::FieldManager::getInstance()->init(m_genFitField.get());
@@ -240,7 +244,7 @@ StatusCode DisplacedTracking::initialize() {
             // Create and register the material adapter
             m_genFitMaterial = std::unique_ptr<DD4hepMaterialAdapter>(new DD4hepMaterialAdapter(m_materialManager));
             genfit::MaterialEffects::getInstance()->init(m_genFitMaterial.get());
-*/             
+            */
 
             info() << "GenFit initialized successfully" << endmsg;
         } catch (const genfit::Exception& e) {
@@ -349,13 +353,6 @@ std::tuple<edm4hep::TrackCollection> DisplacedTracking::operator()(
                 bField = m_field.magneticField(fieldPos).z() / dd4hep::tesla;
             } catch (...) {
                 bField = 0.0;  // Handle any field access errors
-            }
-            
-            // Use default if field is too small
-            if (std::abs(bField) < 0.1) {
-                debug() << "Magnetic field too small (" << bField 
-                        << " T), using default value -1.7 T" << endmsg;
-                bField = -1.7;  // Default field value
             }
             
             // Calculate pT from omega and magnetic field
@@ -566,11 +563,6 @@ double DisplacedTracking::getPT(const edm4hep::TrackState& state) const {
     // Get field at this position to calculate momentum
     dd4hep::Position fieldPos(x/10.0, y/10.0, z/10.0); // Convert mm to cm for DD4hep
     double bField = m_field.magneticField(fieldPos).z() / dd4hep::tesla;
-
-    // Use default field if actual field is too small -- temporary workaround
-    if (std::abs(bField) < 0.1) {
-        bField = -1.7; // Tesla
-    }
 
     // Calculate pT from omega
     double pT = 0.3 * std::abs(bField) / std::abs(omega) * 0.001; // GeV/c
@@ -965,7 +957,15 @@ edm4hep::TrackCollection DisplacedTracking::findTracks(
         if (foundState) {
             // Calculate parameters for display
             double omega = state.omega;
-            double bField = -1.7; // Tesla
+
+            // Use reference point (first hit position)
+            double x = state.referencePoint[0];
+            double y = state.referencePoint[1];
+            double z = state.referencePoint[2];
+            
+            // Get field at this position to calculate momentum
+            dd4hep::Position fieldPos(x/10.0, y/10.0, z/10.0); // Convert mm to cm for DD4hep
+            double bField = m_field.magneticField(fieldPos).z() / dd4hep::tesla;
             double pT = 0.3 * std::abs(bField) / std::abs(omega) * 0.001; // GeV/c
             
             double tanLambda = state.tanLambda;
@@ -1197,15 +1197,13 @@ bool DisplacedTracking::createTripletSeed(
                             (p1.y() + p2.y() + p3.y())/3.0, 
                             (p1.z() + p2.z() + p3.z())/3.0);
     double actualBz = m_field.magneticField(fieldPos).z() / dd4hep::tesla;
-    const double estimatedBz = -1.7; // Tesla
     
-    debug() << "Magnetic field: actual=" << actualBz << " Tesla, using estimated=" 
-            << estimatedBz << " Tesla for calculation as a temporary solution, due to a problem in k4geo in retrieving the right value of Bz" << endmsg;
+    debug() << "Magnetic field: actual=" << actualBz << " Tesla" << endmsg;
     
     // Calculate pT using all methods for comparison
-    double pT_direct = 0.3 * std::abs(estimatedBz) * radius_direct / 100.0;
-    double pT_sagitta = 0.3 * std::abs(estimatedBz) * sagittaRadius / 100.0;
-    double pT_sagitta_full = 0.3 * std::abs(estimatedBz) * radius_sagitta / 100.0;
+    double pT_direct = 0.3 * std::abs(actualBz) * radius_direct / 100.0;
+    double pT_sagitta = 0.3 * std::abs(actualBz) * sagittaRadius / 100.0;
+    double pT_sagitta_full = 0.3 * std::abs(actualBz) * radius_sagitta / 100.0;
     
     debug() << "Comparison of pT estimates:" << endmsg;
     debug() << "  Direct formula pT: " << pT_direct << " GeV/c" << endmsg;
@@ -1642,11 +1640,6 @@ genfit::MeasuredStateOnPlane DisplacedTracking::convertToGenFitState(
     dd4hep::Position fieldPos(x/10.0, y/10.0, z/10.0); // Convert mm to cm for DD4hep
     double bField = m_field.magneticField(fieldPos).z() / dd4hep::tesla;
     
-    // Use default field if actual field is too small
-    if (std::abs(bField) < 0.1) {
-        bField = -1.7; // Default field value in Tesla
-    }
-    
     // Calculate pT from curvature
     double pT = 0.3 * std::abs(bField) / (std::abs(omega) * 1000.0); // GeV/c
     
@@ -1749,11 +1742,6 @@ edm4hep::TrackState DisplacedTracking::convertToEDM4hepState(
     // Get field at this position to calculate curvature
     dd4hep::Position fieldPos(pos.X(), pos.Y(), pos.Z());
     double bField = m_field.magneticField(fieldPos).z() / dd4hep::tesla;
-    
-    // Use default field if actual field is too small
-    if (std::abs(bField) < 0.1) {
-        bField = -1.7; // Default field value in Tesla
-    }
     
     // Calculate curvature (1/R) from pT and B
     // pT [GeV/c] = 0.3 * |B| [T] * R [m]
@@ -1958,8 +1946,8 @@ bool DisplacedTracking::fitTrackWithGenFit(
         //genfit::DAF fitter;
         fitter.setMaxIterations(m_maxFitIterations);
         fitter.setMinIterations(3);
-        fitter.setDebugLvl(m_debugLevel); // Minimal output
-        fitter.setBlowUpMaxVal(1000.0);
+        //fitter.setDebugLvl(m_debugLevel); 
+        //fitter.setBlowUpMaxVal(1000.0);
         
         // Perform the fit
         debug() << "Starting GenFit Kalman fitting with " << finalGFTrack.getNumPoints() << " hits" << endmsg;
@@ -2276,11 +2264,25 @@ bool DisplacedTracking::fitCircleToFourHits(
     x0 = params(0);
     y0 = params(1);
     radius = params(2);
-    double estimatedBz = -1.7;
-    double pT = 0.3 * std::abs(estimatedBz) * radius / 100.0;
+
+    dd4hep::Position fieldPos(0, 0, 0);  // Default center position      
+    // Use average position of hits for better field estimate
+    double sumX = 0, sumY = 0, sumZ = 0;
+    for (const auto& hit : hits) {
+        sumX += hit.getPosition()[0] / 10.0;  // mm to cm
+        sumY += hit.getPosition()[1] / 10.0;
+        sumZ += hit.getPosition()[2] / 10.0;
+    }
+    fieldPos = dd4hep::Position(
+                    sumX / hits.size(),
+                    sumY / hits.size(),
+                    sumZ / hits.size());
+
+    double actualBz = m_field.magneticField(fieldPos).z() / dd4hep::tesla;
+    double pT = 0.3 * std::abs(actualBz) * radius / 100.0;
 
     debug() << "Refined fit result: center=(" << x0 << ", " << y0 
-            << "), radius=" << radius << " cm, pT=" << pT << " GeV" << endmsg;
+            << "), radius=" << radius << " cm, B field=" << actualBz << " ,pT=" << pT << " GeV" << endmsg;
     
     // Calculate chi2
     chi2 = 0.0;
