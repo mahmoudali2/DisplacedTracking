@@ -129,13 +129,15 @@ StatusCode DisplacedTracking::initialize() {
 
     const dd4hep::rec::SurfaceList& surfList = surfHelper.surfaceList();
 
-    // Convert to your vector of Surface pointers
+    // Get all surfaces and group them by layer 
+    // Use only Muon-System surfaces from the surface map, not all world surfaces
     m_surfaces.clear();
-    for (const auto& surf : surfList) {
-        // Cast to Surface* if necessary
-        auto surface = dynamic_cast<const dd4hep::rec::Surface*>(surf);
-        if (surface) {
-            m_surfaces.push_back(surface);
+    for (const auto& [cellID, surface] : *m_surfaceMap) {
+        // Cast from ISurface* to Surface*
+        const dd4hep::rec::Surface* concreteSurface = 
+            dynamic_cast<const dd4hep::rec::Surface*>(surface);
+        if (concreteSurface) {
+            m_surfaces.push_back(concreteSurface);
         }
     }
     
@@ -649,9 +651,8 @@ edm4hep::TrackCollection DisplacedTracking::findTracks(
             : index(idx), hit(h), layerID(layer), typeID(type), compositeID(composite) {}
     };
     
-    // CRITICAL FIX: Use indices instead of pointers
     std::vector<HitInfo> allHitInfo;
-    std::map<int, std::vector<size_t>> hitIndicesByCompositeLayer; // Store indices, not pointers!
+    std::map<int, std::vector<size_t>> hitIndicesByCompositeLayer; 
     
     // Reserve space to prevent reallocation during population
     allHitInfo.reserve(hits->size());
@@ -684,7 +685,7 @@ edm4hep::TrackCollection DisplacedTracking::findTracks(
         }
     }
     
-    info() << "Found hits in " << hitIndicesByCompositeLayer.size() << " detector layers/regions" << endmsg;
+    info() << "Found hits in " << hitIndicesByCompositeLayer.size() << " detector different layers/regions" << endmsg;
     
     // Get sorted composite layer IDs
     std::vector<int> compositeLayerIDs;
@@ -717,6 +718,7 @@ edm4hep::TrackCollection DisplacedTracking::findTracks(
     
     // PHASE 1: Consecutive layer triplets
     bool foundGoodConsecutiveTriplets = false;
+    bool foundInnerLayerTriplets = false;  // Track if we found triplets in inner layers (0,1,2)
     int consecutiveTriplets = 0;
     int maxEarlyLayersToTry = std::min(size_t(5), compositeLayerIDs.size());
     
@@ -729,6 +731,18 @@ edm4hep::TrackCollection DisplacedTracking::findTracks(
         
         debug() << "Testing consecutive triplet: regions " 
                 << composite1 << " -> " << composite2 << " -> " << composite3 << endmsg;
+        
+        // Check if this triplet uses the first inner layers (0,1,2)
+        bool isInnerLayerTriplet = false;
+        int layer1 = std::abs(composite1) % 1000;  // Extract layer number (remove type encoding)
+        int layer2 = std::abs(composite2) % 1000;
+        int layer3 = std::abs(composite3) % 1000;
+        
+        if ((layer1 == 0 && layer2 == 1 && layer3 == 2) ||
+            (layer1 <= 2 && layer2 <= 2 && layer3 <= 2)) {
+            isInnerLayerTriplet = true;
+            debug() << "Testing inner layer triplet: layers " << layer1 << "," << layer2 << "," << layer3 << endmsg;
+        }
         
         int tripletsBefore = validTriplets;
         
@@ -767,14 +781,14 @@ edm4hep::TrackCollection DisplacedTracking::findTracks(
                     
                     tripletCandidates++;
                     
-                    std::vector<bool> tempUsedHits = usedHits;
+                    // Don't use temporary copy - work directly with the main usedHits
                     size_t prevSize = candidateTracks.size();
                     
                     bool seedValid = false;
                     try {
                         seedValid = createTripletSeed(
                             hitInfo1.hit, hitInfo2.hit, hitInfo3.hit, 
-                            &candidateTracks, tempUsedHits, 
+                            &candidateTracks, usedHits,  // Use main usedHits directly!
                             hitInfo1.index, hitInfo2.index, hitInfo3.index);
                     } catch (const std::exception& ex) {
                         warning() << "Exception in createTripletSeed: " << ex.what() << endmsg;
@@ -785,15 +799,63 @@ edm4hep::TrackCollection DisplacedTracking::findTracks(
                         validTriplets++;
                         consecutiveTriplets++;
                         
+                        // Verify hits are marked as used (they should be from createTripletSeed)
+                        if (!usedHits[hitInfo1.index] || !usedHits[hitInfo2.index] || !usedHits[hitInfo3.index]) {
+                            warning() << "createTripletSeed didn't mark hits as used - fixing" << endmsg;
+                            usedHits[hitInfo1.index] = true;
+                            usedHits[hitInfo2.index] = true;
+                            usedHits[hitInfo3.index] = true;
+                        }
+                        
                         auto newTrack = candidateTracks[candidateTracks.size() - 1];
                         
-                        // Calculate pT
+                        // Calculate pT and get track parameters
                         double pT = 0.0;
+                        edm4hep::TrackState trackState;
+                        bool foundTrackState = false;
+                        
                         for (int l = 0; l < newTrack.trackStates_size(); ++l) {
                             auto state = newTrack.getTrackStates(l);
                             if (state.location == edm4hep::TrackState::AtOther) {
+                                trackState = state;
                                 pT = getPT(state);
+                                foundTrackState = true;
                                 break;
+                            }
+                        }
+                        
+                        // Print detailed information about the valid triplet
+                        if (foundTrackState) {
+                            // Calculate eta from tanLambda
+                            double tanLambda = trackState.tanLambda;
+                            double theta = std::atan2(1.0, tanLambda);
+                            double eta = -std::log(std::tan(theta/2.0));
+                            
+                            // Get hit positions for distance calculation
+                            const auto& pos1 = hitInfo1.hit.getPosition();
+                            const auto& pos2 = hitInfo2.hit.getPosition();
+                            const auto& pos3 = hitInfo3.hit.getPosition();
+                            
+                            double dist12 = std::sqrt(std::pow(pos2[0]-pos1[0], 2) + 
+                                                    std::pow(pos2[1]-pos1[1], 2) + 
+                                                    std::pow(pos2[2]-pos1[2], 2)) / 10.0; // mm to cm
+                            double dist23 = std::sqrt(std::pow(pos3[0]-pos2[0], 2) + 
+                                                    std::pow(pos3[1]-pos2[1], 2) + 
+                                                    std::pow(pos3[2]-pos2[2], 2)) / 10.0; // mm to cm
+                            
+                            info() << "✓ Valid triplet #" << validTriplets << " found:" << endmsg;
+                            info() << "  Layers: " << layer1 << " -> " << layer2 << " -> " << layer3 
+                                   << " (composites: " << composite1 << "," << composite2 << "," << composite3 << ")" << endmsg;
+                            info() << "  Hit positions (cm): (" << pos1[0]/10.0 << "," << pos1[1]/10.0 << "," << pos1[2]/10.0 << ") -> "
+                                   << "(" << pos2[0]/10.0 << "," << pos2[1]/10.0 << "," << pos2[2]/10.0 << ") -> "
+                                   << "(" << pos3[0]/10.0 << "," << pos3[1]/10.0 << "," << pos3[2]/10.0 << ")" << endmsg;
+                            info() << "  Hit distances: " << dist12 << " cm, " << dist23 << " cm (total: " << dist12+dist23 << " cm)" << endmsg;
+                            info() << "  Track parameters: pT=" << pT << " GeV/c, eta=" << eta 
+                                   << ", phi=" << trackState.phi << " rad" << endmsg;
+                            info() << "  Impact parameters: d0=" << trackState.D0/10.0 << " cm, z0=" << trackState.Z0/10.0 << " cm" << endmsg;
+                            
+                            if (isInnerLayerTriplet) {
+                                info() << "  *** INNER LAYER TRIPLET - will skip Phase 2 ***" << endmsg;
                             }
                         }
                         
@@ -808,14 +870,21 @@ edm4hep::TrackCollection DisplacedTracking::findTracks(
         
         if (validTriplets > tripletsBefore) {
             foundGoodConsecutiveTriplets = true;
+            // If we found triplets in the inner layers, mark it and STOP testing more consecutive layers
+            if (isInnerLayerTriplet) {
+                foundInnerLayerTriplets = true;
+                info() << "Found " << (validTriplets - tripletsBefore) 
+                       << " good triplets in inner layers (0,1,2) - stopping consecutive layer tests" << endmsg;
+                break; // EXIT the consecutive layer loop immediately
+            }
         }
     }
     
-    // PHASE 2: All combinations if needed
-    bool tryAllCombinations = !foundGoodConsecutiveTriplets || compositeLayerIDs.size() <= 4;
+    // PHASE 2: All combinations if needed - SKIP if we found inner layer triplets
+    bool tryAllCombinations = !foundInnerLayerTriplets && (!foundGoodConsecutiveTriplets || compositeLayerIDs.size() <= 3);
     
     if (tryAllCombinations) {
-        info() << "Phase 2: Trying all layer combinations..." << endmsg;
+        info() << "Phase 2: Trying all layer combinations (no inner layer triplets found)..." << endmsg;
         
         for (size_t i = 0; i < compositeLayerIDs.size() - 2; ++i) {
             for (size_t j = i + 1; j < compositeLayerIDs.size() - 1; ++j) {
@@ -858,26 +927,75 @@ edm4hep::TrackCollection DisplacedTracking::findTracks(
                                 
                                 tripletCandidates++;
                                 
-                                std::vector<bool> tempUsedHits = usedHits;
+                                // Don't use temporary copy - work directly with main usedHits
                                 size_t prevSize = candidateTracks.size();
                                 
                                 try {
                                     bool seedValid = createTripletSeed(
                                         hitInfo1.hit, hitInfo2.hit, hitInfo3.hit, 
-                                        &candidateTracks, tempUsedHits, 
+                                        &candidateTracks, usedHits,  // Use main usedHits directly!
                                         hitInfo1.index, hitInfo2.index, hitInfo3.index);
                                     
                                     if (seedValid && candidateTracks.size() > prevSize) {
                                         validTriplets++;
                                         
+                                        // Verify hits are marked as used
+                                        if (!usedHits[hitInfo1.index] || !usedHits[hitInfo2.index] || !usedHits[hitInfo3.index]) {
+                                            warning() << "createTripletSeed didn't mark hits as used - fixing" << endmsg;
+                                            usedHits[hitInfo1.index] = true;
+                                            usedHits[hitInfo2.index] = true;
+                                            usedHits[hitInfo3.index] = true;
+                                        }
+                                        
                                         auto newTrack = candidateTracks[candidateTracks.size() - 1];
                                         double pT = 0.0;
+                                        edm4hep::TrackState trackState;
+                                        bool foundTrackState = false;
+                                        
                                         for (int l = 0; l < newTrack.trackStates_size(); ++l) {
                                             auto state = newTrack.getTrackStates(l);
                                             if (state.location == edm4hep::TrackState::AtOther) {
+                                                trackState = state;
                                                 pT = getPT(state);
+                                                foundTrackState = true;
                                                 break;
                                             }
+                                        }
+                                        
+                                        // Print detailed information about the valid triplet in Phase 2
+                                        if (foundTrackState) {
+                                            // Extract layer numbers for display
+                                            int layer1 = std::abs(composite1) % 1000;
+                                            int layer2 = std::abs(composite2) % 1000;
+                                            int layer3 = std::abs(composite3) % 1000;
+                                            
+                                            // Calculate eta from tanLambda
+                                            double tanLambda = trackState.tanLambda;
+                                            double theta = std::atan2(1.0, tanLambda);
+                                            double eta = -std::log(std::tan(theta/2.0));
+                                            
+                                            // Get hit positions for distance calculation
+                                            const auto& pos1 = hitInfo1.hit.getPosition();
+                                            const auto& pos2 = hitInfo2.hit.getPosition();
+                                            const auto& pos3 = hitInfo3.hit.getPosition();
+                                            
+                                            double dist12 = std::sqrt(std::pow(pos2[0]-pos1[0], 2) + 
+                                                                    std::pow(pos2[1]-pos1[1], 2) + 
+                                                                    std::pow(pos2[2]-pos1[2], 2)) / 10.0; // mm to cm
+                                            double dist23 = std::sqrt(std::pow(pos3[0]-pos2[0], 2) + 
+                                                                    std::pow(pos3[1]-pos2[1], 2) + 
+                                                                    std::pow(pos3[2]-pos2[2], 2)) / 10.0; // mm to cm
+                                            
+                                            info() << "✓ Valid triplet #" << validTriplets << " found (Phase 2):" << endmsg;
+                                            info() << "  Layers: " << layer1 << " -> " << layer2 << " -> " << layer3 
+                                                   << " (composites: " << composite1 << "," << composite2 << "," << composite3 << ")" << endmsg;
+                                            info() << "  Hit positions (cm): (" << pos1[0]/10.0 << "," << pos1[1]/10.0 << "," << pos1[2]/10.0 << ") -> "
+                                                   << "(" << pos2[0]/10.0 << "," << pos2[1]/10.0 << "," << pos2[2]/10.0 << ") -> "
+                                                   << "(" << pos3[0]/10.0 << "," << pos3[1]/10.0 << "," << pos3[2]/10.0 << ")" << endmsg;
+                                            info() << "  Hit distances: " << dist12 << " cm, " << dist23 << " cm (total: " << dist12+dist23 << " cm)" << endmsg;
+                                            info() << "  Track parameters: pT=" << pT << " GeV/c, eta=" << eta 
+                                                   << ", phi=" << trackState.phi << " rad" << endmsg;
+                                            info() << "  Impact parameters: d0=" << trackState.D0/10.0 << " cm, z0=" << trackState.Z0/10.0 << " cm" << endmsg;
                                         }
                                         
                                         std::vector<size_t> hitIndices = {hitInfo1.index, hitInfo2.index, hitInfo3.index};
@@ -894,8 +1012,9 @@ edm4hep::TrackCollection DisplacedTracking::findTracks(
                 }
             }
         }
+    } else if (foundInnerLayerTriplets) {
+        info() << "Phase 2: SKIPPED - Found good triplets in inner layers (0,1,2)" << endmsg;
     }
-    
     
     info() << "Seed generation complete: " << trackCandidates.size() 
            << " triplet candidates from " << tripletCandidates 
@@ -910,26 +1029,27 @@ edm4hep::TrackCollection DisplacedTracking::findTracks(
                   return a.pT > b.pT;
               });
     
-    // Process candidates in order of pT, avoiding hit conflicts
+    // Process candidates in order of pT
     for (const auto& candidate : trackCandidates) {
-        // Skip if any hits are already used - with bounds checking
-        bool hasConflict = false;
+        // All candidates should have their hits marked as used from seed generation
+        // Just verify the indices are valid
+        bool validIndices = true;
         for (size_t idx : candidate.hitIndices) {
             if (idx >= usedHits.size()) {
                 error() << "Final processing: hit index " << idx 
                         << " out of bounds (usedHits size: " << usedHits.size() << ")" << endmsg;
-                hasConflict = true;
-                break;
-            }
-            if (usedHits[idx]) {
-                hasConflict = true;
+                validIndices = false;
                 break;
             }
         }
         
-        if (hasConflict) {
+        if (!validIndices) {
             continue;
         }
+        
+        info() << "Processing track candidate with pT=" << candidate.pT 
+               << " GeV/c using hits: [" << candidate.hitIndices[0] 
+               << "," << candidate.hitIndices[1] << "," << candidate.hitIndices[2] << "]" << endmsg;
         
         // Get the seed track and its state
         const auto& seedTrack = candidate.track;
@@ -956,45 +1076,71 @@ edm4hep::TrackCollection DisplacedTracking::findTracks(
             continue;
         }
         
-        // Build trackHits vector efficiently using a hash map
-        std::unordered_map<uint64_t, edm4hep::TrackerHitPlane> cellIDToHit;
-        for (size_t i = 0; i < hits->size(); ++i) {
-            const auto& hit = (*hits)[i];
-            cellIDToHit[hit.getCellID()] = hit; // Store copy instead of pointer
-        }
-
-        std::vector<edm4hep::TrackerHitPlane> trackHits;
-        trackHits.reserve(seedTrack.trackerHits_size()); // Pre-allocate for efficiency
+        debug() << "Found seed state for track candidate" << endmsg;
         
-        for (int j = 0; j < seedTrack.trackerHits_size(); ++j) {
-            auto trackHit = seedTrack.getTrackerHits(j);
-            auto it = cellIDToHit.find(trackHit.getCellID());
-            if (it != cellIDToHit.end()) {
-                trackHits.push_back(it->second); // Use the stored copy
+        // Build trackHits vector directly using hit indices (avoid cellID duplicate issues)
+        std::vector<edm4hep::TrackerHitPlane> trackHits;
+        trackHits.reserve(3); // Start with 3 hits from triplet
+        
+        // Use direct index access instead of cellID lookup to handle duplicate cellIDs
+        for (size_t idx : candidate.hitIndices) {
+            if (idx < hits->size()) {
+                trackHits.push_back((*hits)[idx]); // Direct access by index
             } else {
-                warning() << "Could not find hit with CellID " << trackHit.getCellID() 
-                          << " in input collection" << endmsg;
+                warning() << "Hit index " << idx << " out of bounds - skipping hit" << endmsg;
             }
         }
         
+        if (trackHits.size() != candidate.hitIndices.size()) {
+            warning() << "Could not retrieve all hits for track candidate - expected " 
+                      << candidate.hitIndices.size() << ", got " << trackHits.size() << endmsg;
+            continue;
+        }
+        
+        debug() << "Successfully built trackHits vector with " << trackHits.size() << " hits" << endmsg;
+        
         // Try to extend the track with a 4th hit
         bool foundExtraHit = false;
-        try {
-            foundExtraHit = findCompatibleExtraHit(trackHits, hits, usedHits);
-        } catch (const std::exception& ex) {
-            warning() << "Exception in findCompatibleExtraHit: " << ex.what() << endmsg;
-        } catch (...) {
-            warning() << "Unknown exception in findCompatibleExtraHit" << endmsg;
+        if (trackHits.size() >= 3) {
+            try {
+                // Get the layer of the last hit
+                int lastLayerID = getLayerID(trackHits.back().getCellID());
+                info() << "Searching for 4th hit - last hit is in layer " << lastLayerID << endmsg;
+                
+                // Count available unused hits
+                int unusedHitCount = 0;
+                std::map<int, int> hitsPerLayer;
+                for (size_t i = 0; i < usedHits.size(); ++i) {
+                    if (!usedHits[i]) {
+                        unusedHitCount++;
+                        int layerID = getLayerID((*hits)[i].getCellID());
+                        hitsPerLayer[layerID]++;
+                    }
+                }
+                
+                info() << "Available unused hits: " << unusedHitCount << endmsg;
+                for (const auto& [layer, count] : hitsPerLayer) {
+                    info() << "  Layer " << layer << ": " << count << " unused hits" << endmsg;
+                }
+                
+                foundExtraHit = findCompatibleExtraHit(trackHits, hits, usedHits);
+            } catch (const std::exception& ex) {
+                warning() << "Exception in findCompatibleExtraHit: " << ex.what() << endmsg;
+            } catch (...) {
+                warning() << "Unknown exception in findCompatibleExtraHit" << endmsg;
+            }
         }
         
         if (foundExtraHit) {
             info() << "Extended track from 3 to 4 hits" << endmsg;
         } else {
-            debug() << "Keeping track with 3 hits (no compatible 4th hit found)" << endmsg;
+            debug() << "Keeping track with " << trackHits.size() << " hits (no compatible extra hit found)" << endmsg;
         }
 
         // Create a new track
         auto finalTrack = finalTracks.create();
+        
+        debug() << "Created new final track object" << endmsg;
 
         // Test 4-hit circle fitting if we have 4 hits
         if (trackHits.size() == 4) {
@@ -1078,14 +1224,8 @@ edm4hep::TrackCollection DisplacedTracking::findTracks(
             }
         }
         
-        // Mark hits as used - with bounds checking
-        for (size_t idx : candidate.hitIndices) {
-            if (idx < usedHits.size()) {
-                usedHits[idx] = true;
-            } else {
-                error() << "Cannot mark hit " << idx << " as used - index out of bounds" << endmsg;
-            }
-        }
+        info() << "Successfully created final track with " << finalTrack.trackerHits_size() 
+               << " hits and " << finalTrack.trackStates_size() << " track states" << endmsg;
     }
     
     info() << "Track reconstruction complete: created " << finalTracks.size() 
@@ -2185,30 +2325,44 @@ bool DisplacedTracking::findCompatibleExtraHit(
         return false;
     }
     
-    // Get the last hit (3rd hit) position
+    // Get the last hit (3rd hit) position and layer
     const auto& lastHit = trackHits[2];
     const auto& lastPos = lastHit.getPosition();
     Eigen::Vector3d lastHitPos(lastPos[0] / 10.0, lastPos[1] / 10.0, lastPos[2] / 10.0); // mm to cm
     
-    // Get the layer ID of the last hit
     int lastLayerID = getLayerID(lastHit.getCellID());
-    int targetLayerID = lastLayerID + 1; // Look for hits in the next layer
     
-    debug() << "Looking for compatible hits in layer " << targetLayerID 
-            << " (last hit in layer " << lastLayerID << ")" << endmsg;
+    debug() << "Looking for compatible 4th hit - last hit in layer " << lastLayerID 
+            << " at position (" << lastHitPos.x() << "," << lastHitPos.y() << "," << lastHitPos.z() << ") cm" << endmsg;
     
     double bestDistance = 1e6;
     int bestHitIndex = -1;
     edm4hep::TrackerHitPlane bestHit;
     
-    // Search through all hits for candidates in the target layer
+    // Search through all hits for candidates
     for (size_t i = 0; i < allHits->size(); ++i) {
         if (usedHits[i]) continue; // Skip already used hits
         
         const auto& candidateHit = (*allHits)[i];
         int candidateLayerID = getLayerID(candidateHit.getCellID());
         
-        if (candidateLayerID != targetLayerID) continue; // Not in target layer
+        // Accept hits from same layer OR next consecutive layers
+        // This handles duplicate hits in same layer (same cellID issue)
+        bool layerAcceptable = false;
+        std::string layerReason;
+        
+        if (candidateLayerID == lastLayerID) {
+            layerAcceptable = true;
+            layerReason = "same layer";
+        } else if (candidateLayerID == lastLayerID + 1) {
+            layerAcceptable = true;
+            layerReason = "next layer";
+        } else if (candidateLayerID > lastLayerID + 1 && candidateLayerID <= lastLayerID + 2) {
+            layerAcceptable = true;
+            layerReason = "layer skip allowed";
+        }
+        
+        if (!layerAcceptable) continue;
         
         // Calculate distance to last hit
         const auto& candidatePos = candidateHit.getPosition();
@@ -2216,18 +2370,29 @@ bool DisplacedTracking::findCompatibleExtraHit(
         
         double distance = (candidateHitPos - lastHitPos).norm();
         
-        debug() << "Candidate hit at distance " << distance << " cm" << endmsg;
+        debug() << "Candidate hit " << i << " in layer " << candidateLayerID 
+                << " (" << layerReason << ") at distance " << distance << " cm" << endmsg;
+        
+        // More generous distance threshold for same layer, stricter for next layers
+        double maxDistance = (candidateLayerID == lastLayerID) ? 10.0 : 70.0; // 10cm for same layer, 70cm for others
         
         // Check if distance is within acceptable range
-        if (distance < 70.0 && distance < bestDistance) { // 70 cm threshold
+        if (distance < maxDistance && distance < bestDistance) {
             bestDistance = distance;
             bestHitIndex = i;
             bestHit = candidateHit;
+            
+            debug() << "  -> New best candidate: distance=" << distance 
+                    << " cm, layer=" << candidateLayerID << " (" << layerReason << ")" << endmsg;
         }
     }
     
     if (bestHitIndex >= 0) {
-        debug() << "Found compatible 4th hit at distance " << bestDistance << " cm" << endmsg;
+        int bestLayerID = getLayerID(bestHit.getCellID());
+        std::string layerType = (bestLayerID == lastLayerID) ? "same layer" : "next layer";
+        
+        info() << "Found compatible 4th hit at distance " << bestDistance 
+               << " cm in layer " << bestLayerID << " (" << layerType << ")" << endmsg;
         
         // Add the best hit to the track
         trackHits.push_back(bestHit);
@@ -2237,7 +2402,7 @@ bool DisplacedTracking::findCompatibleExtraHit(
         
         return true;
     } else {
-        debug() << "No compatible 4th hit found within 70 cm" << endmsg;
+        debug() << "No compatible 4th hit found within acceptable distance thresholds" << endmsg;
         return false;
     }
 }
