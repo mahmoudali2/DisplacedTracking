@@ -57,6 +57,8 @@
 #include "AbsBField.h"
 #include "FitStatus.h"
 #include <EventDisplay.h>
+#include <unordered_map>
+#include <unordered_set>
 
 // Include our adapter classes
 #include "GenFitAdapters.h"
