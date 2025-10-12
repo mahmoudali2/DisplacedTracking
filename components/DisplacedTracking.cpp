@@ -687,12 +687,36 @@ edm4hep::TrackCollection DisplacedTracking::findTracks(
     
     info() << "Found hits in " << hitIndicesByCompositeLayer.size() << " detector different layers/regions" << endmsg;
     
-    // Get sorted composite layer IDs
+    // Get composite layer IDs sorted by actual layer distance from IP (not by composite ID value)
     std::vector<int> compositeLayerIDs;
     for (const auto& [compositeID, indices] : hitIndicesByCompositeLayer) {
         compositeLayerIDs.push_back(compositeID);
     }
-    std::sort(compositeLayerIDs.begin(), compositeLayerIDs.end());
+    
+    // Sort by actual layer ID (distance from IP) rather than composite ID value
+    std::sort(compositeLayerIDs.begin(), compositeLayerIDs.end(), 
+        [](int a, int b) {
+            // Extract actual layer ID from composite ID
+            int layerA, layerB;
+            
+            if (a >= 1000) {
+                layerA = a - 1000;  // Positive endcap
+            } else if (a <= -1000) {
+                layerA = -(a + 1000);  // Negative endcap: -1000->0, -1001->1, etc.
+            } else {
+                layerA = a;  // Barrel
+            }
+            
+            if (b >= 1000) {
+                layerB = b - 1000;  // Positive endcap  
+            } else if (b <= -1000) {
+                layerB = -(b + 1000);  // Negative endcap
+            } else {
+                layerB = b;  // Barrel
+            }
+            
+            return layerA < layerB;  // Sort by actual layer ID (distance from IP)
+        });
     
     if (compositeLayerIDs.size() < 3) {
         info() << "Not enough detector regions with hits for triplet seeding" << endmsg;
@@ -716,175 +740,274 @@ edm4hep::TrackCollection DisplacedTracking::findTracks(
     int tripletCandidates = 0;
     int validTriplets = 0;
     
-    // PHASE 1: Consecutive layer triplets
-    bool foundGoodConsecutiveTriplets = false;
-    bool foundInnerLayerTriplets = false;  // Track if we found triplets in inner layers (0,1,2)
-    int consecutiveTriplets = 0;
-    int maxEarlyLayersToTry = std::min(size_t(5), compositeLayerIDs.size());
+    // PHASE 1: Inner layer triplets
+    bool foundGoodInnerTriplets = false;
+    int innerTriplets = 0;
     
-    info() << "Phase 1: Testing consecutive layer triplets..." << endmsg;
+    info() << "Phase 1: Prioritizing inner layer triplets (0,1,2)..." << endmsg;
     
-    for (size_t i = 0; i <= compositeLayerIDs.size() - 3 && i < maxEarlyLayersToTry - 2; ++i) {
-        int composite1 = compositeLayerIDs[i];
-        int composite2 = compositeLayerIDs[i+1]; 
-        int composite3 = compositeLayerIDs[i+2];
-        
-        debug() << "Testing consecutive triplet: regions " 
-                << composite1 << " -> " << composite2 << " -> " << composite3 << endmsg;
-        
-        // Check if this triplet uses the first inner layers (0,1,2)
-        bool isInnerLayerTriplet = false;
-        int layer1 = std::abs(composite1) % 1000;  // Extract layer number (remove type encoding)
-        int layer2 = std::abs(composite2) % 1000;
-        int layer3 = std::abs(composite3) % 1000;
-        
-        if ((layer1 == 0 && layer2 == 1 && layer3 == 2) ||
-            (layer1 <= 2 && layer2 <= 2 && layer3 <= 2)) {
-            isInnerLayerTriplet = true;
-            debug() << "Testing inner layer triplet: layers " << layer1 << "," << layer2 << "," << layer3 << endmsg;
+    // Count hits in first 3 inner layers (actual layers 0, 1, 2)
+    int hitsInInner3Layers = 0;
+    std::map<int, int> hitsPerInnerLayer;
+    
+    for (int compositeID : compositeLayerIDs) {
+        int actualLayer;
+        if (compositeID >= 1000) {
+            actualLayer = compositeID - 1000;  // Positive endcap
+        } else if (compositeID <= -1000) {
+            actualLayer = -(compositeID + 1000);  // Negative endcap
+        } else {
+            actualLayer = compositeID;  // Barrel
         }
         
-        int tripletsBefore = validTriplets;
+        if (actualLayer >= 0 && actualLayer <= 2) {
+            int layerHits = hitIndicesByCompositeLayer[compositeID].size();
+            hitsInInner3Layers += layerHits;
+            hitsPerInnerLayer[actualLayer] += layerHits;
+        }
+    }
+    
+    info() << "Hits in inner layers - Layer 0: " << hitsPerInnerLayer[0] 
+           << ", Layer 1: " << hitsPerInnerLayer[1] 
+           << ", Layer 2: " << hitsPerInnerLayer[2] 
+           << " (Total: " << hitsInInner3Layers << ")" << endmsg;
+    
+    // Strategy 1: Try to find triplets in layers 0,1,2 first
+    if (hitsPerInnerLayer[0] > 0 && hitsPerInnerLayer[1] > 0 && hitsPerInnerLayer[2] > 0) {
+        info() << "Strategy 1: Using consecutive inner layers (0,1,2)" << endmsg;
         
-        // SAFE: Use indices instead of pointers
-        for (size_t idx1 : hitIndicesByCompositeLayer[composite1]) {
-            for (size_t idx2 : hitIndicesByCompositeLayer[composite2]) {
-                for (size_t idx3 : hitIndicesByCompositeLayer[composite3]) {
-                    
-                    // Validate indices
-                    if (idx1 >= allHitInfo.size() || idx2 >= allHitInfo.size() || idx3 >= allHitInfo.size()) {
-                        error() << "HitInfo index out of bounds: " << idx1 << ", " << idx2 << ", " << idx3 
-                                << " (allHitInfo.size: " << allHitInfo.size() << ")" << endmsg;
-                        continue;
-                    }
-                    
-                    const HitInfo& hitInfo1 = allHitInfo[idx1];
-                    const HitInfo& hitInfo2 = allHitInfo[idx2];
-                    const HitInfo& hitInfo3 = allHitInfo[idx3];
-                    
-                    // Validate hit indices
-                    if (hitInfo1.index >= usedHits.size() || 
-                        hitInfo2.index >= usedHits.size() || 
-                        hitInfo3.index >= usedHits.size()) {
-                        error() << "Hit index out of bounds: " << hitInfo1.index << ", " 
-                                << hitInfo2.index << ", " << hitInfo3.index 
-                                << " (usedHits.size: " << usedHits.size() << ")" << endmsg;
-                        continue;
-                    }
-                    
-                    // Check if already used
-                    if (usedHits[hitInfo1.index] || 
-                        usedHits[hitInfo2.index] || 
-                        usedHits[hitInfo3.index]) {
-                        continue;
-                    }
-                    
-                    tripletCandidates++;
-                    
-                    // Don't use temporary copy - work directly with the main usedHits
-                    size_t prevSize = candidateTracks.size();
-                    
-                    bool seedValid = false;
-                    try {
-                        seedValid = createTripletSeed(
-                            hitInfo1.hit, hitInfo2.hit, hitInfo3.hit, 
-                            &candidateTracks, usedHits,  // Use main usedHits directly!
-                            hitInfo1.index, hitInfo2.index, hitInfo3.index);
-                    } catch (const std::exception& ex) {
-                        warning() << "Exception in createTripletSeed: " << ex.what() << endmsg;
-                        continue;
-                    }
-                    
-                    if (seedValid && candidateTracks.size() > prevSize) {
-                        validTriplets++;
-                        consecutiveTriplets++;
+        // Find the composite IDs for layers 0, 1, 2 in this event
+        int layer0ID = -999, layer1ID = -999, layer2ID = -999;
+        for (int compositeID : compositeLayerIDs) {
+            int actualLayer;
+            if (compositeID >= 1000) {
+                actualLayer = compositeID - 1000;
+            } else if (compositeID <= -1000) {
+                actualLayer = -(compositeID + 1000);
+            } else {
+                actualLayer = compositeID;
+            }
+            
+            if (actualLayer == 0) layer0ID = compositeID;
+            else if (actualLayer == 1) layer1ID = compositeID;
+            else if (actualLayer == 2) layer2ID = compositeID;
+        }
+        
+        // Test triplets from layers 0,1,2
+        if (layer0ID != -999 && layer1ID != -999 && layer2ID != -999) {
+            // Collect all triplet candidates and their pT values
+            std::vector<std::tuple<size_t, size_t, size_t, double, edm4hep::Track>> innerTripletCandidates;
+            
+            for (size_t idx0 : hitIndicesByCompositeLayer[layer0ID]) {
+                for (size_t idx1 : hitIndicesByCompositeLayer[layer1ID]) {
+                    for (size_t idx2 : hitIndicesByCompositeLayer[layer2ID]) {
                         
-                        // Verify hits are marked as used (they should be from createTripletSeed)
-                        if (!usedHits[hitInfo1.index] || !usedHits[hitInfo2.index] || !usedHits[hitInfo3.index]) {
-                            warning() << "createTripletSeed didn't mark hits as used - fixing" << endmsg;
-                            usedHits[hitInfo1.index] = true;
-                            usedHits[hitInfo2.index] = true;
-                            usedHits[hitInfo3.index] = true;
+                        if (idx0 >= allHitInfo.size() || idx1 >= allHitInfo.size() || idx2 >= allHitInfo.size()) {
+                            continue;
                         }
                         
-                        auto newTrack = candidateTracks[candidateTracks.size() - 1];
+                        const HitInfo& hitInfo0 = allHitInfo[idx0];
+                        const HitInfo& hitInfo1 = allHitInfo[idx1];
+                        const HitInfo& hitInfo2 = allHitInfo[idx2];
                         
-                        // Calculate pT and get track parameters
-                        double pT = 0.0;
-                        edm4hep::TrackState trackState;
-                        bool foundTrackState = false;
+                        if (usedHits[hitInfo0.index] || usedHits[hitInfo1.index] || usedHits[hitInfo2.index]) {
+                            continue;
+                        }
                         
-                        for (int l = 0; l < newTrack.trackStates_size(); ++l) {
-                            auto state = newTrack.getTrackStates(l);
-                            if (state.location == edm4hep::TrackState::AtOther) {
-                                trackState = state;
-                                pT = getPT(state);
-                                foundTrackState = true;
-                                break;
+                        tripletCandidates++;
+                        
+                        // Create a temporary track collection to test this triplet
+                        edm4hep::TrackCollection tempTracks;
+                        std::vector<bool> tempUsedHits = usedHits; // Copy current state
+                        
+                        bool seedValid = createTripletSeed(
+                            hitInfo0.hit, hitInfo1.hit, hitInfo2.hit, 
+                            &tempTracks, tempUsedHits,
+                            hitInfo0.index, hitInfo1.index, hitInfo2.index);
+                        
+                        if (seedValid && tempTracks.size() > 0) {
+                            auto newTrack = tempTracks[tempTracks.size() - 1];
+                            
+                            // Calculate pT
+                            double pT = 0.0;
+                            for (int l = 0; l < newTrack.trackStates_size(); ++l) {
+                                auto state = newTrack.getTrackStates(l);
+                                if (state.location == edm4hep::TrackState::AtOther) {
+                                    pT = getPT(state);
+                                    break;
+                                }
                             }
+                            
+                            // Add to candidates list for later selection
+                            innerTripletCandidates.emplace_back(idx0, idx1, idx2, pT, newTrack);
                         }
-                        
-                        // Print detailed information about the valid triplet
-                        if (foundTrackState) {
-                            // Calculate eta from tanLambda
-                            double tanLambda = trackState.tanLambda;
-                            double theta = std::atan2(1.0, tanLambda);
-                            double eta = -std::log(std::tan(theta/2.0));
-                            
-                            // Get hit positions for distance calculation
-                            const auto& pos1 = hitInfo1.hit.getPosition();
-                            const auto& pos2 = hitInfo2.hit.getPosition();
-                            const auto& pos3 = hitInfo3.hit.getPosition();
-                            
-                            double dist12 = std::sqrt(std::pow(pos2[0]-pos1[0], 2) + 
-                                                    std::pow(pos2[1]-pos1[1], 2) + 
-                                                    std::pow(pos2[2]-pos1[2], 2)) / 10.0; // mm to cm
-                            double dist23 = std::sqrt(std::pow(pos3[0]-pos2[0], 2) + 
-                                                    std::pow(pos3[1]-pos2[1], 2) + 
-                                                    std::pow(pos3[2]-pos2[2], 2)) / 10.0; // mm to cm
-                            
-                            info() << "✓ Valid triplet #" << validTriplets << " found:" << endmsg;
-                            info() << "  Layers: " << layer1 << " -> " << layer2 << " -> " << layer3 
-                                   << " (composites: " << composite1 << "," << composite2 << "," << composite3 << ")" << endmsg;
-                            info() << "  Hit positions (cm): (" << pos1[0]/10.0 << "," << pos1[1]/10.0 << "," << pos1[2]/10.0 << ") -> "
-                                   << "(" << pos2[0]/10.0 << "," << pos2[1]/10.0 << "," << pos2[2]/10.0 << ") -> "
-                                   << "(" << pos3[0]/10.0 << "," << pos3[1]/10.0 << "," << pos3[2]/10.0 << ")" << endmsg;
-                            info() << "  Hit distances: " << dist12 << " cm, " << dist23 << " cm (total: " << dist12+dist23 << " cm)" << endmsg;
-                            info() << "  Track parameters: pT=" << pT << " GeV/c, eta=" << eta 
-                                   << ", phi=" << trackState.phi << " rad" << endmsg;
-                            info() << "  Impact parameters: d0=" << trackState.D0/10.0 << " cm, z0=" << trackState.Z0/10.0 << " cm" << endmsg;
-                            
-                            if (isInnerLayerTriplet) {
-                                info() << "  *** INNER LAYER TRIPLET - will skip Phase 2 ***" << endmsg;
-                            }
-                        }
-                        
-                        std::vector<size_t> hitIndices = {hitInfo1.index, hitInfo2.index, hitInfo3.index};
-                        std::vector<int> usedComposites = {composite1, composite2, composite3};
-                        
-                        trackCandidates.emplace_back(newTrack, pT, hitIndices, usedComposites);
                     }
                 }
             }
-        }
-        
-        if (validTriplets > tripletsBefore) {
-            foundGoodConsecutiveTriplets = true;
-            // If we found triplets in the inner layers, mark it and STOP testing more consecutive layers
-            if (isInnerLayerTriplet) {
-                foundInnerLayerTriplets = true;
-                info() << "Found " << (validTriplets - tripletsBefore) 
-                       << " good triplets in inner layers (0,1,2) - stopping consecutive layer tests" << endmsg;
-                break; // EXIT the consecutive layer loop immediately
+            
+            // Sort candidates by pT (highest first) and take only the best ones
+            std::sort(innerTripletCandidates.begin(), innerTripletCandidates.end(),
+                [](const auto& a, const auto& b) { return std::get<3>(a) > std::get<3>(b); });
+            
+            // Accept the highest pT candidates (limit to avoid too many tracks)
+            int maxInnerTriplets = std::min(3, static_cast<int>(innerTripletCandidates.size()));
+            
+            for (int i = 0; i < maxInnerTriplets; ++i) {
+                auto& [idx0, idx1, idx2, pT, track] = innerTripletCandidates[i];
+                
+                const HitInfo& hitInfo0 = allHitInfo[idx0];
+                const HitInfo& hitInfo1 = allHitInfo[idx1];
+                const HitInfo& hitInfo2 = allHitInfo[idx2];
+                
+                // Check if hits are still available
+                if (usedHits[hitInfo0.index] || usedHits[hitInfo1.index] || usedHits[hitInfo2.index]) {
+                    continue;
+                }
+                
+                // Mark hits as used
+                usedHits[hitInfo0.index] = true;
+                usedHits[hitInfo1.index] = true;
+                usedHits[hitInfo2.index] = true;
+                
+                // Add to final candidate tracks
+                candidateTracks.push_back(track);
+                validTriplets++;
+                innerTriplets++;
+                foundGoodInnerTriplets = true;
+                
+                info() << "✓ Inner layer triplet #" << validTriplets << " (pT=" << pT 
+                       << " GeV/c): Layers 0,1,2 (composites: " << layer0ID << "," << layer1ID << "," << layer2ID << ")" << endmsg;
+                
+                std::vector<size_t> hitIndices = {hitInfo0.index, hitInfo1.index, hitInfo2.index};
+                std::vector<int> usedComposites = {layer0ID, layer1ID, layer2ID};
+                trackCandidates.emplace_back(track, pT, hitIndices, usedComposites);
             }
         }
     }
     
-    // PHASE 2: All combinations if needed - SKIP if we found inner layer triplets
-    bool tryAllCombinations = !foundInnerLayerTriplets && (!foundGoodConsecutiveTriplets || compositeLayerIDs.size() <= 3);
+    // Strategy 2: If we don't have all 3 inner layers, try combinations that include layer 3
+    if (!foundGoodInnerTriplets && hitsInInner3Layers >= 2) {
+        info() << "Strategy 2: Using inner layers + layer 3 as fallback" << endmsg;
+        
+        // Find layer 3 composite ID
+        int layer3ID = -999;
+        for (int compositeID : compositeLayerIDs) {
+            int actualLayer;
+            if (compositeID >= 1000) {
+                actualLayer = compositeID - 1000;
+            } else if (compositeID <= -1000) {
+                actualLayer = -(compositeID + 1000);
+            } else {
+                actualLayer = compositeID;
+            }
+            
+            if (actualLayer == 3) {
+                layer3ID = compositeID;
+                break;
+            }
+        }
+        
+        if (layer3ID != -999 && hitIndicesByCompositeLayer[layer3ID].size() > 0) {
+            // Try combinations like (0,1,3), (0,2,3), (1,2,3)
+            std::vector<std::tuple<int, int, int>> layerCombinations;
+            
+            if (hitsPerInnerLayer[0] > 0 && hitsPerInnerLayer[1] > 0) {
+                layerCombinations.push_back({0, 1, 3});
+            }
+            if (hitsPerInnerLayer[0] > 0 && hitsPerInnerLayer[2] > 0) {
+                layerCombinations.push_back({0, 2, 3});
+            }
+            if (hitsPerInnerLayer[1] > 0 && hitsPerInnerLayer[2] > 0) {
+                layerCombinations.push_back({1, 2, 3});
+            }
+            
+            for (auto [layerA, layerB, layerC] : layerCombinations) {
+                // Find composite IDs for these layers
+                int layerAID = -999, layerBID = -999, layerCID = -999;
+                
+                for (int compositeID : compositeLayerIDs) {
+                    int actualLayer;
+                    if (compositeID >= 1000) {
+                        actualLayer = compositeID - 1000;
+                    } else if (compositeID <= -1000) {
+                        actualLayer = -(compositeID + 1000);
+                    } else {
+                        actualLayer = compositeID;
+                    }
+                    
+                    if (actualLayer == layerA) layerAID = compositeID;
+                    else if (actualLayer == layerB) layerBID = compositeID;
+                    else if (actualLayer == layerC) layerCID = compositeID;
+                }
+                
+                if (layerAID != -999 && layerBID != -999 && layerCID != -999) {
+                    info() << "Trying layer combination: " << layerA << "," << layerB << "," << layerC 
+                           << " (composites: " << layerAID << "," << layerBID << "," << layerCID << ")" << endmsg;
+                    
+                    // Test one triplet from this combination (take first available)
+                    bool foundTriplet = false;
+                    for (size_t idxA : hitIndicesByCompositeLayer[layerAID]) {
+                        if (foundTriplet) break;
+                        for (size_t idxB : hitIndicesByCompositeLayer[layerBID]) {
+                            if (foundTriplet) break;
+                            for (size_t idxC : hitIndicesByCompositeLayer[layerCID]) {
+                                
+                                if (idxA >= allHitInfo.size() || idxB >= allHitInfo.size() || idxC >= allHitInfo.size()) {
+                                    continue;
+                                }
+                                
+                                const HitInfo& hitInfoA = allHitInfo[idxA];
+                                const HitInfo& hitInfoB = allHitInfo[idxB];
+                                const HitInfo& hitInfoC = allHitInfo[idxC];
+                                
+                                if (usedHits[hitInfoA.index] || usedHits[hitInfoB.index] || usedHits[hitInfoC.index]) {
+                                    continue;
+                                }
+                                
+                                tripletCandidates++;
+                                
+                                size_t prevSize = candidateTracks.size();
+                                
+                                bool seedValid = createTripletSeed(
+                                    hitInfoA.hit, hitInfoB.hit, hitInfoC.hit, 
+                                    &candidateTracks, usedHits,
+                                    hitInfoA.index, hitInfoB.index, hitInfoC.index);
+                                
+                                if (seedValid && candidateTracks.size() > prevSize) {
+                                    validTriplets++;
+                                    foundGoodInnerTriplets = true;
+                                    foundTriplet = true;
+                                    
+                                    auto newTrack = candidateTracks[candidateTracks.size() - 1];
+                                    double pT = 0.0;
+                                    for (int l = 0; l < newTrack.trackStates_size(); ++l) {
+                                        auto state = newTrack.getTrackStates(l);
+                                        if (state.location == edm4hep::TrackState::AtOther) {
+                                            pT = getPT(state);
+                                            break;
+                                        }
+                                    }
+                                    
+                                    info() << "✓ Fallback triplet #" << validTriplets << " (pT=" << pT 
+                                           << " GeV/c): Layers " << layerA << "," << layerB << "," << layerC << endmsg;
+                                    
+                                    std::vector<size_t> hitIndices = {hitInfoA.index, hitInfoB.index, hitInfoC.index};
+                                    std::vector<int> usedComposites = {layerAID, layerBID, layerCID};
+                                    trackCandidates.emplace_back(newTrack, pT, hitIndices, usedComposites);
+                                    
+                                    break; // Only take one triplet per layer combination
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     
-    if (tryAllCombinations) {
-        info() << "Phase 2: Trying all layer combinations (no inner layer triplets found)..." << endmsg;
+    // PHASE 2: Only if we still haven't found good tracks, try all combinations
+    if (!foundGoodInnerTriplets && compositeLayerIDs.size() >= 3) {
+        info() << "Phase 2: Trying all layer combinations as last resort..." << endmsg;
         
         for (size_t i = 0; i < compositeLayerIDs.size() - 2; ++i) {
             for (size_t j = i + 1; j < compositeLayerIDs.size() - 1; ++j) {
@@ -894,15 +1017,12 @@ edm4hep::TrackCollection DisplacedTracking::findTracks(
                     int composite2 = compositeLayerIDs[j];  
                     int composite3 = compositeLayerIDs[k];
                     
-                    // Skip if already tested in Phase 1
-                    if (foundGoodConsecutiveTriplets && 
-                        i < maxEarlyLayersToTry - 2 && j == i + 1 && k == i + 2) {
-                        continue;
-                    }
-                    
-                    // Same logic as Phase 1 but with indices
+                    // Test one triplet from this combination (take first available)
+                    bool foundTriplet = false;
                     for (size_t idx1 : hitIndicesByCompositeLayer[composite1]) {
+                        if (foundTriplet) break;
                         for (size_t idx2 : hitIndicesByCompositeLayer[composite2]) {
+                            if (foundTriplet) break;
                             for (size_t idx3 : hitIndicesByCompositeLayer[composite3]) {
                                 
                                 if (idx1 >= allHitInfo.size() || idx2 >= allHitInfo.size() || idx3 >= allHitInfo.size()) {
@@ -913,95 +1033,40 @@ edm4hep::TrackCollection DisplacedTracking::findTracks(
                                 const HitInfo& hitInfo2 = allHitInfo[idx2];
                                 const HitInfo& hitInfo3 = allHitInfo[idx3];
                                 
-                                if (hitInfo1.index >= usedHits.size() || 
-                                    hitInfo2.index >= usedHits.size() || 
-                                    hitInfo3.index >= usedHits.size()) {
-                                    continue;
-                                }
-                                
-                                if (usedHits[hitInfo1.index] || 
-                                    usedHits[hitInfo2.index] || 
-                                    usedHits[hitInfo3.index]) {
+                                if (usedHits[hitInfo1.index] || usedHits[hitInfo2.index] || usedHits[hitInfo3.index]) {
                                     continue;
                                 }
                                 
                                 tripletCandidates++;
-                                
-                                // Don't use temporary copy - work directly with main usedHits
                                 size_t prevSize = candidateTracks.size();
                                 
                                 try {
                                     bool seedValid = createTripletSeed(
                                         hitInfo1.hit, hitInfo2.hit, hitInfo3.hit, 
-                                        &candidateTracks, usedHits,  // Use main usedHits directly!
+                                        &candidateTracks, usedHits,
                                         hitInfo1.index, hitInfo2.index, hitInfo3.index);
                                     
                                     if (seedValid && candidateTracks.size() > prevSize) {
                                         validTriplets++;
-                                        
-                                        // Verify hits are marked as used
-                                        if (!usedHits[hitInfo1.index] || !usedHits[hitInfo2.index] || !usedHits[hitInfo3.index]) {
-                                            warning() << "createTripletSeed didn't mark hits as used - fixing" << endmsg;
-                                            usedHits[hitInfo1.index] = true;
-                                            usedHits[hitInfo2.index] = true;
-                                            usedHits[hitInfo3.index] = true;
-                                        }
+                                        foundTriplet = true;
                                         
                                         auto newTrack = candidateTracks[candidateTracks.size() - 1];
                                         double pT = 0.0;
-                                        edm4hep::TrackState trackState;
-                                        bool foundTrackState = false;
-                                        
                                         for (int l = 0; l < newTrack.trackStates_size(); ++l) {
                                             auto state = newTrack.getTrackStates(l);
                                             if (state.location == edm4hep::TrackState::AtOther) {
-                                                trackState = state;
                                                 pT = getPT(state);
-                                                foundTrackState = true;
                                                 break;
                                             }
                                         }
                                         
-                                        // Print detailed information about the valid triplet in Phase 2
-                                        if (foundTrackState) {
-                                            // Extract layer numbers for display
-                                            int layer1 = std::abs(composite1) % 1000;
-                                            int layer2 = std::abs(composite2) % 1000;
-                                            int layer3 = std::abs(composite3) % 1000;
-                                            
-                                            // Calculate eta from tanLambda
-                                            double tanLambda = trackState.tanLambda;
-                                            double theta = std::atan2(1.0, tanLambda);
-                                            double eta = -std::log(std::tan(theta/2.0));
-                                            
-                                            // Get hit positions for distance calculation
-                                            const auto& pos1 = hitInfo1.hit.getPosition();
-                                            const auto& pos2 = hitInfo2.hit.getPosition();
-                                            const auto& pos3 = hitInfo3.hit.getPosition();
-                                            
-                                            double dist12 = std::sqrt(std::pow(pos2[0]-pos1[0], 2) + 
-                                                                    std::pow(pos2[1]-pos1[1], 2) + 
-                                                                    std::pow(pos2[2]-pos1[2], 2)) / 10.0; // mm to cm
-                                            double dist23 = std::sqrt(std::pow(pos3[0]-pos2[0], 2) + 
-                                                                    std::pow(pos3[1]-pos2[1], 2) + 
-                                                                    std::pow(pos3[2]-pos2[2], 2)) / 10.0; // mm to cm
-                                            
-                                            info() << "✓ Valid triplet #" << validTriplets << " found (Phase 2):" << endmsg;
-                                            info() << "  Layers: " << layer1 << " -> " << layer2 << " -> " << layer3 
-                                                   << " (composites: " << composite1 << "," << composite2 << "," << composite3 << ")" << endmsg;
-                                            info() << "  Hit positions (cm): (" << pos1[0]/10.0 << "," << pos1[1]/10.0 << "," << pos1[2]/10.0 << ") -> "
-                                                   << "(" << pos2[0]/10.0 << "," << pos2[1]/10.0 << "," << pos2[2]/10.0 << ") -> "
-                                                   << "(" << pos3[0]/10.0 << "," << pos3[1]/10.0 << "," << pos3[2]/10.0 << ")" << endmsg;
-                                            info() << "  Hit distances: " << dist12 << " cm, " << dist23 << " cm (total: " << dist12+dist23 << " cm)" << endmsg;
-                                            info() << "  Track parameters: pT=" << pT << " GeV/c, eta=" << eta 
-                                                   << ", phi=" << trackState.phi << " rad" << endmsg;
-                                            info() << "  Impact parameters: d0=" << trackState.D0/10.0 << " cm, z0=" << trackState.Z0/10.0 << " cm" << endmsg;
-                                        }
+                                        info() << "✓ General triplet #" << validTriplets << " (pT=" << pT << " GeV/c)" << endmsg;
                                         
                                         std::vector<size_t> hitIndices = {hitInfo1.index, hitInfo2.index, hitInfo3.index};
                                         std::vector<int> usedComposites = {composite1, composite2, composite3};
-                                        
                                         trackCandidates.emplace_back(newTrack, pT, hitIndices, usedComposites);
+                                        
+                                        break; // Only take one triplet per layer combination
                                     }
                                 } catch (...) {
                                     continue;
@@ -1009,11 +1074,14 @@ edm4hep::TrackCollection DisplacedTracking::findTracks(
                             }
                         }
                     }
+                    
+                    // Limit to avoid too many combinations
+                    if (validTriplets >= 5) break;
                 }
+                if (validTriplets >= 5) break;
             }
+            if (validTriplets >= 5) break;
         }
-    } else if (foundInnerLayerTriplets) {
-        info() << "Phase 2: SKIPPED - Found good triplets in inner layers (0,1,2)" << endmsg;
     }
     
     info() << "Seed generation complete: " << trackCandidates.size() 
