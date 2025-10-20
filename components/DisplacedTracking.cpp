@@ -2541,8 +2541,8 @@ bool DisplacedTracking::findCompatibleExtraHit(
         debug() << "Candidate hit " << i << " in layer " << candidateLayerID 
                 << " (" << layerReason << ") at distance " << distance << " cm" << endmsg;
         
-        // More generous distance threshold for same layer, stricter for next layers
-        double maxDistance = (candidateLayerID == lastLayerID) ? 10.0 : 70.0; // 10cm for same layer, 70cm for others
+        // small distance threshold for same layer, stricter for next layers
+        double maxDistance = (candidateLayerID == lastLayerID) ? 1.0 : m_maxDist.value(); // 1cm for same layer (Gas gap ~6mm) but taking into account the smaearing effect, 100cm for others
         
         // Check if distance is within acceptable range
         if (distance < maxDistance && distance < bestDistance) {
