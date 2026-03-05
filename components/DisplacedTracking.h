@@ -34,6 +34,7 @@
 #include "edm4hep/TrackCollection.h"
 #include "edm4hep/EventHeaderCollection.h"
 #include "edm4hep/TrackerHitSimTrackerHitLinkCollection.h"
+#include "edm4hep/MCParticleCollection.h"
 
 // Interface includes
 #include "k4Interface/IGeoSvc.h"
@@ -59,6 +60,8 @@
 #include <EventDisplay.h>
 #include <unordered_map>
 #include <unordered_set>
+#include <atomic>
+#include <iomanip>
 
 // Include our adapter classes
 #include "GenFitAdapters.h"
@@ -96,11 +99,31 @@ struct ParticleProperties {
 };
 
 /**
- * Kalman Filter based Track Finder/Fitter implemented as a Key4hep Transformer
+ * Result of inner solenoid propagation
  */
+struct InnerTrajectory {
+    bool success;
+    Eigen::Vector3d finalPosition;      // cm
+    Eigen::Vector3d finalMomentum;      // GeV/c
+    double arcLength;                   // cm, total path length
+    int numSteps;                       // total steps taken
+    std::string message;                // status/error message
+};
+
+/**
+ * Displaced Track Finder/Fitter implemented as a Key4hep Transformer
+ */
+// Convenience alias for the link-propagation callback
+using LinkPropagator = std::function<void(const edm4hep::MutableTrackerHitPlane&, const edm4hep::TrackerHitPlane&)>;
+
 class DisplacedTracking final
     : public k4FWCore::MultiTransformer<
-        std::tuple<edm4hep::TrackCollection>(const edm4hep::TrackerHitPlaneCollection&, const edm4hep::EventHeaderCollection&)
+        std::tuple<edm4hep::TrackCollection,
+                   edm4hep::TrackerHitPlaneCollection,
+                   edm4hep::TrackerHitSimTrackerHitLinkCollection>(
+                       const edm4hep::TrackerHitPlaneCollection&,
+                       const edm4hep::EventHeaderCollection&,
+                       const edm4hep::TrackerHitSimTrackerHitLinkCollection&)
       > {
 public:
     DisplacedTracking(const std::string& name, ISvcLocator* pSvcLocator);
@@ -109,13 +132,23 @@ public:
     StatusCode initialize() override;
     StatusCode finalize() override;
 
-    std::tuple<edm4hep::TrackCollection> operator()(
+    std::tuple<edm4hep::TrackCollection,
+               edm4hep::TrackerHitPlaneCollection,
+               edm4hep::TrackerHitSimTrackerHitLinkCollection> operator()(
         const edm4hep::TrackerHitPlaneCollection& hits,
-        const edm4hep::EventHeaderCollection& headers) const override;
+        const edm4hep::EventHeaderCollection& headers,
+        const edm4hep::TrackerHitSimTrackerHitLinkCollection& recoSimLinks) const override;
     
     // Make sure findTracks is const
-    edm4hep::TrackCollection findTracks(
-                            const edm4hep::TrackerHitPlaneCollection* hits) const;
+    void findTracks(
+                            const edm4hep::TrackerHitPlaneCollection* hits,
+                            edm4hep::TrackCollection& outputTracks,
+                            edm4hep::TrackerHitPlaneCollection& outputHits,
+                            const edm4hep::TrackerHitSimTrackerHitLinkCollection& recoSimLinks,
+                            edm4hep::TrackerHitSimTrackerHitLinkCollection& outputLinks,
+                            bool& evtUsedPtInner,
+                            bool& evtUsedPtInner2,
+                            bool& evtUsedPtFallback) const;
 
     // Calculate circle center and radius using the Direct Formula Method
     bool calculateCircleCenterDirect(
@@ -140,6 +173,8 @@ public:
                         const edm4hep::TrackerHitPlane& hit2,
                         const edm4hep::TrackerHitPlane& hit3,
                         edm4hep::TrackCollection* tracks,
+                        edm4hep::TrackerHitPlaneCollection& outputHits,
+                        const LinkPropagator& propagateLink,
                         std::vector<bool>& usedHits,
                         size_t idx1, size_t idx2, size_t idx3) const;
 
@@ -213,6 +248,8 @@ private:
         const std::vector<edm4hep::TrackerHitPlane>& hits,
         const edm4hep::TrackState& seedState,
         edm4hep::MutableTrack& finalTrack,
+        edm4hep::TrackerHitPlaneCollection& outputHits,
+        const LinkPropagator& propagateLink,
         const edm4hep::TrackerHitPlaneCollection* allHits = nullptr) const;
     
     // Convert EDM4hep track state to GenFit track representation
@@ -235,6 +272,50 @@ private:
     // Add field and material adapters as members
     std::unique_ptr<DD4hepFieldAdapter> m_genFitField;
     std::unique_ptr<DD4hepMaterialAdapter> m_genFitMaterial;
+    
+    // ==================== TRUTH MATCHING ====================
+    // Data handle for truth information - use mutable to allow get() in const methods
+    mutable k4FWCore::DataHandle<edm4hep::MCParticleCollection> m_mcParticles{
+        "MCParticles", Gaudi::DataHandle::Reader, this};
+
+    // Helper method for truth matching
+    const edm4hep::MCParticle* findTruthParticle(
+        const edm4hep::Track& recoTrack,
+        const edm4hep::MCParticleCollection& mcParticles) const;
+
+    // Validate track against truth
+    void validateTrackWithTruth(
+        const edm4hep::Track& recoTrack,
+        const edm4hep::MCParticleCollection& mcParticles,
+        int trackNumber) const;
+    // ==================== INNER SOLENOID PROPAGATION ====================
+    /**
+     * Propagate outer track inward to solenoid using RK4
+     */
+    InnerTrajectory propagateToInner(
+        const Eigen::Vector3d& outerPos,    // Starting position in cm
+        const Eigen::Vector3d& outerMom,    // Starting momentum in GeV/c
+        double targetRadius = 100.0         // Stop at this R in cm
+    ) const;
+    
+    /**
+     * Check if position is inside solenoid boundary
+     */
+    bool isInsideSolenoid(const Eigen::Vector3d& pos) const;
+    
+    /**
+     * Single RK4 propagation step
+     */
+    void rk4PropagationStep(
+        Eigen::Vector3d& pos,      // Position (modified in place)
+        Eigen::Vector3d& mom,      // Momentum (modified in place)
+        double stepSize            // Step size in cm (negative = inward)
+    ) const;
+    
+    // Inner propagation constants
+    static constexpr double SOLENOID_RADIUS_CM = 230.0;
+    static constexpr double SOLENOID_Z_HALF_CM = 218.0;
+    // =====================================================================
     
     // Properties
     Gaudi::Property<std::string> m_detectorName{this, "DetectorName", "Tracker", "Name of detector to process"};
@@ -264,7 +345,30 @@ private:
     
     // Map of known particle types
     std::map<std::string, ParticleProperties> m_particleMap;
+
+    // ==================== RUN STATISTICS ====================
+    mutable std::atomic<int> m_statTotalEvents{0};
+    mutable std::atomic<int> m_statTracksReconstructed{0};
+    mutable std::atomic<int> m_statPositiveCharge{0};
+    mutable std::atomic<int> m_statNegativeCharge{0};
+    mutable std::atomic<int> m_statInnerSeedUsed{0};
+    mutable std::atomic<int> m_statFallbackSeedUsed{0};
+    mutable std::atomic<int> m_statHighestPtInner{0};
+    mutable std::atomic<int> m_statHighestPtInner2{0};
+    mutable std::atomic<int> m_statHighestPtFallback{0};
+    mutable std::atomic<int> m_statTotalTripletCombos{0};
+    mutable std::atomic<int> m_statValidTriplets{0};
+    mutable std::atomic<int> m_statFourHitTracks{0};
+    mutable std::atomic<int> m_statThreeHitTracks{0};
+    mutable std::atomic<int> m_statStateAtFirstHit{0};
+    mutable std::atomic<int> m_statStateAtLastHit{0};
+    mutable std::atomic<int> m_statStateAtCalorimeter{0};
+    mutable std::atomic<int> m_statStateAtOther{0};
+    mutable std::atomic<int> m_statInnerPropSuccess{0};
+    mutable std::atomic<int> m_statGenFitSuccess{0};
+    // =========================================================
+
 };
 
 DECLARE_COMPONENT(DisplacedTracking)
-#endif // KALMAN_TRACKER_H
+#endif // DISPLACED_TRACKING_H

@@ -1,4 +1,5 @@
 #include <iostream>
+#include <iomanip>
 #include "DisplacedTracking.h"
 #include "DDRec/SurfaceManager.h"
 #include "DDRec/SurfaceHelper.h"
@@ -25,11 +26,14 @@ constexpr double qe = 1.602176634e-19;      // coulombs
 DisplacedTracking::DisplacedTracking(const std::string& name, ISvcLocator* pSvcLocator)
     : MultiTransformer(name, pSvcLocator,
         {
-            KeyValues{"InputHitCollection", {"TrackerHits"}},
-            KeyValues{"HeaderCollectionName", {"EventHeader"}}
+            KeyValues{"InputHitCollection",       {"TrackerHits"}},
+            KeyValues{"HeaderCollectionName",     {"EventHeader"}},
+            KeyValues{"InputRecoSimLinkCollection", {"TrackerHitSimTrackerHitLink"}}
         },
         {
-            KeyValues{"OutputTrackCollection", {"KalmanTracks"}}
+            KeyValues{"OutputTrackCollection",    {"KalmanTracks"}},
+            KeyValues{"OutputHitCollection",      {"TrackHits"}},
+            KeyValues{"OutputRecoSimLinkCollection", {"DisplacedTrackHitSimLinks"}}
         }) {
     
     // Initialize particle map with common particles
@@ -85,15 +89,18 @@ StatusCode DisplacedTracking::initialize() {
         << bfield.z() / dd4hep::tesla << ") Tesla" << endmsg;
 
     // Check field at several points
+    const double solenoidRadius = 230.0; // cm
     const std::vector<dd4hep::Position> testPoints = { // in cm
         dd4hep::Position(0, 0, 0),  
-        dd4hep::Position(100, 100, 100),            
-        dd4hep::Position(450, 0, 0),
-        dd4hep::Position(0, 450, 0),           
-        dd4hep::Position(0, 0, 450), 
-        dd4hep::Position(0, 0, -450),          
-        dd4hep::Position(500, 500, 0),
-        dd4hep::Position(500, 600, 100),
+        dd4hep::Position(100, 100, 100), 
+        dd4hep::Position(solenoidRadius, 0, 0),
+        dd4hep::Position(0, solenoidRadius, 0),
+        dd4hep::Position(solenoidRadius/sqrt(2), solenoidRadius/sqrt(2), 0),           
+        dd4hep::Position(229, 0, 0),
+        dd4hep::Position(0, 231, 0),
+        dd4hep::Position(0, 0, 219),
+        dd4hep::Position(0, 0, 218),
+        dd4hep::Position(0, 0, -217),
         dd4hep::Position(600, 500, 200),
         dd4hep::Position(500, 500, 250),
         dd4hep::Position(500, 500, -250),
@@ -184,57 +191,6 @@ StatusCode DisplacedTracking::initialize() {
             matEff->setDebugLvl(0);
  
             /*
-            // Add material verification debug messages
-            info() << "=== Testing Material Interface ===" << endmsg;
-            
-            // Test material at several detector positions
-            std::vector<dd4hep::Position> testPositions = {
-                //dd4hep::Position(0, 0, 0),      // Origin
-                dd4hep::Position(100, 0, 0),    
-                dd4hep::Position(200, 50, 100), 
-                dd4hep::Position(300, 100, 200), 
-                dd4hep::Position(500, 300, 400),
-                dd4hep::Position(510, 0, 0),
-                dd4hep::Position(520, 0, 0),
-                dd4hep::Position(520, 300, 400),
-                dd4hep::Position(520, 310, 400),
-                dd4hep::Position(520, 290, 400),
-                dd4hep::Position(520, 310, 400),
-                dd4hep::Position(520, 320, 400)
-            };
-             
-            for (const auto& pos : testPositions) {
-                // Test material manager
-                if (m_materialManager) {
-                    dd4hep::rec::Vector3D testPos(pos.x(), pos.y(), pos.z());
-                    dd4hep::Material mat = m_materialManager->materialAt(testPos);
-                    
-                    info() << "Material at (" << pos.x() << ", " << pos.y() << ", " << pos.z() << "):" << endmsg;
-                    info() << "  Density: " << mat.density()/(dd4hep::g/dd4hep::cm3) << " g/cm³" << endmsg;
-                    info() << "  Z: " << mat.Z() << endmsg;
-                    info() << "  A: " << mat.A()/(dd4hep::g/dd4hep::mole) << " g/mol" << endmsg;
-                    info() << "  RadLength: " << mat.radLength()/dd4hep::cm << " cm" << endmsg;
-                }
-               
-                // Test GenFit material interface
-                if (m_geoMaterial) {
-                    auto node = gGeoManager->FindNode(pos.x(),pos.y(),pos.z());
-                    //auto mat = gGeoManager->GetCurrentVolume()->GetMedium()->GetMaterial();
-
-                    bool initSuccess = m_geoMaterial->initTrack(pos.x(), pos.y(), pos.z(), 1.0, 0.0, 0.0);
-                    info() << "  GenFit initTrack success: " << (initSuccess ? "YES" : "NO") << endmsg;
-                    
-                    if (initSuccess) {
-                        genfit::Material gfMat = m_geoMaterial->getMaterialParameters();
-                        info() << "  GenFit Material - Density: " << gfMat.density << " g/cm³" << endmsg;
-                        info() << "  GenFit Material - Z: " << gfMat.Z << endmsg;
-                        info() << "  GenFit Material - RadLength: " << gfMat.radiationLength << " cm" << endmsg;
-                    }
-                 
-            }
-            info() << "=== End Material Test ===" << endmsg;
-            }*/
-            /*
             // Create and register the field adapter
             m_genFitField = std::unique_ptr<DD4hepFieldAdapter>(new DD4hepFieldAdapter(m_field));
             genfit::FieldManager::getInstance()->init(m_genFitField.get());
@@ -255,12 +211,24 @@ StatusCode DisplacedTracking::initialize() {
 }
 
 // Operator method
-std::tuple<edm4hep::TrackCollection> DisplacedTracking::operator()(
+std::tuple<edm4hep::TrackCollection,
+               edm4hep::TrackerHitPlaneCollection,
+               edm4hep::TrackerHitSimTrackerHitLinkCollection> DisplacedTracking::operator()(
     const edm4hep::TrackerHitPlaneCollection& hits,
-    const edm4hep::EventHeaderCollection& headers) const {
+    const edm4hep::EventHeaderCollection& headers,
+    const edm4hep::TrackerHitSimTrackerHitLinkCollection& recoSimLinks) const {
     
     // Find tracks using the direct EDM4hep approach
     edm4hep::TrackCollection trackCollection;
+    edm4hep::TrackerHitPlaneCollection outputHits;
+    edm4hep::TrackerHitSimTrackerHitLinkCollection outputLinks;
+
+    m_statTotalEvents++;
+
+    // Per-event disambiguation flags (set inside findTracks, counted once per event)
+    bool evtUsedPtInner    = false;
+    bool evtUsedPtInner2   = false;
+    bool evtUsedPtFallback = false;
 
     // Print event separator and basic info
     info() << "\n" << std::string(80, '=') << endmsg;
@@ -292,17 +260,23 @@ std::tuple<edm4hep::TrackCollection> DisplacedTracking::operator()(
     if (hits.size() < 3) {
         warning() << "Not enough hits to create tracks. Need at least 3." << endmsg;
         info() << std::string(80, '=') << "\n" << endmsg; // Bottom separator
-        return std::make_tuple(std::move(trackCollection)); // Return empty collection
+        return std::make_tuple(std::move(trackCollection), std::move(outputHits), std::move(outputLinks)); // Return empty collections
     }
     
     try {
-        trackCollection = findTracks(&hits);
+        findTracks(&hits, trackCollection, outputHits, recoSimLinks, outputLinks,
+                   evtUsedPtInner, evtUsedPtInner2, evtUsedPtFallback);
     } catch (const std::exception& ex) {
         error() << "Exception during track finding: " << ex.what() << endmsg;
         info() << std::string(80, '=') << "\n" << endmsg; // Bottom separator
-       return std::make_tuple(std::move(trackCollection)); // Return empty collection
+       return std::make_tuple(std::move(trackCollection), std::move(outputHits), std::move(outputLinks)); // Return empty collections
     }
     
+    // Count per-event disambiguation (once per event, not per track)
+    if (evtUsedPtInner)    m_statHighestPtInner++;
+    if (evtUsedPtInner2)   m_statHighestPtInner2++;
+    if (evtUsedPtFallback) m_statHighestPtFallback++;
+
     info() << "Found " << trackCollection.size() << " tracks" << endmsg;
     
     // Print track details
@@ -381,11 +355,81 @@ std::tuple<edm4hep::TrackCollection> DisplacedTracking::operator()(
     // Bottom separator
     info() << std::string(80, '=') << "\n" << endmsg;
     
-    return std::make_tuple(std::move(trackCollection));
+    return std::make_tuple(std::move(trackCollection), std::move(outputHits), std::move(outputLinks));
 }
 
 // Finalize method
 StatusCode DisplacedTracking::finalize() {
+
+    // ================================================================
+    //                   RUN STATISTICS SUMMARY
+    // ================================================================
+    int nEvt    = m_statTotalEvents.load();
+    int nTrk    = m_statTracksReconstructed.load();
+    int nPos    = m_statPositiveCharge.load();
+    int nNeg    = m_statNegativeCharge.load();
+    int nInner  = m_statInnerSeedUsed.load();
+    int nFall   = m_statFallbackSeedUsed.load();
+    int nPtI    = m_statHighestPtInner.load();
+    int nPtI2   = m_statHighestPtInner2.load();
+    int nPtF    = m_statHighestPtFallback.load();
+    int nCombos = m_statTotalTripletCombos.load();
+    int nValid  = m_statValidTriplets.load();
+    int n4hit   = m_statFourHitTracks.load();
+    int n3hit   = m_statThreeHitTracks.load();
+    int nSF     = m_statStateAtFirstHit.load();
+    int nSL     = m_statStateAtLastHit.load();
+    int nSC     = m_statStateAtCalorimeter.load();
+    int nSO     = m_statStateAtOther.load();
+    int nProp   = m_statInnerPropSuccess.load();
+    int nGF     = m_statGenFitSuccess.load();
+    double trkPerEvt = (nEvt>0)   ? double(nTrk)/double(nEvt) : 0.0;
+    double seedEff   = (nCombos>0)? 100.0*double(nValid)/double(nCombos) : 0.0;
+    double innerFrac = (nTrk>0)   ? 100.0*double(nInner)/double(nTrk) : 0.0;
+    double propFrac  = (nTrk>0)   ? 100.0*double(nProp)/double(nTrk) : 0.0;
+    double gfFrac    = (nTrk>0)   ? 100.0*double(nGF)/double(nTrk) : 0.0;
+    info() << "\n"
+        << "╔══════════════════════════════════════════════════════════╗\n"
+        << "║          DISPLACED TRACKING  -  RUN SUMMARY             ║\n"
+        << "╠══════════════════════════════════════════════════════════╣\n"
+        << "║  Events processed             : " << std::setw(7) << nEvt    << "                   ║\n"
+        << "║  Tracks reconstructed         : " << std::setw(7) << nTrk    << "                   ║\n"
+        << "║  Avg tracks / event           : " << std::setw(7) << std::fixed << std::setprecision(2) << trkPerEvt << "                   ║\n"
+        << "╠══════════════════════════════════════════════════════════╣\n"
+        << "║  CURVATURE / CHARGE SIGN                                 ║\n"
+        << "║    Positive particles (w < 0) : " << std::setw(7) << nPos    << "                   ║\n"
+        << "║    Negative particles (w > 0) : " << std::setw(7) << nNeg    << "                   ║\n"
+        << "╠══════════════════════════════════════════════════════════╣\n"
+        << "║  SEEDING STRATEGY                                        ║\n"
+        << "║    Inner-layer seed (0,1,2)   : " << std::setw(7) << nInner  << "  (" << std::setw(5) << std::fixed << std::setprecision(1) << innerFrac << "% of tracks)  ║\n"
+        << "║    Fallback Phase 1/2 seed    : " << std::setw(7) << nFall   << "                   ║\n"
+        << "╠══════════════════════════════════════════════════════════╣\n"
+        << "║  HIGHEST-pT DISAMBIGUATION (# events with >1 candidate) ║\n"
+        << "║    Best-pT - inner 0,1,2      : " << std::setw(7) << nPtI   << "                   ║\n"
+        << "║    Best-pT - inner+layer3     : " << std::setw(7) << nPtI2  << "                   ║\n"
+        << "║    Best-pT - fallback Ph.1/2  : " << std::setw(7) << nPtF   << "                   ║\n"
+        << "╠══════════════════════════════════════════════════════════╣\n"
+        << "║  TRIPLET SEEDING                                         ║\n"
+        << "║    Combinations tried         : " << std::setw(7) << nCombos << "                   ║\n"
+        << "║    Valid triplets formed      : " << std::setw(7) << nValid  << "  (" << std::setw(5) << std::fixed << std::setprecision(1) << seedEff  << "% efficiency)  ║\n"
+        << "╠══════════════════════════════════════════════════════════╣\n"
+        << "║  HIT MULTIPLICITY                                        ║\n"
+        << "║    Tracks with 4 hits         : " << std::setw(7) << n4hit   << "                   ║\n"
+        << "║    Tracks with 3 hits         : " << std::setw(7) << n3hit   << "                   ║\n"
+        << "╠══════════════════════════════════════════════════════════╣\n"
+        << "║  TRACK STATES STORED                                     ║\n"
+        << "║    AtFirstHit  (outer seed)   : " << std::setw(7) << nSF     << "                   ║\n"
+        << "║    AtLastHit   (4-hit circle) : " << std::setw(7) << nSL     << "                   ║\n"
+        << "║    AtCalorimeter              : " << std::setw(7) << nSC     << "                   ║\n"
+        << "║    AtOther     (inner prop.)  : " << std::setw(7) << nSO     << "                   ║\n"
+        << "╠══════════════════════════════════════════════════════════╣\n"
+        << "║  DOWNSTREAM PROCESSING                                   ║\n"
+        << "║    Inner solenoid prop. OK    : " << std::setw(7) << nProp   << "  (" << std::setw(5) << std::fixed << std::setprecision(1) << propFrac << "% of tracks)  ║\n"
+        << "║    GenFit fit succeeded       : " << std::setw(7) << nGF     << "  (" << std::setw(5) << std::fixed << std::setprecision(1) << gfFrac   << "% of tracks)  ║\n"
+        << "╚══════════════════════════════════════════════════════════╝\n"
+        << endmsg;
+    // ================================================================
+
     // Clean up material manager
     if (m_materialManager) {
         delete m_materialManager;
@@ -625,15 +669,42 @@ edm4hep::TrackState DisplacedTracking::createTrackState(
 // Core tracking methods
 //------------------------------------------------------------------------------
 
-edm4hep::TrackCollection DisplacedTracking::findTracks(
-    const edm4hep::TrackerHitPlaneCollection* hits) const {
-
-    edm4hep::TrackCollection finalTracks;
+void DisplacedTracking::findTracks(
+    const edm4hep::TrackerHitPlaneCollection* hits,
+    edm4hep::TrackCollection& finalTracks,
+    edm4hep::TrackerHitPlaneCollection& outputHits,
+    const edm4hep::TrackerHitSimTrackerHitLinkCollection& recoSimLinks,
+    edm4hep::TrackerHitSimTrackerHitLinkCollection& outputLinks,
+    bool& evtUsedPtInner,
+    bool& evtUsedPtInner2,
+    bool& evtUsedPtFallback) const {
 
     if (hits->size() < 3) {
         info() << "Not enough hits for tracking. Need at least 3, found " << hits->size() << endmsg;
-        return std::move(finalTracks);
+        return;
     }
+
+    // Build a map from input TrackerHitPlane objectID -> SimTrackerHit
+    // using the existing RecoSim link collection from the digitizer
+    std::unordered_map<uint32_t, edm4hep::SimTrackerHit> recoToSimMap;
+    for (const auto& link : recoSimLinks) {
+        // link.getFrom() is a TrackerHit interface — get the underlying object ID
+        auto recoHit = link.getFrom();
+        recoToSimMap[recoHit.id().index] = link.getTo();
+    }
+
+    // Helper lambda: given a newly created output hit whose data was copied from
+    // an input hit, propagate the RecoSim link to the output link collection
+    auto propagateLink = [&](const edm4hep::MutableTrackerHitPlane& outHit,
+                              const edm4hep::TrackerHitPlane& inHit) {
+        auto it = recoToSimMap.find(inHit.id().index);
+        if (it != recoToSimMap.end()) {
+            auto outLink = outputLinks.create();
+            outLink.setFrom(outHit);
+            outLink.setTo(it->second);
+            outLink.setWeight(1.0f);
+        }
+    };
 
     // Global hit usage tracking across all track-finding iterations
     std::vector<bool> globalUsedHits(hits->size(), false);
@@ -780,7 +851,7 @@ edm4hep::TrackCollection DisplacedTracking::findTracks(
             double pT = 0.0;
             for (int l = 0; l < t.trackStates_size(); ++l) {
                 auto state = t.getTrackStates(l);
-                if (state.location == edm4hep::TrackState::AtOther) {
+                if (state.location == edm4hep::TrackState::AtFirstHit) {
                     pT = getPT(state);
                     break;
                 }
@@ -826,7 +897,7 @@ edm4hep::TrackCollection DisplacedTracking::findTracks(
                         size_t prevSize = candidateTracks.size();
                         bool seedValid = false;
                         try {
-                            seedValid = createTripletSeed(h0.hit, h1.hit, h2.hit, &candidateTracks, usedHits, h0.index, h1.index, h2.index);
+                            seedValid = createTripletSeed(h0.hit, h1.hit, h2.hit, &candidateTracks, outputHits, propagateLink, usedHits, h0.index, h1.index, h2.index);
                         } catch (const std::exception& ex) {
                             warning() << "Exception in createTripletSeed (inner): " << ex.what() << endmsg;
                             continue;
@@ -865,6 +936,8 @@ edm4hep::TrackCollection DisplacedTracking::findTracks(
                     }
                     innerSeedChosen = true;
                     info() << "Chosen best inner-layer triplet for iteration " << trackNumber << " with pT=" << bestIt->pT << " GeV/c" << endmsg;
+                    m_statInnerSeedUsed++;
+                    if (innerCandidates.size() > 1) evtUsedPtInner = true;
                 }
             } else {
                 info() << "No valid inner triplet seeds found in layers 0,1,2 for iteration " << trackNumber << endmsg;
@@ -903,7 +976,7 @@ edm4hep::TrackCollection DisplacedTracking::findTracks(
                             size_t prevSize = candidateTracks.size();
                             bool seedValid = false;
                             try {
-                                seedValid = createTripletSeed(hA.hit, hB.hit, hC.hit, &candidateTracks, usedHits, hA.index, hB.index, hC.index);
+                                seedValid = createTripletSeed(hA.hit, hB.hit, hC.hit, &candidateTracks, outputHits, propagateLink, usedHits, hA.index, hB.index, hC.index);
                             } catch (const std::exception& ex) {
                                 warning() << "Exception in createTripletSeed (inner+layer3): " << ex.what() << endmsg;
                                 continue;
@@ -935,6 +1008,8 @@ edm4hep::TrackCollection DisplacedTracking::findTracks(
                     trackCandidates.swap(kept);
                     innerSeedChosen = true;
                     info() << "Selected best combined inner+layer3 triplet for iteration " << trackNumber << " with pT=" << best.pT << " GeV/c" << endmsg;
+                    m_statInnerSeedUsed++;
+                    if (kept.size() > 1) evtUsedPtInner2 = true;
                 } else {
                     info() << "No valid triplets formed from inner+layer3 strategy for iteration " << trackNumber << endmsg;
                 }
@@ -1014,7 +1089,7 @@ edm4hep::TrackCollection DisplacedTracking::findTracks(
                             try {
                                 seedValid = createTripletSeed(
                                     hitInfo1.hit, hitInfo2.hit, hitInfo3.hit, 
-                                    &candidateTracks, usedHits,
+                                    &candidateTracks, outputHits, propagateLink, usedHits,
                                     hitInfo1.index, hitInfo2.index, hitInfo3.index);
                             } catch (const std::exception& ex) {
                                 warning() << "Exception in createTripletSeed: " << ex.what() << endmsg;
@@ -1045,7 +1120,7 @@ edm4hep::TrackCollection DisplacedTracking::findTracks(
                                     bool foundTrackState = false;
                                     for (int l = 0; l < newTrack.trackStates_size(); ++l) {
                                         auto state = newTrack.getTrackStates(l);
-                                        if (state.location == edm4hep::TrackState::AtOther) {
+                                        if (state.location == edm4hep::TrackState::AtFirstHit) {
                                             trackState = state;
                                             foundTrackState = true;
                                             break;
@@ -1133,7 +1208,7 @@ edm4hep::TrackCollection DisplacedTracking::findTracks(
                                         try {
                                             bool seedValid = createTripletSeed(
                                                 hitInfo1.hit, hitInfo2.hit, hitInfo3.hit, 
-                                                &candidateTracks, usedHits,
+                                                &candidateTracks, outputHits, propagateLink, usedHits,
                                                 hitInfo1.index, hitInfo2.index, hitInfo3.index);
 
                                             if (seedValid && candidateTracks.size() > prevSize) {
@@ -1179,9 +1254,16 @@ edm4hep::TrackCollection DisplacedTracking::findTracks(
             }
         } // end fallback seeding
 
-        info() << "Seed generation complete for iteration " << trackNumber << ": " << trackCandidates.size() 
-               << " triplet candidates from " << tripletCandidates 
-               << " combinations (" << validTriplets << " valid)" << endmsg;
+        info() << "Seed generation complete for iteration " << trackNumber << ": " << trackCandidates.size()
+            << " triplet candidates from " << tripletCandidates
+            << " combinations (" << validTriplets << " valid)" << endmsg;
+
+        m_statTotalTripletCombos += tripletCandidates;
+        m_statValidTriplets      += validTriplets;
+        if (!innerSeedChosen && !trackCandidates.empty()) {
+            m_statFallbackSeedUsed++;
+            if (trackCandidates.size() > 1) evtUsedPtFallback = true;
+        }
 
         // If no track candidates found in this iteration, break
         if (trackCandidates.empty()) {
@@ -1231,7 +1313,7 @@ edm4hep::TrackCollection DisplacedTracking::findTracks(
         bool foundState = false;
 
         for (int j = 0; j < seedTrack.trackStates_size(); ++j) {
-            if (seedTrack.getTrackStates(j).location == edm4hep::TrackState::AtOther) {
+            if (seedTrack.getTrackStates(j).location == edm4hep::TrackState::AtFirstHit) {
                 seedState = seedTrack.getTrackStates(j);
                 foundState = true;
                 break;
@@ -1343,7 +1425,7 @@ edm4hep::TrackCollection DisplacedTracking::findTracks(
 
                     edm4hep::TrackState circleFitState = createTrackState(
                         d0*10.0, phi, omega, seedState.Z0, seedState.tanLambda, 
-                        edm4hep::TrackState::AtCalorimeter);
+                        edm4hep::TrackState::AtLastHit);
 
                     finalTrack.addToTrackStates(circleFitState);
                     finalTrack.setChi2(chi2);
@@ -1360,18 +1442,18 @@ edm4hep::TrackCollection DisplacedTracking::findTracks(
         bool fitSuccess = false;
         if (m_useGenFit) {
             try {
-                fitSuccess = fitTrackWithGenFit(trackHits, seedState, finalTrack, hits);
+                fitSuccess = fitTrackWithGenFit(trackHits, seedState, finalTrack, outputHits, propagateLink, hits);
             } catch (const std::exception& ex) {
                 error() << "Exception in fitTrackWithGenFit for track " << trackNumber << ": " << ex.what() << endmsg;
             } catch (...) {
                 error() << "Unknown exception in fitTrackWithGenFit for track " << trackNumber << endmsg;
             }
         }
-
         if (fitSuccess) {
+            m_statGenFitSuccess++;
             info() << "Successfully fitted track " << trackNumber << " with GenFit: " 
-                   << finalTrack.trackerHits_size() << " hits, chi2/ndf = " 
-                   << finalTrack.getChi2() / finalTrack.getNdf() << endmsg;
+                << finalTrack.trackerHits_size() << " hits, chi2/ndf = " 
+                << finalTrack.getChi2() / finalTrack.getNdf() << endmsg;
         } else {
             if (m_useGenFit) {
                 warning() << "GenFit track fitting failed for track " << trackNumber << ", using seed parameters" << endmsg;
@@ -1385,21 +1467,197 @@ edm4hep::TrackCollection DisplacedTracking::findTracks(
                 finalTrack.addToTrackStates(seedTrack.getTrackStates(j));
             }
 
+            // Copy hits into output collection so PODIO can resolve the relation
             for (const auto& hit : trackHits) {
-                finalTrack.addToTrackerHits(hit);
+                auto outHit = outputHits.create();
+        outHit.setCellID(hit.getCellID());
+        outHit.setTime(hit.getTime());
+        outHit.setEDep(hit.getEDep());
+        outHit.setEDepError(hit.getEDepError());
+        outHit.setPosition(hit.getPosition());
+        outHit.setCovMatrix(hit.getCovMatrix());
+        outHit.setDu(hit.getDu());
+        outHit.setDv(hit.getDv());
+                propagateLink(outHit, hit);
+                finalTrack.addToTrackerHits(outHit);
             }
         }
 
-        info() << "Successfully created track " << trackNumber << " with " << finalTrack.trackerHits_size() 
-               << " hits and " << finalTrack.trackStates_size() << " track states" << endmsg;
+        // ======= Reconstruct Inner Track Segment =========
+        edm4hep::TrackState bestState;
+        bool foundStateForProp = false;
+            // ===== EXTRACT BEST STATE FOR INNER PROPAGATION =====
+            // Priority 1: Try AtLastHit (4-hit fit if available)
+        for (int j = 0; j < finalTrack.trackStates_size(); ++j) {
+            auto st = finalTrack.getTrackStates(j);
+            if (st.location == edm4hep::TrackState::AtLastHit) {
+                bestState = st;
+                foundStateForProp = true;
+                info() << "Using AtLastHit state (4-hit fit) for inner propagation" << endmsg;
+                break;
+            }
+        }
+            
+            // Priority 2: Fall back to AtFirstHit (3-hit seed)
+        if (!foundStateForProp) {
+            for (int j = 0; j < finalTrack.trackStates_size(); ++j) {
+                auto st = finalTrack.getTrackStates(j);
+                if (st.location == edm4hep::TrackState::AtFirstHit) {
+                    bestState = st;
+                    foundStateForProp = true;
+                    info() << "Using AtFirstHit state (3-hit seed) for inner propagation" << endmsg;
+                    break;
+                }
+            }
+        }
+            
+        // ===== INNER PROPAGATION =====
+        if (foundStateForProp) {
+            // Extract helix parameters from best state
+            double d0 = bestState.D0 / 10.0;           // mm → cm
+            double phi = bestState.phi;
+            double omega = bestState.omega * 10.0;     // 1/mm → 1/cm
+            double z0 = bestState.Z0 / 10.0;           // mm → cm
+            double tanLambda = bestState.tanLambda;
+            
+            if (std::abs(omega) > 1e-10) {
+                double radius = 1.0 / std::abs(omega);
+                
+                // Position at closest approach
+                Eigen::Vector3d pos;
+                if (finalTrack.trackerHits_size() > 0) {
+                    auto firstHit = finalTrack.getTrackerHits(0);
+                    pos = Eigen::Vector3d(
+                        firstHit.getPosition()[0] / 10.0,  // mm to cm
+                        firstHit.getPosition()[1] / 10.0,
+                        firstHit.getPosition()[2] / 10.0
+                    );
+                }
+                
+                // Field at position
+                dd4hep::Position fieldPos(pos.x(), pos.y(), pos.z());
+                double bField = m_field.magneticField(fieldPos).z() / dd4hep::tesla;
+                
+                // Momentum
+                double lambda = std::atan(tanLambda);
+                double cosL = std::cos(lambda);
+                double sinL = std::sin(lambda);
+                double pT = 0.3 * std::abs(bField) * radius / 100.0;
+                
+                Eigen::Vector3d mom(
+                    pT * std::cos(phi) * cosL,
+                    pT * std::sin(phi) * cosL,
+                    pT * sinL
+                );
+                
+                info() << ">>> Attempting inner solenoid propagation for track " << trackNumber << "..." << endmsg;
+                info() << "  Propagating track " << trackNumber << " to inner region..." << endmsg;
+                info() << "    Outer R=" << std::sqrt(pos.x()*pos.x() + pos.y()*pos.y())
+                    << " cm, |p|=" << mom.norm() << " GeV/c" << endmsg;
+                
+                // Propagate
+                auto inner = propagateToInner(pos, mom, 100.0);
+                
+                if (inner.success) {
+                    m_statInnerPropSuccess++;
+                    double rxy = std::sqrt(
+                        inner.finalPosition.x() * inner.finalPosition.x() +
+                        inner.finalPosition.y() * inner.finalPosition.y()
+                    );
+                    double pMagFinal = inner.finalMomentum.norm();
+                    double pRatio = pMagFinal / mom.norm();
+                    
+                    // ===== SAVE INNER STATE =====
+                    // Convert final RK4 result back to EDM4hep parameters
+                    double d0_inner = std::sqrt(
+                        inner.finalPosition.x() * inner.finalPosition.x() +
+                        inner.finalPosition.y() * inner.finalPosition.y()
+                    ) - (1.0 / std::abs(omega)) / 10.0;  // Approximation
+                    
+                    double phi_inner = std::atan2(
+                        inner.finalPosition.y(),
+                        inner.finalPosition.x()
+                    );
+                    
+                    double omega_inner = omega * -1.176;  // Field flip: B_outer/B_inner ratio
+                    
+                    double z0_inner = inner.finalPosition.z();
+                    
+                    // Create inner track state
+                    edm4hep::TrackState innerState = createTrackState(
+                        d0_inner * 10.0,    // cm to mm
+                        phi_inner,
+                        omega_inner / 10.0, // 1/cm to 1/mm
+                        z0_inner * 10.0,    // cm to mm
+                        tanLambda,
+                        edm4hep::TrackState::AtOther  // ← Mark as inner
+                    );
+                    
+                    // Add to same track object
+                    finalTrack.addToTrackStates(innerState);
+                    
+                    info() << "  ✓ Inner propagation SUCCESS:" << endmsg;
+                    info() << "    Final R=" << rxy << " cm, |p|=" << pMagFinal 
+                        << " GeV/c (ratio=" << pRatio << ")" << endmsg;
+                    info() << "    Arc length: " << inner.arcLength << " cm, steps: "
+                        << inner.numSteps << endmsg;
+                    
+                    // ===== TRUTH COMPARISON =====
+                    try {
+                        if (m_mcParticles.exist()) {
+                            const auto* mcParts = m_mcParticles.get();
+                            if (mcParts && !mcParts->empty()) {
+                                // Create a temporary Track view for validation
+                                edm4hep::Track trackView = finalTrack;
+                                validateTrackWithTruth(trackView, *mcParts, trackNumber);
+                            }
+                        }
+                    } catch (const std::exception& e) {
+                        debug() << "Could not access MCParticles for truth comparison: " << e.what() << endmsg;
+                    }
+                } else {
+                    debug() << "  ✗ Inner propagation failed: " << inner.message << endmsg;
+                }
+            }
+        }
+        // ===== END INNER PROPAGATION =====
 
+        // ======================= Printing final track=============================
+        info() << "Successfully created track " << trackNumber
+            << " with " << finalTrack.trackerHits_size() << " hits"
+            << " and " << finalTrack.trackStates_size() << " track states" << endmsg;
+
+        // ---- per-track run statistics ----
+        m_statTracksReconstructed++;
+        bool hasFirstHit = false, hasLastHit = false, hasCalorimeter = false, hasOther = false;
+        for (int sIdx = 0; sIdx < finalTrack.trackStates_size(); ++sIdx) {
+            auto ts = finalTrack.getTrackStates(sIdx);
+            switch (ts.location) {
+                case edm4hep::TrackState::AtFirstHit:    hasFirstHit    = true; break;
+                case edm4hep::TrackState::AtLastHit:     hasLastHit     = true; break;
+                case edm4hep::TrackState::AtCalorimeter: hasCalorimeter = true; break;
+                case edm4hep::TrackState::AtOther:       hasOther       = true; break;
+                default: break;
+            }
+        }
+        if (hasFirstHit)    m_statStateAtFirstHit++;
+        if (hasLastHit)     m_statStateAtLastHit++;
+        if (hasCalorimeter) m_statStateAtCalorimeter++;
+        if (hasOther)       m_statStateAtOther++;
+        if (hasLastHit) m_statFourHitTracks++; else m_statThreeHitTracks++;
+        for (int sIdx = 0; sIdx < finalTrack.trackStates_size(); ++sIdx) {
+            auto ts = finalTrack.getTrackStates(sIdx);
+            if (ts.location == edm4hep::TrackState::AtFirstHit) {
+                if (ts.omega < 0.0) m_statPositiveCharge++;
+                else                m_statNegativeCharge++;
+                break;
+            }
+        }
         // Continue to next iteration to find more tracks
     } // End of main while loop
 
     info() << "Track reconstruction complete: created " << finalTracks.size() 
            << " final tracks across " << (trackNumber-1) << " iterations" << endmsg;
-
-    return std::move(finalTracks);
 }
 
 // function to calculate circle center and radius using the Direct Formula Method
@@ -1526,6 +1784,8 @@ bool DisplacedTracking::createTripletSeed(
     const edm4hep::TrackerHitPlane& hit2,
     const edm4hep::TrackerHitPlane& hit3,
     edm4hep::TrackCollection* tracks,
+    edm4hep::TrackerHitPlaneCollection& outputHits,
+    const LinkPropagator& propagateLink,
     std::vector<bool>& usedHits,
     size_t idx1, size_t idx2, size_t idx3) const {
     
@@ -1656,10 +1916,17 @@ bool DisplacedTracking::createTripletSeed(
     if (phi3 - phi2 < -M_PI) phi3 += 2*M_PI;
     
     bool clockwise = (phi3 < phi1);
-    double charge = clockwise ? 1.0 : -1.0;
-    
-    debug() << "Track direction: " << (clockwise ? "clockwise" : "counter-clockwise") 
-            << ", charge: " << charge << endmsg;
+
+    // Geometric rotation direction gives charge sign only when B > 0.
+    // For B < 0 the Lorentz force reverses, so the rotation sense flips:
+    //   q_geometric = clockwise ? +1 : -1   (assumes B > 0)
+    //   true charge = q_geometric * sign(Bz)
+    // We read actualBz directly from the detector so this is field-agnostic.
+    double bSign  = (actualBz >= 0.0) ? 1.0 : -1.0;
+    double charge = bSign * (clockwise ? 1.0 : -1.0);
+
+    debug() << "Track direction: " << (clockwise ? "clockwise" : "counter-clockwise")
+            << ", Bz=" << actualBz << " T, charge: " << charge << endmsg;
     
     // Fit z-component
     double s1 = 0;
@@ -1726,7 +1993,7 @@ bool DisplacedTracking::createTripletSeed(
     
     // Create track state at IP
     edm4hep::TrackState state = createTrackState(
-        d0_mm, phi, omega, z0_mm, tanLambda, edm4hep::TrackState::AtOther);
+        d0_mm, phi, omega, z0_mm, tanLambda, edm4hep::TrackState::AtFirstHit);
 
     // Set reference point to the first hit position
     const auto& firstHitPos = hit1.getPosition();
@@ -1735,10 +2002,28 @@ bool DisplacedTracking::createTripletSeed(
     // Add track state to track
     edm_track.addToTrackStates(state);
     
-    // Add hits to track
-    edm_track.addToTrackerHits(hit1);
-    edm_track.addToTrackerHits(hit2);
-    edm_track.addToTrackerHits(hit3);
+    // Copy input hits into the output collection so PODIO can resolve the relation
+    auto outHit1 = outputHits.create();
+    outHit1.setCellID(hit1.getCellID()); outHit1.setTime(hit1.getTime());
+    outHit1.setEDep(hit1.getEDep()); outHit1.setEDepError(hit1.getEDepError());
+    outHit1.setPosition(hit1.getPosition()); outHit1.setCovMatrix(hit1.getCovMatrix());
+    outHit1.setDu(hit1.getDu()); outHit1.setDv(hit1.getDv());
+    auto outHit2 = outputHits.create();
+    outHit2.setCellID(hit2.getCellID()); outHit2.setTime(hit2.getTime());
+    outHit2.setEDep(hit2.getEDep()); outHit2.setEDepError(hit2.getEDepError());
+    outHit2.setPosition(hit2.getPosition()); outHit2.setCovMatrix(hit2.getCovMatrix());
+    outHit2.setDu(hit2.getDu()); outHit2.setDv(hit2.getDv());
+    auto outHit3 = outputHits.create();
+    outHit3.setCellID(hit3.getCellID()); outHit3.setTime(hit3.getTime());
+    outHit3.setEDep(hit3.getEDep()); outHit3.setEDepError(hit3.getEDepError());
+    outHit3.setPosition(hit3.getPosition()); outHit3.setCovMatrix(hit3.getCovMatrix());
+    outHit3.setDu(hit3.getDu()); outHit3.setDv(hit3.getDv());
+    propagateLink(outHit1, hit1);
+    propagateLink(outHit2, hit2);
+    propagateLink(outHit3, hit3);
+    edm_track.addToTrackerHits(outHit1);
+    edm_track.addToTrackerHits(outHit2);
+    edm_track.addToTrackerHits(outHit3);
     
     // Set chi2 and ndf
     edm_track.setChi2(-1.0);  // Initial seed has no chi2 yet
@@ -2282,6 +2567,8 @@ bool DisplacedTracking::fitTrackWithGenFit(
     const std::vector<edm4hep::TrackerHitPlane>& hits,
     const edm4hep::TrackState& seedState,
     edm4hep::MutableTrack& finalTrack,
+    edm4hep::TrackerHitPlaneCollection& outputHits,
+    const LinkPropagator& propagateLink,
     const edm4hep::TrackerHitPlaneCollection* allHits) const {
     
     if (hits.empty()) {
@@ -2402,26 +2689,32 @@ bool DisplacedTracking::fitTrackWithGenFit(
         //finalTrack.setChi2(chi2);
         finalTrack.setNdf(ndf);
 
-        // Add hits to the EDM4hep track
+        // Copy hits into output collection so PODIO can resolve the relation
         for (const auto& hit : hits) {
-            finalTrack.addToTrackerHits(hit);
+            auto outHit = outputHits.create();
+            outHit.setCellID(hit.getCellID()); outHit.setTime(hit.getTime());
+            outHit.setEDep(hit.getEDep()); outHit.setEDepError(hit.getEDepError());
+            outHit.setPosition(hit.getPosition()); outHit.setCovMatrix(hit.getCovMatrix());
+            outHit.setDu(hit.getDu()); outHit.setDv(hit.getDv());
+            propagateLink(outHit, hit);
+            finalTrack.addToTrackerHits(outHit);
         }
         // Add the original seed state to the track
         edm4hep::TrackState seedStateCopy = seedState;
-        seedStateCopy.location = edm4hep::TrackState::AtOther;  // Mark it as "other" location
+        seedStateCopy.location = edm4hep::TrackState::AtFirstHit;  // Mark it as "other" location
         finalTrack.addToTrackStates(seedStateCopy);
-
+        /*
         // Get the track states at key positions and add them to EDM4hep track
         try {
             // State at first hit
-            if (finalGFTrack.getNumPoints() > 0) {
-                genfit::MeasuredStateOnPlane stateFirst = 
-                    finalGFTrack.getFittedState(0);
-                edm4hep::TrackState firstState = convertToEDM4hepState(stateFirst, 
-                                                                      edm4hep::TrackState::AtFirstHit);
-                finalTrack.addToTrackStates(firstState);
-            }
-          
+            //if (finalGFTrack.getNumPoints() > 0) {
+            //    genfit::MeasuredStateOnPlane stateFirst = 
+            //        finalGFTrack.getFittedState(0);
+            //    edm4hep::TrackState firstState = convertToEDM4hepState(stateFirst, 
+            //                                                          edm4hep::TrackState::AtFirstHit);
+            //    finalTrack.addToTrackStates(firstState);
+            //}
+            
             try {
                 // Create a plane at the IP (origin)
                 TVector3 ipOrigin(0.0, 0.0, 0.0);  // IP at origin in cm
@@ -2444,6 +2737,7 @@ bool DisplacedTracking::fitTrackWithGenFit(
                     gen_momentum.SetY(-gen_momentum.Y());
                     gen_momentum.SetZ(-gen_momentum.Z());
                 */
+                /*
                 // Convert to EDM4hep format and save
                 edm4hep::TrackState ipState = convertToEDM4hepState(stateAtIP, 
                                                                 edm4hep::TrackState::AtIP);
@@ -2458,19 +2752,19 @@ bool DisplacedTracking::fitTrackWithGenFit(
             
            
             // State at last hit
-            if (finalGFTrack.getNumPoints() > 1) {
-                genfit::MeasuredStateOnPlane stateLast = 
-                    finalGFTrack.getFittedState(finalGFTrack.getNumPoints() - 1);
-                edm4hep::TrackState lastState = convertToEDM4hepState(stateLast, 
-                                                                     edm4hep::TrackState::AtLastHit);
-                finalTrack.addToTrackStates(lastState);
-            }
+            //if (finalGFTrack.getNumPoints() > 1) {
+            //    genfit::MeasuredStateOnPlane stateLast = 
+            //        finalGFTrack.getFittedState(finalGFTrack.getNumPoints() - 1);
+            //    edm4hep::TrackState lastState = convertToEDM4hepState(stateLast, 
+            //                                                         edm4hep::TrackState::AtLastHit); // change it AtLastHit is already taken for 4-hit case 
+            //    finalTrack.addToTrackStates(lastState);
+            //}
              
         } catch (genfit::Exception& e) {
             warning() << "Error extracting track states: " << e.what() << endmsg;
             // Continue anyway - we'll use what we have
         }
-        
+        */
         debug() << "Successfully created " << finalTrack.trackStates_size() 
                 << " track states from GenFit fit" << endmsg;
         
@@ -2777,4 +3071,293 @@ int DisplacedTracking::getPDGCode() const {
     else if (m_particleType == "proton") return 2212;
     else if (m_particleType == "antiproton") return -2212;
     else return 13; // Default to muon
+}
+
+// ============================================================================
+// INNER SOLENOID PROPAGATION IMPLEMENTATIONS
+// ============================================================================
+bool DisplacedTracking::isInsideSolenoid(const Eigen::Vector3d& pos) const {
+    double r = std::sqrt(pos.x() * pos.x() + pos.y() * pos.y());
+    double z = std::abs(pos.z());
+    return (r < SOLENOID_RADIUS_CM) && (z < SOLENOID_Z_HALF_CM);
+}
+
+void DisplacedTracking::rk4PropagationStep(
+    Eigen::Vector3d& pos,
+    Eigen::Vector3d& mom,
+    double stepSize) const {
+
+    double pMagInitial = mom.norm();  // Save initial momentum magnitude
+    const double kappa_factor = 0.3 * 1000.0;  // Conversion factor for B*0.3 in cm^-1
+    
+    // Lambda for field at position
+    auto getFieldAt = [this](const Eigen::Vector3d& r) -> double {
+        dd4hep::Position ddPos(r.x(), r.y(), r.z());
+        dd4hep::Direction B = m_field.magneticField(ddPos);
+        return B.z() / dd4hep::tesla;
+    };
+    
+    // Lambda for derivatives dr/ds, dp/ds
+    auto derivatives = [&](const Eigen::Vector3d& r, const Eigen::Vector3d& p)
+        -> std::pair<Eigen::Vector3d, Eigen::Vector3d> {
+        
+        double pMag = p.norm();
+        if (pMag < 1e-12) {
+            return {Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero()};
+        }
+        
+        Eigen::Vector3d pHat = p / pMag;
+        double B = getFieldAt(r);
+        Eigen::Vector3d B_vec(0, 0, B);
+        
+        // dr/ds = p̂
+        Eigen::Vector3d drds = pHat;
+        
+        // dp/ds = q(p̂ × B) where q absorbed in field
+        Eigen::Vector3d dpds = kappa_factor * pHat.cross(B_vec);
+        
+        return {drds, dpds};
+    };
+
+    // RK4 stages
+    auto [k1r, k1p] = derivatives(pos, mom);
+    auto [k2r, k2p] = derivatives(pos + 0.5 * stepSize * k1r, mom + 0.5 * stepSize * k1p);
+    auto [k3r, k3p] = derivatives(pos + 0.5 * stepSize * k2r, mom + 0.5 * stepSize * k2p);
+    auto [k4r, k4p] = derivatives(pos + stepSize * k3r, mom + stepSize * k3p);
+    
+    // Update state
+    pos += (stepSize / 6.0) * (k1r + 2.0*k2r + 2.0*k3r + k4r);
+    mom += (stepSize / 6.0) * (k1p + 2.0*k2p + 2.0*k3p + k4p);
+
+    if (mom.norm() > 1e-12) {
+        mom = mom.normalized() * pMagInitial;
+    }
+}
+
+InnerTrajectory DisplacedTracking::propagateToInner(
+    const Eigen::Vector3d& outerPos,
+    const Eigen::Vector3d& outerMom,
+    double targetRadius) const {
+    
+    InnerTrajectory result;
+    result.success = false;
+    result.numSteps = 0;
+    result.arcLength = 0.0;
+    
+    // Starting position must be outside
+    if (isInsideSolenoid(outerPos)) {
+        result.message = "Starting position already inside solenoid";
+        return result;
+    }
+    
+    Eigen::Vector3d r = outerPos;
+    Eigen::Vector3d p = outerMom;
+    double arcLength = 0.0;
+    
+    const double RK4_STEP = -10.0;  // Negative = inward
+    const int MAX_STEPS = 10000;
+    
+    info() << "\n=== Starting Inner Propagation ===" << endmsg;
+    info() << "From R=" << std::sqrt(r.x()*r.x() + r.y()*r.y()) 
+           << " cm, z=" << r.z() << " cm" << endmsg;
+    info() << "Target radius: " << targetRadius << " cm" << endmsg;
+    
+    // Propagate
+    for (int step = 0; step < MAX_STEPS; ++step) {
+        double rxy = std::sqrt(r.x() * r.x() + r.y() * r.y());
+        
+        // Check if reached target
+        if (isInsideSolenoid(r) && rxy < targetRadius) {
+            result.success = true;
+            result.message = "Reached target radius";
+            result.finalPosition = r;
+            result.finalMomentum = p;
+            result.arcLength = arcLength;
+            result.numSteps = step;
+            break;
+        }
+        
+        // RK4 step
+        rk4PropagationStep(r, p, RK4_STEP);
+        arcLength += std::abs(RK4_STEP);
+        result.numSteps = step + 1;
+        
+        // Print every 1000 steps
+        if (step % 1000 == 0 && msgLevel(MSG::DEBUG)) {
+            double B = m_field.magneticField(dd4hep::Position(r.x(), r.y(), r.z())).z() / dd4hep::tesla;
+            debug() << "Step " << step << ": R=" << rxy << " cm, B=" << B << " T" << endmsg;
+        }
+        
+        // Safety
+        if (step >= MAX_STEPS - 1) {
+            result.message = "Max steps reached";
+            result.finalPosition = r;
+            result.finalMomentum = p;
+            result.arcLength = arcLength;
+            return result;
+        }
+    }
+    
+    return result;
+}
+
+const edm4hep::MCParticle* DisplacedTracking::findTruthParticle(
+    const edm4hep::Track& recoTrack,
+    const edm4hep::MCParticleCollection& mcParticles) const {
+    
+    if (recoTrack.trackerHits_size() == 0) {
+        debug() << "Track has no hits - cannot find truth" << endmsg;
+        return nullptr;
+    }
+    
+    // Count which MCParticle appears most in the track hits
+    std::map<const edm4hep::MCParticle*, int> hitCounts;
+    
+    for (int i = 0; i < recoTrack.trackerHits_size(); ++i) {
+        const auto& hit = recoTrack.getTrackerHits(i);
+        
+        // For each MCParticle, check if it could have created this hit
+        // (This is a simple matching - in reality, you'd use SimTrackerHit links)
+        for (const auto& mcPart : mcParticles) {
+            // Get truth vertex and momentum
+            const auto& vertex = mcPart.getVertex();
+            const auto& momentum = mcPart.getMomentum();
+            
+            // Check if this particle's trajectory passes near this hit
+            // Simple check: does hit lie roughly on particle's path?
+            const auto& hitPos = hit.getPosition();
+            double dist = std::sqrt(
+                (hitPos[0]/10.0 - vertex.x) * (hitPos[0]/10.0 - vertex.x) +
+                (hitPos[1]/10.0 - vertex.y) * (hitPos[1]/10.0 - vertex.y) +
+                (hitPos[2]/10.0 - vertex.z) * (hitPos[2]/10.0 - vertex.z)
+            );
+            
+            // If hit is within 50cm of vertex, count it (rough association)
+            if (dist < 50.0) {
+                hitCounts[&mcPart]++;
+            }
+        }
+    }
+    
+    // Find MCParticle with most hits
+    const edm4hep::MCParticle* bestMatch = nullptr;
+    int maxHits = 0;
+    for (const auto& [particle, count] : hitCounts) {
+        if (count > maxHits) {
+            maxHits = count;
+            bestMatch = particle;
+        }
+    }
+    
+    if (bestMatch && maxHits > 0) {
+        info() << "Truth match: " << maxHits << " / " << recoTrack.trackerHits_size() 
+               << " hits matched to MCParticle with momentum " 
+               << std::sqrt(bestMatch->getMomentum().x * bestMatch->getMomentum().x +
+                           bestMatch->getMomentum().y * bestMatch->getMomentum().y +
+                           bestMatch->getMomentum().z * bestMatch->getMomentum().z)
+               << " GeV/c" << endmsg;
+    }
+    
+    return bestMatch;
+}
+
+void DisplacedTracking::validateTrackWithTruth(
+    const edm4hep::Track& recoTrack,
+    const edm4hep::MCParticleCollection& mcParticles,
+    int trackNumber) const {
+    
+    // Find truth match
+    const auto* truthParticle = findTruthParticle(recoTrack, mcParticles);
+    if (!truthParticle) {
+        debug() << "No truth match found for track " << trackNumber << endmsg;
+        return;
+    }
+    
+    // Get truth information
+    const auto& truthVertex = truthParticle->getVertex();
+    const auto& truthMom = truthParticle->getMomentum();
+    
+    double truthMomMag = std::sqrt(
+        truthMom.x * truthMom.x +
+        truthMom.y * truthMom.y +
+        truthMom.z * truthMom.z
+    );
+    
+    // Get reconstructed state (AtFirstHit for outer, AtOther for inner)
+    edm4hep::TrackState recoState;
+    bool foundOuter = false, foundInner = false;
+    
+    for (int i = 0; i < recoTrack.trackStates_size(); ++i) {
+        auto st = recoTrack.getTrackStates(i);
+        if (st.location == edm4hep::TrackState::AtFirstHit) {
+            recoState = st;
+            foundOuter = true;
+            break;
+        }
+    }
+    
+    edm4hep::TrackState innerState;
+    for (int i = 0; i < recoTrack.trackStates_size(); ++i) {
+        auto st = recoTrack.getTrackStates(i);
+        if (st.location == edm4hep::TrackState::AtOther) {
+            innerState = st;
+            foundInner = true;
+            break;
+        }
+    }
+    
+    // Extract reconstructed position and momentum
+    double d0 = recoState.D0 / 10.0;  // mm to cm
+    double phi = recoState.phi;
+    
+    Eigen::Vector3d recoPos(
+        d0 * std::cos(phi),
+        d0 * std::sin(phi),
+        recoState.Z0 / 10.0
+    );
+    
+    // Calculate reconstructed momentum magnitude
+    double omega = recoState.omega * 10.0;  // 1/mm to 1/cm
+    double radius = 1.0 / std::abs(omega);
+    dd4hep::Position fieldPos(recoPos.x(), recoPos.y(), recoPos.z());
+    double bField = m_field.magneticField(fieldPos).z() / dd4hep::tesla;
+    double lambda = std::atan(recoState.tanLambda);
+    double recoMomMag = 0.3 * std::abs(bField) * radius / (100.0 * std::cos(lambda));
+    
+    // Calculate residuals
+    double deltaX = recoPos.x() - truthVertex.x;
+    double deltaY = recoPos.y() - truthVertex.y;
+    double deltaZ = recoPos.z() - truthVertex.z;
+    double deltaRxy = std::sqrt(deltaX*deltaX + deltaY*deltaY);
+    
+    double deltaMom = std::abs(recoMomMag - truthMomMag);
+    double momResolution = (truthMomMag > 0) ? deltaMom / truthMomMag : 0;
+    
+    // Log comparison
+    info() << "\n=== TRUTH COMPARISON (Track " << trackNumber << ") ===" << endmsg;
+    info() << "Truth vertex: (" << truthVertex.x << ", " 
+           << truthVertex.y << ", " << truthVertex.z << ") cm" << endmsg;
+    info() << "Reco position (outer): (" << recoPos.x() << ", " 
+           << recoPos.y() << ", " << recoPos.z() << ") cm" << endmsg;
+    info() << "Position error: ΔR_xy=" << deltaRxy << " cm, ΔZ=" << deltaZ << " cm" << endmsg;
+    
+    info() << "Truth momentum: " << truthMomMag << " GeV/c" << endmsg;
+    info() << "Reco momentum (outer): " << recoMomMag << " GeV/c" << endmsg;
+    info() << "Momentum resolution: " << momResolution * 100.0 << "%" << endmsg;
+    
+    // Check curvature flip if inner exists
+    if (foundInner) {
+        double omegaInner = innerState.omega * 10.0;
+        if (std::abs(omega) > 1e-10 && std::abs(omegaInner) > 1e-10) {
+            if (omega * omegaInner < 0) {
+                info() << "✓ Curvature properly flipped at boundary:" << endmsg;
+                info() << "  ω_outer = " << omega << " 1/cm (sign=" << (omega > 0 ? "+" : "-") << ")" << endmsg;
+                info() << "  ω_inner = " << omegaInner << " 1/cm (sign=" << (omegaInner > 0 ? "+" : "-") << ")" << endmsg;
+            } else {
+                warning() << "✗ Curvature DID NOT flip at boundary!" << endmsg;
+            }
+        }
+    }
+    
+    info() << "\n";
 }
