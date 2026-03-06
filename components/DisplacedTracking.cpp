@@ -2391,7 +2391,7 @@ genfit::MeasuredStateOnPlane DisplacedTracking::convertToGenFitState(
     // Create momentum vector at the hit
     double px = pT * momDirX;
     double py = pT * momDirY;
-    double pz = 0.0;
+    double pz = 0.0;  // to be estimated 
     double p = sqrt(px*px + py*py + pz*pz);
     
     // Charge from omega sign
@@ -2686,7 +2686,7 @@ bool DisplacedTracking::fitTrackWithGenFit(
                 << ", ndf=" << ndf << ", chi2/ndf=" << (chi2/(ndf*1.0)) << endmsg;
         
         // Update the EDM4hep track with fit results
-        //finalTrack.setChi2(chi2);
+        finalTrack.setChi2(chi2);
         finalTrack.setNdf(ndf);
 
         // Copy hits into output collection so PODIO can resolve the relation
