@@ -1418,7 +1418,19 @@ void DisplacedTracking::findTracks(
                     warning() << "Poor circle fit (chi2=" << chi2 << ") for track " << trackNumber << ", removing 4th hit" << endmsg;
                     trackHits.pop_back();
                 } else {
-                    double pT = 0.3 * 1.7 * radius / 100.0; // GeV/c (using default field)
+                    // Query actual B field at the average position of the 4 hits
+                    double sumX = 0, sumY = 0, sumZ = 0;
+                    for (const auto& h : trackHits) {
+                        const auto& pos = h.getPosition();
+                        sumX += pos[0];
+                        sumY += pos[1];
+                        sumZ += pos[2];
+                    }
+                    dd4hep::Position avgPos(sumX / trackHits.size(),
+                                           sumY / trackHits.size(),
+                                           sumZ / trackHits.size());
+                    double bField4 = m_field.magneticField(avgPos).z() / dd4hep::tesla;
+                    double pT = 0.3 * std::abs(bField4) * radius / 100.0; // GeV/c
                     double d0 = std::sqrt(x0*x0 + y0*y0) - radius;
                     double phi = std::atan2(y0, x0) - M_PI/2;
                     double omega = 1.0 / (radius * 10.0); // Assuming positive charge
@@ -1579,7 +1591,7 @@ void DisplacedTracking::findTracks(
                         inner.finalPosition.x()
                     );
                     
-                    double omega_inner = omega * -1.176;  // Field flip: B_outer/B_inner ratio
+                    double omega_inner = omega * -1.176;  // Field flip: B_outer/B_inner ratio .. need to be fixed for automated ratio
                     
                     double z0_inner = inner.finalPosition.z();
                     
@@ -1944,9 +1956,11 @@ bool DisplacedTracking::createTripletSeed(
     debug() << "Track angles: theta=" << theta << ", eta=" << eta << endmsg;
     
     // Calculate impact parameters using two-segment model
-    // Determine inner and outer fields
-    double innerFieldStrength = 2.0;   // 2T inside solenoid
-    double outerFieldStrength = -1.7;  // -1.7T outside solenoid
+    // Query inner and outer field strengths from DD4hep at representative positions
+    // Inner: a point well inside the solenoid boundary (R=230 cm)
+    double innerFieldStrength = m_field.magneticField(dd4hep::Position(0.0, 0.0, 0.0)).z() / dd4hep::tesla;
+    // Outer: a point well outside the solenoid boundary, near the muon system
+    double outerFieldStrength = m_field.magneticField(dd4hep::Position(350.0, 0.0, 0.0)).z() / dd4hep::tesla;
 
     double d0 = std::sqrt(std::pow(x0, 2) + std::pow(y0, 2)) - radius;
     /*
@@ -2045,7 +2059,7 @@ double DisplacedTracking::calculateImpactParameter(
     const Eigen::Vector3d& p1, const Eigen::Vector3d& p2, const Eigen::Vector3d& p3) const{
     
     // Constants
-    const double solenoidRadius = 200.0; // cm - radius of the solenoid
+    const double solenoidRadius = 230.0; // cm - radius of the solenoid (matches detector geometry)
     double centerToOriginDistance = std::sqrt(x0*x0 + y0*y0);
     
     debug() << "---- Analytical Impact Parameter Calculation ----" << endmsg;
