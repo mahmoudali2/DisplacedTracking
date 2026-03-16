@@ -9,6 +9,10 @@
 #include <memory>
 #include <utility>
 
+// POSIX headers for stderr capture (GenFit Cholesky failure detection)
+#include <unistd.h>
+#include <fcntl.h>
+
 #include "GaudiKernel/Algorithm.h"
 #include "Gaudi/Property.h"
 #include "GaudiKernel/ServiceHandle.h"
@@ -199,10 +203,6 @@ public:
     const dd4hep::rec::Surface* findSurface(const edm4hep::TrackerHitPlane& hit) const;
     
 private:
-    genfit::MaterialEffects* materialEffects;
-    genfit::FieldManager* fieldManager;
-    GenfitMaterialInterface* m_geoMaterial;
-    GenfitField* m_genfitField;
     // Helper method to find surface for a given cell ID
     const dd4hep::rec::Surface* findSurfaceByID(uint64_t cellID) const;
     // Extract type ID from cell ID
@@ -240,8 +240,11 @@ private:
         std::vector<bool>& usedHits) const;
         
     // Fit circle to 4 hits using least squares and calculate chi2
+    // fitCov3x3 is the 3×3 covariance matrix on [x0, y0, R] in cm² from the WLS fit.
+    // It is set on success and used by the caller to propagate uncertainties to EDM4hep track params.
     bool fitCircleToFourHits(const std::vector<edm4hep::TrackerHitPlane>& hits,
-                            double& x0, double& y0, double& radius, double& chi2) const;
+                            double& x0, double& y0, double& radius, double& chi2,
+                            Eigen::Matrix3d& fitCov3x3) const;
 
     // fitTrackWithGenFit with extrapolation support
     bool fitTrackWithGenFit(
@@ -313,8 +316,8 @@ private:
     ) const;
     
     // Inner propagation constants
-    static constexpr double SOLENOID_RADIUS_CM = 230.0;
-    static constexpr double SOLENOID_Z_HALF_CM = 218.0;
+    static constexpr double SOLENOID_RADIUS_CM = 230.0;  // shouldn't be hardcoded fix
+    static constexpr double SOLENOID_Z_HALF_CM = 218.0;  // shouldn't be hardcoded fix
     // =====================================================================
     
     // Properties
@@ -327,6 +330,11 @@ private:
     Gaudi::Property<int> m_maxFitIterations{this, "MaxFitIterations", 4, "Maximum iterations for track fitting"};
     Gaudi::Property<bool> m_useGenFit{this, "UseGenFit", true, "Use GenFit for track fitting"};
     Gaudi::Property<int> m_debugLevel{this, "DebugLevel", 0, "Debug level of GenFit"};
+    // Inner propagation steering
+    Gaudi::Property<bool> m_doInnerPropagation{this, "DoInnerPropagation", true,
+        "Propagate outer track inward through the solenoid boundary using RK4 (saves state at AtVertex)"};
+    Gaudi::Property<double> m_innerPropTargetRadius{this, "InnerPropTargetRadius", 100.0,
+        "Target radius in cm for inner RK4 propagation"};
 
     // Services
     ServiceHandle<IGeoSvc> m_geoSvc{this, "GeoSvc", "GeoSvc", "Detector geometry service"};
@@ -364,8 +372,21 @@ private:
     mutable std::atomic<int> m_statStateAtLastHit{0};
     mutable std::atomic<int> m_statStateAtCalorimeter{0};
     mutable std::atomic<int> m_statStateAtOther{0};
+    mutable std::atomic<int> m_statStateAtVertex{0};
     mutable std::atomic<int> m_statInnerPropSuccess{0};
     mutable std::atomic<int> m_statGenFitSuccess{0};
+
+    // GenFit detailed counters
+    mutable std::atomic<int>   m_statGenFitFailed{0};        // isFitted==false after processTrack
+    mutable std::atomic<int>   m_statGenFitIllCond{0};       // ill-conditioned covariance
+    mutable std::atomic<int>   m_statGenFitException{0};     // genfit::Exception thrown
+    mutable std::atomic<int>   m_statGenFitChi2Count{0};     // number of valid chi2/ndf values
+    mutable std::atomic<int>   m_statGenFitChi2BadCount{0};  // fits with chi2/ndf > 1000 (non-physical)
+    // chi2 sum stored as integer × 1000 to avoid non-atomic float (multiply by 1000 before storing)
+    mutable std::atomic<long long> m_statGenFitChi2Sum{0};   // sum of (chi2/ndf * 1000)
+
+    // Triplet quality: flag bad geometry (direct vs sagitta radius disagreement > 2×)
+    mutable std::atomic<int> m_statTripletBadGeom{0};
     // =========================================================
 
 };

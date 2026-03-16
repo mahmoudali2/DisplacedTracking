@@ -165,47 +165,32 @@ StatusCode DisplacedTracking::initialize() {
     // Initialize GenFit if enabled
     if (m_useGenFit) {
         try {   
-        
-            // Initialize the Genfit
-            m_detector = m_geoSvc->getDetector();
-            m_field = m_detector->field();
-            m_genfitField=new GenfitField(m_field);
-
-            fieldManager = genfit::FieldManager::getInstance();
-            fieldManager->init(m_genfitField); // kGauss
-            
-            genfit::MaterialEffects* matEff = genfit::MaterialEffects::getInstance();
-
-            // Initialize material interface only once
-            matEff->init(new genfit::TGeoMaterialInterface());
-
-            // Set material effects options
-            matEff->setMscModel("GEANE");          // or "Highland"
-            matEff->setEnergyLossBetheBloch(true);
-            matEff->setNoiseBetheBloch(true);
-            // matEff->setEnergyLossBrems(true);
-            // matEff->setNoiseBrems(true);
-            // matEff->setNoiseCoulomb(false);     // disable multiple scattering
-
-            // Silence prints
-            matEff->setDebugLvl(0);
- 
-            /*
-            // Create and register the field adapter
-            m_genFitField = std::unique_ptr<DD4hepFieldAdapter>(new DD4hepFieldAdapter(m_field));
+            // ---- Field ----
+            // Use DD4hepFieldAdapter which wraps the DD4hep OverlayedField directly.
+            // This is the authoritative field and properly handles the field flip at R=230 cm.
+            // We store the adapter as a member so it lives for the algorithm lifetime.
+            m_genFitField = std::make_unique<DD4hepFieldAdapter>(m_field);
             genfit::FieldManager::getInstance()->init(m_genFitField.get());
 
-            // Create and register the material adapter
-            m_genFitMaterial = std::unique_ptr<DD4hepMaterialAdapter>(new DD4hepMaterialAdapter(m_materialManager));
-            genfit::MaterialEffects::getInstance()->init(m_genFitMaterial.get());
-            */
+            // ---- Material ----
+            // Use DD4hepMaterialAdapter wrapping the DD4hep MaterialManager.
+            // This is consistent with the DD4hep geometry used for surface lookup.
+            m_genFitMaterial = std::make_unique<DD4hepMaterialAdapter>(m_materialManager);
+            genfit::MaterialEffects* matEff = genfit::MaterialEffects::getInstance();
+            matEff->init(m_genFitMaterial.get());
 
-            info() << "GenFit initialized successfully" << endmsg;
+            // Set material effects options
+            matEff->setMscModel("GEANE");          // Multiple-scattering model
+            matEff->setEnergyLossBetheBloch(true);
+            matEff->setNoiseBetheBloch(true);
+            matEff->setDebugLvl(0);
+
+            info() << "GenFit initialized with DD4hep field+material adapters" << endmsg;
         } catch (const genfit::Exception& e) {
             error() << "Error initializing GenFit: " << e.what() << endmsg;
             return StatusCode::FAILURE;
         }
-    }       
+    }
 
     return StatusCode::SUCCESS;
 }
@@ -381,8 +366,17 @@ StatusCode DisplacedTracking::finalize() {
     int nSL     = m_statStateAtLastHit.load();
     int nSC     = m_statStateAtCalorimeter.load();
     int nSO     = m_statStateAtOther.load();
+    int nSV     = m_statStateAtVertex.load();
     int nProp   = m_statInnerPropSuccess.load();
     int nGF     = m_statGenFitSuccess.load();
+    int nGFFail = m_statGenFitFailed.load();
+    int nGFIll  = m_statGenFitIllCond.load();
+    int nGFExc  = m_statGenFitException.load();
+    int nGFChi2N = m_statGenFitChi2Count.load();
+    double avgChi2ndf = (nGFChi2N > 0) 
+                        ? (m_statGenFitChi2Sum.load() / 1000.0) / nGFChi2N 
+                        : 0.0;
+    int nBadGeom = m_statTripletBadGeom.load();
     double trkPerEvt = (nEvt>0)   ? double(nTrk)/double(nEvt) : 0.0;
     double seedEff   = (nCombos>0)? 100.0*double(nValid)/double(nCombos) : 0.0;
     double innerFrac = (nTrk>0)   ? 100.0*double(nInner)/double(nTrk) : 0.0;
@@ -412,20 +406,30 @@ StatusCode DisplacedTracking::finalize() {
         << "║  TRIPLET SEEDING                                         ║\n"
         << "║    Combinations tried         : " << std::setw(7) << nCombos << "                   ║\n"
         << "║    Valid triplets formed      : " << std::setw(7) << nValid  << "  (" << std::setw(5) << std::fixed << std::setprecision(1) << seedEff  << "% efficiency)  ║\n"
+        << "║    Marginal geometry (warned) : " << std::setw(7) << nBadGeom << "                   ║\n"
         << "╠══════════════════════════════════════════════════════════╣\n"
         << "║  HIT MULTIPLICITY                                        ║\n"
         << "║    Tracks with 4 hits         : " << std::setw(7) << n4hit   << "                   ║\n"
         << "║    Tracks with 3 hits         : " << std::setw(7) << n3hit   << "                   ║\n"
         << "╠══════════════════════════════════════════════════════════╣\n"
         << "║  TRACK STATES STORED                                     ║\n"
-        << "║    AtFirstHit  (outer seed)   : " << std::setw(7) << nSF     << "                   ║\n"
+        << "║    AtFirstHit  (seed state)   : " << std::setw(7) << nSF     << "                   ║\n"
         << "║    AtLastHit   (4-hit circle) : " << std::setw(7) << nSL     << "                   ║\n"
         << "║    AtCalorimeter              : " << std::setw(7) << nSC     << "                   ║\n"
-        << "║    AtOther     (inner prop.)  : " << std::setw(7) << nSO     << "                   ║\n"
+        << "║    AtOther     (GenFit fit)   : " << std::setw(7) << nSO     << "                   ║\n"
+        << "║    AtVertex    (inner prop.)  : " << std::setw(7) << nSV     << "                   ║\n"
         << "╠══════════════════════════════════════════════════════════╣\n"
         << "║  DOWNSTREAM PROCESSING                                   ║\n"
         << "║    Inner solenoid prop. OK    : " << std::setw(7) << nProp   << "  (" << std::setw(5) << std::fixed << std::setprecision(1) << propFrac << "% of tracks)  ║\n"
         << "║    GenFit fit succeeded       : " << std::setw(7) << nGF     << "  (" << std::setw(5) << std::fixed << std::setprecision(1) << gfFrac   << "% of tracks)  ║\n"
+        << "╠══════════════════════════════════════════════════════════╣\n"
+        << "║  GENFIT DETAILS                                          ║\n"
+        << "║    Fit succeeded              : " << std::setw(7) << nGF     << "                   ║\n"
+        << "║    Failed (isFitted=false)    : " << std::setw(7) << nGFFail << "                   ║\n"
+        << "║    Failed (ill-conditioned)   : " << std::setw(7) << nGFIll  << "                   ║\n"
+        << "║    Failed (other exception)   : " << std::setw(7) << nGFExc  << "                   ║\n"
+        << "║    Fits w/ non-physical chi2  : " << std::setw(7) << m_statGenFitChi2BadCount.load() << "  (chi2/ndf>1000, excl.)  ║\n"
+        << "║    Avg chi2/ndf (sane fitted) : " << std::setw(7) << std::fixed << std::setprecision(3) << avgChi2ndf << "                   ║\n"
         << "╚══════════════════════════════════════════════════════════╝\n"
         << endmsg;
     // ================================================================
@@ -639,29 +643,24 @@ edm4hep::TrackState DisplacedTracking::createTrackState(
     state.tanLambda = tanLambda;
     state.location = location;
     
-    // Create covariance matrix with 21 elements (6x6 symmetric)
-    //std::array<float, 21> covValues = {0};  // Initialize all to zero
-    
-    // Set diagonal elements for our 5 track parameters
-    // The indices would be different in a 6x6 matrix, so we need to map them correctly
-    state.setCovMatrix(1.0,      edm4hep::TrackParams::d0,        edm4hep::TrackParams::d0);        // d0 variance (mm²)
-    state.setCovMatrix(0.01,     edm4hep::TrackParams::phi,       edm4hep::TrackParams::phi);       // phi variance (rad²)
-    state.setCovMatrix(1e-8,     edm4hep::TrackParams::omega,     edm4hep::TrackParams::omega);     // omega variance (1/mm²)
-    state.setCovMatrix(1.0,      edm4hep::TrackParams::z0,        edm4hep::TrackParams::z0);        // z0 variance (mm²)
-    state.setCovMatrix(0.01,     edm4hep::TrackParams::tanLambda, edm4hep::TrackParams::tanLambda); // tanLambda variance
+    // Zero the full 6×6 covariance (21 lower-triangle elements).
+    // Callers that know their fit uncertainties should set the diagonal
+    // explicitly after calling this function.  The defaults below are
+    // conservative fall-backs for the muon system (poor resolution).
+    for (int i = 0; i < 6; ++i)
+        for (int j = 0; j <= i; ++j)
+            state.setCovMatrix(0.0,
+                static_cast<edm4hep::TrackParams>(i),
+                static_cast<edm4hep::TrackParams>(j));
 
-    // Create covariance matrix with individual elements
-    // Note: EDM4hep expects us to set each element individually
-    for (int i = 0; i < 5; ++i) {
-        for (int j = 0; j <= i; ++j) {
-            int index = i*(i+1)/2 + j;
-            if (index < 21) {
-                state.setCovMatrix(0.0, static_cast<edm4hep::TrackParams>(i), 
-                                                    static_cast<edm4hep::TrackParams>(j));
-            }
-        }
-    }
-    
+    // Default diagonal: generous seed uncertainties for the outer muon system.
+    // Units: D0/Z0 in mm², phi/tanLambda in rad², omega in (1/mm)².
+    state.setCovMatrix(1.0,   edm4hep::TrackParams::d0,        edm4hep::TrackParams::d0);
+    state.setCovMatrix(0.01,  edm4hep::TrackParams::phi,       edm4hep::TrackParams::phi);
+    state.setCovMatrix(1e-10,  edm4hep::TrackParams::omega,     edm4hep::TrackParams::omega);
+    state.setCovMatrix(1.0,   edm4hep::TrackParams::z0,        edm4hep::TrackParams::z0);
+    state.setCovMatrix(0.01,  edm4hep::TrackParams::tanLambda, edm4hep::TrackParams::tanLambda);
+
     return state;
 }
 
@@ -1309,17 +1308,29 @@ void DisplacedTracking::findTracks(
         const auto& seedTrack = candidate.track;
 
         // Find a suitable seed state
+        // Priority 1: 4-hit circle fit (AtLastHit) — most constrained analytical estimate
+        // Priority 2: 3-hit triplet seed (AtFirstHit)
         edm4hep::TrackState seedState;
         bool foundState = false;
 
         for (int j = 0; j < seedTrack.trackStates_size(); ++j) {
-            if (seedTrack.getTrackStates(j).location == edm4hep::TrackState::AtFirstHit) {
+            if (seedTrack.getTrackStates(j).location == edm4hep::TrackState::AtLastHit) {
                 seedState = seedTrack.getTrackStates(j);
                 foundState = true;
+                debug() << "Using AtLastHit (4-hit circle fit) as GenFit seed for track " << trackNumber << endmsg;
                 break;
             }
         }
-
+        if (!foundState) {
+            for (int j = 0; j < seedTrack.trackStates_size(); ++j) {
+                if (seedTrack.getTrackStates(j).location == edm4hep::TrackState::AtFirstHit) {
+                    seedState = seedTrack.getTrackStates(j);
+                    foundState = true;
+                    debug() << "Using AtFirstHit (3-hit seed) as GenFit seed for track " << trackNumber << endmsg;
+                    break;
+                }
+            }
+        }
         if (!foundState && seedTrack.trackStates_size() > 0) {
             seedState = seedTrack.getTrackStates(0);
             foundState = true;
@@ -1378,6 +1389,23 @@ void DisplacedTracking::findTracks(
                 }
 
                 foundExtraHit = findCompatibleExtraHit(trackHits, hits, globalUsedHits);
+
+                // If a 4th hit was added, find its index in the global collection and
+                // ensure it is marked in globalUsedHits (findCompatibleExtraHit does this
+                // via reference, but we also record the index for bookkeeping).
+                if (foundExtraHit && trackHits.size() == 4) {
+                    const auto& fourthHit = trackHits.back();
+                    for (size_t k = 0; k < hits->size(); ++k) {
+                        if (!globalUsedHits[k] &&
+                            (*hits)[k].getCellID() == fourthHit.getCellID()) {
+                            // Already marked by findCompatibleExtraHit; log for clarity
+                            debug() << "4th hit confirmed marked: global index " << k
+                                    << " layer=" << getLayerID(fourthHit.getCellID()) << endmsg;
+                            globalUsedHits[k] = true;  // belt-and-suspenders
+                            break;
+                        }
+                    }
+                }
             } catch (const std::exception& ex) {
                 warning() << "Exception in findCompatibleExtraHit for track " << trackNumber << ": " << ex.what() << endmsg;
             } catch (...) {
@@ -1396,12 +1424,29 @@ void DisplacedTracking::findTracks(
 
         debug() << "Created new final track object for track " << trackNumber << endmsg;
 
+        // ── Always preserve the analytical 3-hit seed state at AtFirstHit ──────────────
+        // This is the baseline from circle fitting and must always be present for
+        // comparison against the GenFit result and the 4-hit circle fit.
+        // We add it now BEFORE the 4-hit extension and GenFit fitting so it is never lost.
+        {
+            edm4hep::TrackState seedAtFirst = seedState;
+            seedAtFirst.location = edm4hep::TrackState::AtFirstHit;
+            finalTrack.addToTrackStates(seedAtFirst);
+            debug() << "Saved analytical seed state at AtFirstHit:"
+                    << "  d0=" << seedAtFirst.D0 << " mm"
+                    << "  phi=" << seedAtFirst.phi << " rad"
+                    << "  omega=" << seedAtFirst.omega << " 1/mm"
+                    << "  z0=" << seedAtFirst.Z0 << " mm"
+                    << "  tanL=" << seedAtFirst.tanLambda << endmsg;
+        }
+
         // Test 4-hit circle fitting if we have 4 hits
         if (trackHits.size() == 4) {
             double x0, y0, radius, chi2;
+            Eigen::Matrix3d fitCov3x3 = Eigen::Matrix3d::Zero();
             bool fit4Hits = false;
             try {
-                fit4Hits = fitCircleToFourHits(trackHits, x0, y0, radius, chi2);
+                fit4Hits = fitCircleToFourHits(trackHits, x0, y0, radius, chi2, fitCov3x3);
             } catch (const std::exception& ex) {
                 warning() << "Exception in fitCircleToFourHits for track " << trackNumber << ": " << ex.what() << endmsg;
             } catch (...) {
@@ -1439,8 +1484,125 @@ void DisplacedTracking::findTracks(
                         d0*10.0, phi, omega, seedState.Z0, seedState.tanLambda, 
                         edm4hep::TrackState::AtLastHit);
 
+                    // Set reference point to position of last hit
+                    const auto& firstHitPos = trackHits.front().getPosition();
+                    circleFitState.referencePoint = edm4hep::Vector3f(
+                        firstHitPos[0], firstHitPos[1], firstHitPos[2]);
+
+                // ── Propagate fit covariance [x0,y0,R] → track parameters ──
+                // All EDM4hep units: D0/Z0 in mm², phi/omega in rad²/(1/mm)².
+                {
+                    double cx = x0;
+                    double cy = y0;
+
+                    double r2 = cx*cx + cy*cy;
+                    double dist0 = std::sqrt(r2);
+
+                    // ---- Gradients ----------------------------------------------------
+
+                    double dDist_dx0 = (dist0 > 1e-9) ? cx / dist0 : 0.0;
+                    double dDist_dy0 = (dist0 > 1e-9) ? cy / dist0 : 0.0;
+
+                    // d0 = sqrt(x0² + y0²) − R
+                    Eigen::Vector3d grad_d0(dDist_dx0, dDist_dy0, -1.0);
+
+                    // phi = atan2(y0,x0) − π/2
+                    Eigen::Vector3d grad_phi(
+                        (r2 > 1e-12) ? -cy / r2 : 0.0,
+                        (r2 > 1e-12) ?  cx / r2 : 0.0,
+                        0.0
+                    );
+
+                    // omega = charge/(R*10)   (R in cm → omega in 1/mm)
+                    double chargeSign = (omega > 0) ? 1.0 : -1.0;
+                    double dOmega_dR = -chargeSign / (radius * radius * 10.0);
+
+                    Eigen::Vector3d grad_omega(0.0, 0.0, dOmega_dR);
+
+                    // ---- Covariance propagation --------------------------------------
+
+                    double var_d0_cm2    = grad_d0.dot(fitCov3x3 * grad_d0);
+                    double var_phi_rad2  = grad_phi.dot(fitCov3x3 * grad_phi);
+                    double var_omega_mm2 = grad_omega.dot(fitCov3x3 * grad_omega);
+
+                    // Convert d0 variance from cm² → mm²
+                    double var_d0_mm2 = var_d0_cm2 * 100.0;
+
+                    // ---- Inherit longitudinal parameters from seed -------------------
+
+                    double var_z0 = seedState.getCovMatrix(
+                        edm4hep::TrackParams::z0,
+                        edm4hep::TrackParams::z0);
+
+                    double var_tanL = seedState.getCovMatrix(
+                        edm4hep::TrackParams::tanLambda,
+                        edm4hep::TrackParams::tanLambda);
+
+                    if (var_z0   < 1e-30) var_z0   = 1.0;
+                    if (var_tanL < 1e-30) var_tanL = 0.01;
+
+                    // ---- Apply covariance floors -------------------------------------
+
+                    var_d0_mm2   = std::max(var_d0_mm2,   0.01);   // 0.1 mm resolution floor
+                    var_phi_rad2 = std::max(var_phi_rad2, 0.01);
+
+                    double omega_rel_floor = std::pow(0.1 * std::abs(omega), 2);
+
+                    var_omega_mm2 = std::max({var_omega_mm2, omega_rel_floor});
+
+                    // ---- Reset covariance matrix -------------------------------------
+
+                    for (int ii = 0; ii < 6; ++ii)
+                        for (int jj = 0; jj <= ii; ++jj)
+                            circleFitState.setCovMatrix(
+                                0.0,
+                                static_cast<edm4hep::TrackParams>(ii),
+                                static_cast<edm4hep::TrackParams>(jj)
+                            );
+
+                    // ---- Fill diagonal terms -----------------------------------------
+
+                    circleFitState.setCovMatrix(
+                        static_cast<float>(var_d0_mm2),
+                        edm4hep::TrackParams::d0,
+                        edm4hep::TrackParams::d0);
+
+                    circleFitState.setCovMatrix(
+                        static_cast<float>(var_phi_rad2),
+                        edm4hep::TrackParams::phi,
+                        edm4hep::TrackParams::phi);
+
+                    circleFitState.setCovMatrix(
+                        static_cast<float>(var_omega_mm2),
+                        edm4hep::TrackParams::omega,
+                        edm4hep::TrackParams::omega);
+
+                    circleFitState.setCovMatrix(
+                        static_cast<float>(var_z0),
+                        edm4hep::TrackParams::z0,
+                        edm4hep::TrackParams::z0);
+
+                    circleFitState.setCovMatrix(
+                        static_cast<float>(var_tanL),
+                        edm4hep::TrackParams::tanLambda,
+                        edm4hep::TrackParams::tanLambda);
+
+                    // ---- Debug print --------------------------------------------------
+
+                    info() << "AtLastHit covariance from 4-hit circle fit:"
+                        << "  σ_d0="   << std::sqrt(var_d0_mm2)    << " mm"
+                        << "  σ_phi="  << std::sqrt(var_phi_rad2)  << " rad"
+                        << "  σ_ω="    << std::sqrt(var_omega_mm2) << " 1/mm"
+                        << "  σ_z0="   << std::sqrt(var_z0)        << " mm"
+                        << "  σ_tanL=" << std::sqrt(var_tanL)
+                        << endmsg;
+                }
                     finalTrack.addToTrackStates(circleFitState);
                     finalTrack.setChi2(chi2);
+
+                    // Promote to GenFit seed: 4-hit fit is a better starting point
+                    seedState = circleFitState;
+                    debug() << "Promoted AtLastHit (4-hit circle fit) to GenFit seed state" << endmsg;
 
                     info() << "Added 4-hit circle fit track state for track " << trackNumber << ": pT=" << pT 
                            << " GeV/c, d0=" << d0*10.0 << " mm" << endmsg;
@@ -1465,7 +1627,7 @@ void DisplacedTracking::findTracks(
             m_statGenFitSuccess++;
             info() << "Successfully fitted track " << trackNumber << " with GenFit: " 
                 << finalTrack.trackerHits_size() << " hits, chi2/ndf = " 
-                << finalTrack.getChi2() / finalTrack.getNdf() << endmsg;
+                << (finalTrack.getNdf() > 0 ? finalTrack.getChi2() / finalTrack.getNdf() : -1.0) << endmsg;
         } else {
             if (m_useGenFit) {
                 warning() << "GenFit track fitting failed for track " << trackNumber << ", using seed parameters" << endmsg;
@@ -1473,44 +1635,65 @@ void DisplacedTracking::findTracks(
                 debug() << "Using analytical seed parameters for track " << trackNumber << " (GenFit disabled)" << endmsg;
             }
 
-            finalTrack.setNdf(std::max(1, static_cast<int>(trackHits.size() * 2 - 5))); // Degrees of freedom
+            finalTrack.setNdf(std::max(1, static_cast<int>(trackHits.size() * 2 - 5)));
 
+            // Copy seed track states — but skip AtFirstHit since we already saved it above
+            // to avoid duplicating the seed state.
             for (int j = 0; j < seedTrack.trackStates_size(); ++j) {
-                finalTrack.addToTrackStates(seedTrack.getTrackStates(j));
+                auto st = seedTrack.getTrackStates(j);
+                if (st.location != edm4hep::TrackState::AtFirstHit) {
+                    finalTrack.addToTrackStates(st);
+                }
             }
 
             // Copy hits into output collection so PODIO can resolve the relation
             for (const auto& hit : trackHits) {
                 auto outHit = outputHits.create();
-        outHit.setCellID(hit.getCellID());
-        outHit.setTime(hit.getTime());
-        outHit.setEDep(hit.getEDep());
-        outHit.setEDepError(hit.getEDepError());
-        outHit.setPosition(hit.getPosition());
-        outHit.setCovMatrix(hit.getCovMatrix());
-        outHit.setDu(hit.getDu());
-        outHit.setDv(hit.getDv());
+                outHit.setCellID(hit.getCellID());
+                outHit.setTime(hit.getTime());
+                outHit.setEDep(hit.getEDep());
+                outHit.setEDepError(hit.getEDepError());
+                outHit.setPosition(hit.getPosition());
+                outHit.setCovMatrix(hit.getCovMatrix());
+                outHit.setDu(hit.getDu());
+                outHit.setDv(hit.getDv());
                 propagateLink(outHit, hit);
                 finalTrack.addToTrackerHits(outHit);
             }
         }
 
         // ======= Reconstruct Inner Track Segment =========
+        // Controlled by the steering property DoInnerPropagation (default: true).
+        // The result is saved as TrackState::AtVertex so it is distinct from all other states.
+        if (m_doInnerPropagation) {
         edm4hep::TrackState bestState;
         bool foundStateForProp = false;
-            // ===== EXTRACT BEST STATE FOR INNER PROPAGATION =====
-            // Priority 1: Try AtLastHit (4-hit fit if available)
+        // ===== EXTRACT BEST STATE FOR INNER PROPAGATION =====
+        // Priority 1: GenFit-fitted state (AtOther) — most accurate
+        // Priority 2: 4-hit circle fit (AtLastHit)
+        // Priority 3: 3-hit seed (AtFirstHit)
+        // The reference point in all these states is the first/last hit position
+        // in the outer muon system, which is where RK4 propagation starts.
         for (int j = 0; j < finalTrack.trackStates_size(); ++j) {
             auto st = finalTrack.getTrackStates(j);
-            if (st.location == edm4hep::TrackState::AtLastHit) {
+            if (st.location == edm4hep::TrackState::AtOther) {
                 bestState = st;
                 foundStateForProp = true;
-                info() << "Using AtLastHit state (4-hit fit) for inner propagation" << endmsg;
+                info() << "Using AtOther state (GenFit fitted) for inner propagation" << endmsg;
                 break;
             }
         }
-            
-            // Priority 2: Fall back to AtFirstHit (3-hit seed)
+        if (!foundStateForProp) {
+            for (int j = 0; j < finalTrack.trackStates_size(); ++j) {
+                auto st = finalTrack.getTrackStates(j);
+                if (st.location == edm4hep::TrackState::AtLastHit) {
+                    bestState = st;
+                    foundStateForProp = true;
+                    info() << "Using AtLastHit state (4-hit circle) for inner propagation" << endmsg;
+                    break;
+                }
+            }
+        }
         if (!foundStateForProp) {
             for (int j = 0; j < finalTrack.trackStates_size(); ++j) {
                 auto st = finalTrack.getTrackStates(j);
@@ -1567,8 +1750,8 @@ void DisplacedTracking::findTracks(
                 info() << "    Outer R=" << std::sqrt(pos.x()*pos.x() + pos.y()*pos.y())
                     << " cm, |p|=" << mom.norm() << " GeV/c" << endmsg;
                 
-                // Propagate
-                auto inner = propagateToInner(pos, mom, 100.0);
+                // Propagate using RK4 to m_innerPropTargetRadius
+                auto inner = propagateToInner(pos, mom, m_innerPropTargetRadius);
                 
                 if (inner.success) {
                     m_statInnerPropSuccess++;
@@ -1579,8 +1762,7 @@ void DisplacedTracking::findTracks(
                     double pMagFinal = inner.finalMomentum.norm();
                     double pRatio = pMagFinal / mom.norm();
                     
-                    // ===== SAVE INNER STATE =====
-                    // Convert final RK4 result back to EDM4hep parameters
+                    // ===== SAVE INNER STATE AS AtVertex =====
                     double d0_inner = std::sqrt(
                         inner.finalPosition.x() * inner.finalPosition.x() +
                         inner.finalPosition.y() * inner.finalPosition.y()
@@ -1595,20 +1777,21 @@ void DisplacedTracking::findTracks(
                     
                     double z0_inner = inner.finalPosition.z();
                     
-                    // Create inner track state
+                    // Create inner track state at AtVertex (distinct from AtOther used by GenFit)
                     edm4hep::TrackState innerState = createTrackState(
                         d0_inner * 10.0,    // cm to mm
                         phi_inner,
                         omega_inner / 10.0, // 1/cm to 1/mm
                         z0_inner * 10.0,    // cm to mm
                         tanLambda,
-                        edm4hep::TrackState::AtOther  // ← Mark as inner
+                        edm4hep::TrackState::AtVertex  // ← Inner propagation result
                     );
                     
-                    // Add to same track object
+                    // Add to track
                     finalTrack.addToTrackStates(innerState);
+                    m_statStateAtVertex++;
                     
-                    info() << "  ✓ Inner propagation SUCCESS:" << endmsg;
+                    info() << "  ✓ Inner propagation SUCCESS → saved as AtVertex:" << endmsg;
                     info() << "    Final R=" << rxy << " cm, |p|=" << pMagFinal 
                         << " GeV/c (ratio=" << pRatio << ")" << endmsg;
                     info() << "    Arc length: " << inner.arcLength << " cm, steps: "
@@ -1619,7 +1802,6 @@ void DisplacedTracking::findTracks(
                         if (m_mcParticles.exist()) {
                             const auto* mcParts = m_mcParticles.get();
                             if (mcParts && !mcParts->empty()) {
-                                // Create a temporary Track view for validation
                                 edm4hep::Track trackView = finalTrack;
                                 validateTrackWithTruth(trackView, *mcParts, trackNumber);
                             }
@@ -1632,6 +1814,7 @@ void DisplacedTracking::findTracks(
                 }
             }
         }
+        } // end if (m_doInnerPropagation)
         // ===== END INNER PROPAGATION =====
 
         // ======================= Printing final track=============================
@@ -1641,7 +1824,7 @@ void DisplacedTracking::findTracks(
 
         // ---- per-track run statistics ----
         m_statTracksReconstructed++;
-        bool hasFirstHit = false, hasLastHit = false, hasCalorimeter = false, hasOther = false;
+        bool hasFirstHit = false, hasLastHit = false, hasCalorimeter = false, hasOther = false, hasVertex = false;
         for (int sIdx = 0; sIdx < finalTrack.trackStates_size(); ++sIdx) {
             auto ts = finalTrack.getTrackStates(sIdx);
             switch (ts.location) {
@@ -1649,6 +1832,7 @@ void DisplacedTracking::findTracks(
                 case edm4hep::TrackState::AtLastHit:     hasLastHit     = true; break;
                 case edm4hep::TrackState::AtCalorimeter: hasCalorimeter = true; break;
                 case edm4hep::TrackState::AtOther:       hasOther       = true; break;
+                case edm4hep::TrackState::AtVertex:      hasVertex      = true; break;
                 default: break;
             }
         }
@@ -1656,13 +1840,26 @@ void DisplacedTracking::findTracks(
         if (hasLastHit)     m_statStateAtLastHit++;
         if (hasCalorimeter) m_statStateAtCalorimeter++;
         if (hasOther)       m_statStateAtOther++;
+        if (hasVertex)      m_statStateAtVertex++;
         if (hasLastHit) m_statFourHitTracks++; else m_statThreeHitTracks++;
-        for (int sIdx = 0; sIdx < finalTrack.trackStates_size(); ++sIdx) {
-            auto ts = finalTrack.getTrackStates(sIdx);
-            if (ts.location == edm4hep::TrackState::AtFirstHit) {
-                if (ts.omega < 0.0) m_statPositiveCharge++;
-                else                m_statNegativeCharge++;
-                break;
+        // Count charge from the best available state
+        // (prefer AtFirstHit, fall back to AtOther, then AtLastHit)
+        {
+            int chargePriority = 99;
+            double chargeOmega = 0.0;
+            for (int sIdx = 0; sIdx < finalTrack.trackStates_size(); ++sIdx) {
+                auto ts = finalTrack.getTrackStates(sIdx);
+                int prio = (ts.location == edm4hep::TrackState::AtFirstHit) ? 0 :
+                           (ts.location == edm4hep::TrackState::AtOther)    ? 1 :
+                           (ts.location == edm4hep::TrackState::AtLastHit)  ? 2 : 99;
+                if (prio < chargePriority) {
+                    chargePriority = prio;
+                    chargeOmega = ts.omega;
+                }
+            }
+            if (chargePriority < 99) {
+                if (chargeOmega < 0.0) m_statPositiveCharge++;
+                else                   m_statNegativeCharge++;
             }
         }
         // Continue to next iteration to find more tracks
@@ -1903,6 +2100,19 @@ bool DisplacedTracking::createTripletSeed(
     debug() << "  Direct formula pT: " << pT_direct << " GeV/c" << endmsg;
     debug() << "  Sagitta simple pT: " << pT_sagitta << " GeV/c" << endmsg;
     debug() << "  Sagitta full pT: " << pT_sagitta_full << " GeV/c" << endmsg;
+
+    // --- Geometry sanity check: direct vs sagitta radius should agree within a factor of 2 ---
+    // If they disagree wildly, the triplet is nearly collinear / numerically unstable.
+    // We log a warning but do NOT reject — the sagitta method is more robust for high-pT tracks.
+    {
+        double rRatio = (radius_direct > 1e-3) ? radius_sagitta / radius_direct : 0.0;
+        if (rRatio < 0.3 || rRatio > 3.0) {
+            m_statTripletBadGeom++;
+            debug() << "WARNING: radius disagreement — direct=" << radius_direct
+                    << " cm  sagitta=" << radius_sagitta << " cm  ratio=" << rRatio
+                    << "  (numerically marginal triplet — proceeding with sagitta)" << endmsg;
+        }
+    }
     /*
     // Use sagitta method for track parameters
     double radius = radius_direct;
@@ -2012,6 +2222,128 @@ bool DisplacedTracking::createTripletSeed(
     // Set reference point to the first hit position
     const auto& firstHitPos = hit1.getPosition();
     state.referencePoint = edm4hep::Vector3f(firstHitPos[0], firstHitPos[1], firstHitPos[2]);
+
+    // ── Propagate hit uncertainties to track-parameter covariance ──────────────
+    // All EDM4hep cov units:
+    //   D0, Z0  in mm²;  phi, tanLambda in rad²;  omega in (1/mm)².
+    {
+        // Hit position uncertainties in cm
+        auto getSigmaXY = [](const edm4hep::TrackerHitPlane& h) -> double {
+            double su = h.getDu(); 
+            double sv = h.getDv();
+            if (su <= 0) su = 0.4; // mm
+            if (sv <= 0) sv = 0.4;
+            return std::sqrt(su*su + sv*sv) / 10.0; // cm
+        };
+
+        auto getSigmaZ = [](const edm4hep::TrackerHitPlane& h) -> double {
+            double sv = h.getDv();
+            if (sv <= 0) sv = 0.4;
+            return sv / 10.0; // cm
+        };
+
+        double sigma_xy1 = getSigmaXY(hit1);
+        double sigma_xy2 = getSigmaXY(hit2);
+        double sigma_xy3 = getSigmaXY(hit3);
+
+        double sigma_z1  = getSigmaZ(hit1);
+        double sigma_z3  = getSigmaZ(hit3);
+
+        // lever arm
+        double chordL = std::sqrt(std::pow(p3.x()-p1.x(),2) +
+                                std::pow(p3.y()-p1.y(),2));
+
+        // --- omega ---
+        double sigma_R_cm = (chordL > 1e-3)
+            ? 2.0 * sigma_xy2 * radius / chordL
+            : 0.5 * radius;
+
+        double dOmega_dR = -charge / (radius * radius * 10.0);
+        double var_omega  = dOmega_dR * dOmega_dR *
+                            sigma_R_cm * sigma_R_cm;
+
+        double omega_abs_floor = std::pow(0.2 * std::abs(omega), 2);
+
+        debug() << "Omega covariance values AtFirstHit:"
+                << "  σ_ω="  << std::sqrt(var_omega)  << " 1/mm"
+                << "  omega_abs_floor="   << std::sqrt(omega_abs_floor)<< " 1/mm"
+                << endmsg;
+
+        var_omega = std::max({var_omega,
+                            omega_abs_floor});
+
+        // --- phi ---
+        double var_phi = (chordL > 1e-6)
+            ? (sigma_xy1 * sigma_xy1) / (chordL * chordL)
+            : 0.01;
+
+         debug() << "Phi covariance values AtFirstHit:"
+                << "  σ_phi=" << std::sqrt(var_phi)  << " rad"
+                << "  phi_floor= 0.1 rad"
+                << endmsg;
+
+        var_phi = std::max(var_phi, 0.01);  // floor for sigma = 0.1 
+
+        // --- d0 ---
+        double avg_sigma_xy_mm =
+            (sigma_xy1 + sigma_xy2 + sigma_xy3) / 3.0 * 10.0;
+
+        double var_d0 = avg_sigma_xy_mm * avg_sigma_xy_mm;
+
+        // --- z0 / tanLambda ---
+        double avg_sigma_z_mm =
+            (sigma_z1 + sigma_z3) / 2.0 * 10.0;
+
+        double chordL_mm = chordL * 10.0;
+
+        double var_tanL = (chordL_mm > 1e-6)
+            ? (avg_sigma_z_mm * avg_sigma_z_mm) /
+            (chordL_mm * chordL_mm)
+            : 0.01;
+
+        debug() << "Tan lamda covariance values AtFirstHit:"
+                << "  σ_tanL="<< std::sqrt(var_tanL) 
+                << "  tanL_floor= 0.1"
+                << endmsg;
+
+        var_tanL = std::max(var_tanL, 0.01); // floor for sigma = 0.1 
+
+        double var_z0 = avg_sigma_z_mm * avg_sigma_z_mm;
+
+        // reset covariance
+        for (int i = 0; i < 6; ++i)
+            for (int j = 0; j <= i; ++j)
+                state.setCovMatrix(0.0,
+                    static_cast<edm4hep::TrackParams>(i),
+                    static_cast<edm4hep::TrackParams>(j));
+
+        state.setCovMatrix(var_d0,
+            edm4hep::TrackParams::d0,
+            edm4hep::TrackParams::d0);
+
+        state.setCovMatrix(var_phi,
+            edm4hep::TrackParams::phi,
+            edm4hep::TrackParams::phi);
+
+        state.setCovMatrix(var_omega,
+            edm4hep::TrackParams::omega,
+            edm4hep::TrackParams::omega);
+
+        state.setCovMatrix(var_z0,
+            edm4hep::TrackParams::z0,
+            edm4hep::TrackParams::z0);
+
+        state.setCovMatrix(var_tanL,
+            edm4hep::TrackParams::tanLambda,
+            edm4hep::TrackParams::tanLambda);
+
+        debug() << "AtFirstHit covariance from hit uncertainties:"
+                << "  σ_d0="  << std::sqrt(var_d0)  << " mm"
+                << "  σ_phi=" << std::sqrt(var_phi)  << " rad"
+                << "  σ_ω="   << std::sqrt(var_omega)<< " 1/mm"
+                << "  σ_z0="  << std::sqrt(var_z0)   << " mm"
+                << "  σ_tanL="<< std::sqrt(var_tanL) << endmsg;
+    }
 
     // Add track state to track
     edm_track.addToTrackStates(state);
@@ -2345,98 +2677,74 @@ genfit::MeasuredStateOnPlane DisplacedTracking::convertToGenFitState(
     const edm4hep::TrackState& state,
     genfit::AbsTrackRep* rep) const {
     
-    // Extract EDM4hep track parameters
-    double d0 = state.D0;          // Impact parameter in mm
-    double phi = state.phi;        // Azimuthal angle at PCA
-    double omega = state.omega;    // Signed curvature (1/R) in 1/mm
-    double z0 = state.Z0;          // Z position at PCA
-    double tanLambda = state.tanLambda; // Tangent of dip angle
-    
-    // Use reference point (first hit position)
-    double x = state.referencePoint[0];
-    double y = state.referencePoint[1];
-    double z = state.referencePoint[2];
-    
-    // Get field at this position to calculate momentum
-    dd4hep::Position fieldPos(x/10.0, y/10.0, z/10.0); // Convert mm to cm for DD4hep
-    double bField = m_field.magneticField(fieldPos).z() / dd4hep::tesla;
-    
-    // Calculate pT from curvature
-    double pT = 0.3 * std::abs(bField) / (std::abs(omega) * 1000.0); // GeV/c
-    
-    // Calculate center of helix
-    double radius = 1.0 / std::abs(omega); // mm
-    double centerX, centerY;
-    
-    if (omega < 0) { // Positive charge
-        centerX = -d0 * sin(phi) - radius * cos(phi);
-        centerY = d0 * cos(phi) - radius * sin(phi);
-    } else { // Negative charge
-        centerX = -d0 * sin(phi) + radius * cos(phi);
-        centerY = d0 * cos(phi) + radius * sin(phi);
-    }
-    debug() << "Circle Radius: " << radius;
-    debug() << "Circle center, x: " << centerX;
-    debug() << "Circle center, y: " << centerY;
+    // ---------- Extract EDM4hep track parameters ----------
+    // All EDM4hep track params: D0 [mm], phi [rad], omega [1/mm], Z0 [mm], tanLambda
+    double d0        = state.D0;          // mm
+    double phi       = state.phi;         // rad
+    double omega     = state.omega;       // 1/mm, signed: omega = charge/R
+    double tanLambda = state.tanLambda;
 
-    // Calculate momentum direction at the first hit
-    double hitX = x/10.0; // convert mm to cm
-    double hitY = y/10.0;
-    
-    // Vector from center to hit position
-    double vecX = hitX - centerX/10.0; // convert center to cm
-    double vecY = hitY - centerY/10.0;
-    double vecMag = sqrt(vecX*vecX + vecY*vecY);
-    
-    // Normalize vector
+    // Reference point (hit position in mm → cm for GenFit)
+    double refX = state.referencePoint[0] / 10.0;  // cm
+    double refY = state.referencePoint[1] / 10.0;
+    double refZ = state.referencePoint[2] / 10.0;
+
+    // ---------- Magnetic field at reference point ----------
+    dd4hep::Position fieldPos(refX, refY, refZ);  // cm
+    double bField = m_field.magneticField(fieldPos).z() / dd4hep::tesla;  // Tesla
+
+    if (std::abs(omega) < 1e-10 || std::abs(bField) < 1e-6) {
+        throw genfit::Exception("convertToGenFitState: omega or B too small", __LINE__, __FILE__);
+    }
+
+    // ---------- pT and pz ----------
+    // pT [GeV/c] = 0.3 * |Bz| [T] / (|omega| [1/mm] * 1000)
+    double pT = 0.3 * std::abs(bField) / (std::abs(omega) * 1000.0);  // GeV/c
+    double pz = pT * tanLambda;
+
+    // ---------- Momentum direction at reference point ----------
+    // Helix center (mm), derived from perigee parameters
+    double R_mm = 1.0 / std::abs(omega);
+    double centerX_mm, centerY_mm;
+    if (omega < 0) {  // positive charge → clockwise
+        centerX_mm = -d0 * std::sin(phi) - R_mm * std::cos(phi);
+        centerY_mm =  d0 * std::cos(phi) - R_mm * std::sin(phi);
+    } else {          // negative charge → counter-clockwise
+        centerX_mm = -d0 * std::sin(phi) + R_mm * std::cos(phi);
+        centerY_mm =  d0 * std::cos(phi) + R_mm * std::sin(phi);
+    }
+
+    // Unit radial vector from center to reference point (in cm)
+    double vecX = refX - centerX_mm / 10.0;
+    double vecY = refY - centerY_mm / 10.0;
+    double vecMag = std::sqrt(vecX*vecX + vecY*vecY);
+    if (vecMag < 1e-10) {
+        throw genfit::Exception("convertToGenFitState: degenerate center-to-hit vector", __LINE__, __FILE__);
+    }
     vecX /= vecMag;
     vecY /= vecMag;
-    
-    // Rotate 90 degrees to get tangent direction (momentum)
+
+    // Tangent (momentum direction in xy) = radial rotated 90°, sign by charge
     double momDirX, momDirY;
-    if (omega < 0) { // Positive charge -> clockwise
-        momDirX = -vecY;
-        momDirY = vecX;
-    } else { // Negative charge -> counter-clockwise
-        momDirX = vecY;
-        momDirY = -vecX;
+    if (omega < 0) {  // positive charge → clockwise
+        momDirX = -vecY;  momDirY =  vecX;
+    } else {          // negative charge → counter-clockwise
+        momDirX =  vecY;  momDirY = -vecX;
     }
-    
-    // Create momentum vector at the hit
+
     double px = pT * momDirX;
     double py = pT * momDirY;
-    double pz = 0.0;  // to be estimated 
-    double p = sqrt(px*px + py*py + pz*pz);
-    
-    // Charge from omega sign
-    double charge = (omega < 0) ? 1.0 : -1.0;
-    
-    // Create GenFit state vectors
-    TVector3 posVec(x/10.0, y/10.0, z/10.0); // Convert mm to cm
-    TVector3 momVec(px, py, pz);
-    
-    // Create a new GenFit state on the reference plane
-    genfit::MeasuredStateOnPlane state_gf(rep);
-    
-    // Set state parameters
-    state_gf.setPosMom(posVec, momVec);
-    state_gf.setQop(charge / p); // q/p = charge / momentum magnitude
-   
-    // Convert covariance matrix from EDM4hep to GenFit format
-    // This is a simplified conversion - a full conversion would need careful parameter mapping
-    TMatrixDSym covMat(6); // 6x6 symmetric matrix
 
-    // This is a simplified mapping - a proper mapping would require coordinate transformation
-    covMat(0, 0) = 0.004; //xx
-    covMat(1, 1) = 0.004; //yy
-    covMat(2, 2) = 0.004; //zz
-    covMat(3, 3) = 0.01; //pxpx
-    covMat(4, 4) = 0.01; //pypy
-    covMat(5, 5) = 0.01; //pzpz
-    
-    state_gf.setCov(covMat);
-     
-    return state_gf;
+    TVector3 posVec(refX, refY, refZ);    // cm
+    TVector3 momVec(px, py, pz);          // GeV/c
+
+    // ---------- Build GenFit state with pos/mom only ----------
+    // The covariance is set by the caller via genfit::Track(rep, stateVec, covInit),
+    // which accepts a 6×6 Cartesian seed covariance.  Do not call setCov() here.
+    genfit::MeasuredStateOnPlane gfState(rep);
+    gfState.setPosMom(posVec, momVec);
+
+    return gfState;
 }
 
 
@@ -2444,78 +2752,176 @@ edm4hep::TrackState DisplacedTracking::convertToEDM4hepState(
     const genfit::MeasuredStateOnPlane& state,
     int location) const {
     
-    // Get position and momentum from GenFit state
-    TVector3 pos = state.getPos(); // cm
-    TVector3 mom = state.getMom(); // GeV/c
+    // Get position [cm] and momentum [GeV/c] from GenFit state
+    TVector3 pos = state.getPos();   // cm
+    TVector3 mom = state.getMom();   // GeV/c
     double charge = (state.getQop() > 0) ? 1.0 : -1.0;
     
-    // Calculate derived quantities
     double px = mom.X();
     double py = mom.Y();
     double pz = mom.Z();
-    double pt = sqrt(px*px + py*py);
-    double p = mom.Mag();
+    double pt = std::sqrt(px*px + py*py);
+    double p  = mom.Mag();
     
-    // Calculate EDM4hep track parameters
-    double phi = atan2(py, px);
-    double tanLambda = pz / pt;
-    
-    // Get field at this position to calculate curvature
-    dd4hep::Position fieldPos(pos.X(), pos.Y(), pos.Z());
+    // ---------- EDM4hep 5-parameter track state ----------
+    // phi: azimuthal angle of momentum at the track point
+    double phi = std::atan2(py, px);
+
+    // tanLambda: pz/pT
+    double tanLambda = (pt > 1e-10) ? pz / pt : 0.0;
+
+    // Magnetic field at fit position
+    dd4hep::Position fieldPos(pos.X(), pos.Y(), pos.Z());  // cm
     double bField = m_field.magneticField(fieldPos).z() / dd4hep::tesla;
     
-    // Calculate curvature (1/R) from pT and B
-    // pT [GeV/c] = 0.3 * |B| [T] * R [m]
-    // omega [1/mm] = 1/R [1/m] * 0.001
-    double omega = charge * 0.3 * std::abs(bField) / (pt * 1000.0); // 1/mm
-    
-    // Calculate impact parameter d0
-    // For a helix, d0 is the distance from (0,0) to the center of the helix, minus the radius
-    // In this simplified calculation, we project the position onto the x-y plane to get d0
-    double d0 = -pos.Y() * cos(phi) + pos.X() * sin(phi);
-    d0 *= 10.0; // Convert from cm to mm
-    
-    // Calculate z position at PCA
-    double z0 = pos.Z() * 10.0; // Convert from cm to mm
-    
-    // Create EDM4hep track state with appropriate parameters
+    // omega [1/mm] = charge * 0.3 * |B| / (pT [GeV/c] * 1000)
+    double omega = 0.0;
+    if (pt > 1e-10 && std::abs(bField) > 1e-6)
+        omega = charge * 0.3 * std::abs(bField) / (pt * 1000.0);  // 1/mm
+
+    // d0 [mm]: signed transverse impact parameter w.r.t. origin
+    // d0 = -(y*cos(phi) - x*sin(phi)) evaluated at fit position (cm → mm)
+    double d0 = (-pos.Y() * std::cos(phi) + pos.X() * std::sin(phi)) * 10.0;  // mm
+
+    // z0 [mm]: z at closest approach
+    double z0 = pos.Z() * 10.0;  // cm → mm
+
     edm4hep::TrackState outState;
-    outState.D0 = d0;
-    outState.phi = phi;
-    outState.omega = omega;
-    outState.Z0 = z0;
+    outState.D0        = d0;
+    outState.phi       = phi;
+    outState.omega     = omega;
+    outState.Z0        = z0;
     outState.tanLambda = tanLambda;
-    outState.location = location;
-/*   
-    // Get covariance matrix from GenFit state
-    const TMatrixDSym& covMat = state.getCov();
-    
-    // Convert covariance matrix to EDM4hep format
-    // Only access up to 5x5 dimensions to avoid out-of-bounds errors
+    outState.location  = location;
+
+    // Reference point: GenFit fit position converted mm
+    outState.referencePoint = edm4hep::Vector3f(
+        pos.X() * 10.0f,   // cm → mm
+        pos.Y() * 10.0f,
+        pos.Z() * 10.0f);
+
+    // ---------- Covariance back-propagation 6D → 5D ----------
+    // IMPORTANT: GenFit's MeasuredStateOnPlane::getCov() returns a 5×5 matrix in the
+    // local track-representation basis [q/p, u', v', u, v].  It is NOT a 6×6 Cartesian
+    // matrix.  Calling getCov() and treating the result as 6×6 causes the
+    // "Request column(5)/row(5) outside matrix range of 0-5" errors because ROOT's
+    // TMatrixDSym only has indices 0-4 for a 5×5 matrix.
+    //
+    // The correct approach is to use getPosMomCov() which explicitly constructs the
+    // 6×6 Cartesian covariance [x,y,z,px,py,pz] from the internal representation.
+    // We then propagate this back to EDM4hep's 5D parameter space via our Jacobian.
+    {
+        // --- Get full 6×6 Cartesian covariance from GenFit ---
+        // getPosMomCov fills a 6×6 TMatrixDSym with the covariance in (x,y,z,px,py,pz)
+        // ordering.  This is safe regardless of the internal representation dimension.
+        TMatrixDSym C6sym(6);
+        {
+            TVector3 tmpPos, tmpMom;
+            state.getPosMomCov(tmpPos, tmpMom, C6sym);  // fills 6×6 Cartesian cov (x,y,z,px,py,pz)
+        }
+
+        if (msgLevel(MSG::DEBUG)) {
+            TVector3 fitPos = state.getPos();
+            TVector3 fitMom = state.getMom();
+            debug() << "  GenFit fitted pos (cm)    : (" << fitPos.X() << ", " << fitPos.Y() << ", " << fitPos.Z()
+                    << ")  |p|=" << fitMom.Mag() << " GeV/c  pT=" << fitMom.Perp() << " GeV/c" << endmsg;
+            debug() << "  GenFit fitted cov σ (C6)  :"
+                    << "  x="  << std::sqrt(std::max(0., C6sym(0,0))) << " cm"
+                    << "  y="  << std::sqrt(std::max(0., C6sym(1,1))) << " cm"
+                    << "  z="  << std::sqrt(std::max(0., C6sym(2,2))) << " cm"
+                    << "  px=" << std::sqrt(std::max(0., C6sym(3,3))) << " GeV/c"
+                    << "  py=" << std::sqrt(std::max(0., C6sym(4,4))) << " GeV/c"
+                    << "  pz=" << std::sqrt(std::max(0., C6sym(5,5))) << " GeV/c" << endmsg;
+        }
+
+        // Copy to plain TMatrixD for subsequent multiplications
+        TMatrixD C6(6, 6);
+        for (int i = 0; i < 6; ++i)
+            for (int j = 0; j < 6; ++j)
+                C6(i, j) = C6sym(i, j);
+
+        // --- Jacobian ∂(x,y,z,px,py,pz)/∂(d0,phi,omega,z0,tanLambda) ---
+        // GenFit stores position in cm and momentum in GeV/c.
+        // EDM4hep stores d0,z0 in mm; omega in 1/mm; phi,tanLambda dimensionless.
+        // We work in cm/GeV throughout and scale at the end.
+        constexpr double mm2cm = 0.1;   // factor for mm → cm conversions
+        double dpTdomega_inv = (std::abs(omega) > 1e-10) ? -pt / omega : 0.0;
+        double momDirX = (pt > 1e-10) ? px / pt : 1.0;
+        double momDirY = (pt > 1e-10) ? py / pt : 0.0;
+
+        TMatrixD J(6, 5);
+        J.Zero();
+        // Row 0: ∂x/∂(d0,phi,omega,z0,tanL) — d0 in mm → multiply by mm2cm
+        J(0, 0) = -std::sin(phi) * mm2cm;
+        J(0, 1) = -d0 * std::cos(phi) * mm2cm;
+        // Row 1: ∂y
+        J(1, 0) =  std::cos(phi) * mm2cm;
+        J(1, 1) = -d0 * std::sin(phi) * mm2cm;
+        // Row 2: ∂z — z0 in mm
+        J(2, 3) =  mm2cm;
+        // Row 3: ∂px
+        J(3, 1) = -py;
+        J(3, 2) =  momDirX * dpTdomega_inv;
+        // Row 4: ∂py
+        J(4, 1) =  px;
+        J(4, 2) =  momDirY * dpTdomega_inv;
+        // Row 5: ∂pz
+        J(5, 2) =  tanLambda * dpTdomega_inv;
+        J(5, 4) =  pt;
+
+        TMatrixD JT(TMatrixD::kTransposed, J);    // 5×6
+
+    // Pseudo-inverse: C5 = (J^T J)^{-1} J^T C6 J (J^T J)^{-1}
+    // All steps use explicit Mult() to avoid ROOT operator* dimension errors
+    TMatrixD JtJ(5, 5);
+    JtJ.Mult(JT, J);                           // (5×6)·(6×5) = 5×5
+    TMatrixD JtJ_inv(TMatrixD::kInverted, JtJ);
+
+    TMatrixD JtC6(5, 6);
+    JtC6.Mult(JT, C6);                         // (5×6)·(6×6) = 5×6
+    TMatrixD JtC6J(5, 5);
+    JtC6J.Mult(JtC6, J);                       // (5×6)·(6×5) = 5×5
+
+    TMatrixD tmpL(5, 5);
+    tmpL.Mult(JtJ_inv, JtC6J);                 // 5×5
+    TMatrixD C5mat(5, 5);
+    C5mat.Mult(tmpL, JtJ_inv);                 // 5×5
+
+    // Fill EDM4hep covariance; D0(col 0) and Z0(col 3) are in mm→ scale ×100 per axis
     for (int i = 0; i < 5; ++i) {
         for (int j = 0; j <= i; ++j) {
-            // Apply appropriate scaling based on parameter type
-            double value = covMat(i, j);
-            
-            // Scale position elements from cm² to mm²
-            if (i >= 3 && j >= 3) {
-                value *= 100.0;  // cm² to mm²
-            }
-            // Scale mixed position-momentum elements
-            else if (i >= 3 || j >= 3) {
-                value *= 10.0;   // cm to mm for mixed terms
-            }
-            
-            // Set covariance matrix element
-            outState.setCovMatrix(value, 
-                               static_cast<edm4hep::TrackParams>(i), 
-                               static_cast<edm4hep::TrackParams>(j));
+            double v = 0.5 * (C5mat(i,j) + C5mat(j,i));
+            auto scaleRow = [](int k) { return (k == 0 || k == 3) ? 100.0 : 1.0; };
+            v *= scaleRow(i) * scaleRow(j);
+            outState.setCovMatrix(v,
+                static_cast<edm4hep::TrackParams>(i),
+                static_cast<edm4hep::TrackParams>(j));
         }
     }
-*/     
-    debug() << "Converted track state: d0=" << d0 << "mm, phi=" << phi 
-           << ", omega=" << omega << "1/mm, z0=" << z0 
-           << "mm, tanLambda=" << tanLambda << endmsg;
+
+    // Debug: print EDM4hep 5×5 covariance diagonal
+    if (msgLevel(MSG::DEBUG)) {
+        double v_d0    = outState.getCovMatrix(edm4hep::TrackParams::d0,        edm4hep::TrackParams::d0);
+        double v_phi   = outState.getCovMatrix(edm4hep::TrackParams::phi,       edm4hep::TrackParams::phi);
+        double v_omega = outState.getCovMatrix(edm4hep::TrackParams::omega,     edm4hep::TrackParams::omega);
+        double v_z0    = outState.getCovMatrix(edm4hep::TrackParams::z0,        edm4hep::TrackParams::z0);
+        double v_tanL  = outState.getCovMatrix(edm4hep::TrackParams::tanLambda, edm4hep::TrackParams::tanLambda);
+        debug() << "  EDM4hep output cov σ (C5) :"
+                << "  d0="    << std::sqrt(std::max(0., v_d0))    << " mm"
+                << "  phi="   << std::sqrt(std::max(0., v_phi))   << " rad"
+                << "  ω="     << std::sqrt(std::max(0., v_omega)) << " 1/mm"
+                << "  z0="    << std::sqrt(std::max(0., v_z0))    << " mm"
+                << "  tanL="  << std::sqrt(std::max(0., v_tanL))  << endmsg;
+    }
+
+    } // end covariance block
+
+    debug() << "  EDM4hep params    :"
+            << "  d0="     << d0      << " mm"
+            << "  phi="    << phi     << " rad"
+            << "  ω="      << omega   << " 1/mm"
+            << "  z0="     << z0      << " mm"
+            << "  tanL="   << tanLambda << endmsg;
     
     return outState;
 }
@@ -2599,26 +3005,104 @@ bool DisplacedTracking::fitTrackWithGenFit(
         // Create a track representation
         genfit::AbsTrackRep* rep = new genfit::RKTrackRep(pdgCode);
         //genfit::AbsTrackRep* rep = new genfit::GeaneTrackRep();  // takes more time, but more efficient with material and particle independent.
-        // Convert the seed state to GenFit format
+        // Convert seed state (EDM4hep helix params) → Cartesian (pos, mom) for GenFit
         genfit::MeasuredStateOnPlane seedGFState = convertToGenFitState(seedState, rep);
+        TVector3 pos = seedGFState.getPos();  // cm
+        TVector3 mom = seedGFState.getMom();  // GeV/c
 
-        // Extract position and momentum from the MeasuredStateOnPlane
-        TVector3 pos = seedGFState.getPos();
-        TVector3 mom = seedGFState.getMom();
+        // Build 6D state vector [x, y, z, px, py, pz]
+        TVectorD stateVec(6);
+        stateVec[0] = pos.X();  stateVec[1] = pos.Y();  stateVec[2] = pos.Z();
+        stateVec[3] = mom.X();  stateVec[4] = mom.Y();  stateVec[5] = mom.Z();
 
-        debug() << "Pos initialization:" << endmsg;
-        pos.Print();
-        debug() << "Mom initialization:" << endmsg;
-        mom.Print();
-        
-        //------------------------------------------------------------------
-        // Create a GenFit track with the seed hits (no extrapolation)
-        //------------------------------------------------------------------
-        
-        debug() << "Building final track with " << hits.size() << " seed hits" << endmsg;
-        
-        // Create a new GenFit track
-        genfit::Track finalGFTrack(rep, pos, mom);
+        // ── Build 6×6 Cartesian seed covariance from seed state's EDM4hep covariance ──
+        // We propagate the 5D EDM4hep cov C5 to Cartesian via the analytic Jacobian
+        //   J = ∂(x,y,z,px,py,pz)/∂(d0,phi,ω,z0,tanλ)
+        // so that covInit = J · C5 · J^T.
+        // This replaces the old hardcoded (10% of |p|) momentum sigma.
+        TMatrixDSym covInit(6);
+        covInit.Zero();
+        {
+            // Read EDM4hep diagonal variances (units: mm², rad², (1/mm)², mm², dimensionless)
+            double var_d0   = seedState.getCovMatrix(edm4hep::TrackParams::d0,        edm4hep::TrackParams::d0);
+            double var_phi  = seedState.getCovMatrix(edm4hep::TrackParams::phi,       edm4hep::TrackParams::phi);
+            double var_om   = seedState.getCovMatrix(edm4hep::TrackParams::omega,     edm4hep::TrackParams::omega);
+            double var_z0   = seedState.getCovMatrix(edm4hep::TrackParams::z0,        edm4hep::TrackParams::z0);
+            double var_tanL = seedState.getCovMatrix(edm4hep::TrackParams::tanLambda, edm4hep::TrackParams::tanLambda);
+
+            // Apply floors (protect against unset or collapsed covariances)
+            if (var_d0   < 1e-30) var_d0   = 1.0;  // (1 mm)²
+            if (var_phi  < 1e-30) var_phi  = 0.1;
+            //if (var_om   < 1e-30) var_om   = 1e-10;  // absolute minimum
+            if (var_z0   < 1e-30) var_z0   = 1.0;
+            if (var_tanL < 1e-30) var_tanL = 0.1;
+
+            // Track parameters at ref point (mm, rad, 1/mm)
+            double phi  = seedState.phi;
+            double om   = seedState.omega;   // 1/mm, signed
+            double tanL = seedState.tanLambda;
+            double pT   = mom.Perp();        // GeV/c  (from Cartesian conversion)
+            double pMag = mom.Mag();
+
+            // ∂(px,py)/∂phi: tangent direction rotates with phi
+            //   px = pT * sin(phi_track);  phi_track depends on helix geometry
+            //   Proxy: use the actual Cartesian (px,py) directions
+            double ux = (pMag > 1e-10) ? mom.X() / pMag : 0.0;
+            double uy = (pMag > 1e-10) ? mom.Y() / pMag : 0.0;
+            double uz = (pMag > 1e-10) ? mom.Z() / pMag : 0.0;
+
+            // Position block (mm² → cm²):
+            //   σ²(x) ≈ σ²(y) ≈ σ²(d0) * mm²→cm²
+            //   σ²(z) ≈ σ²(z0) * mm²→cm²
+            const double mm2cm2 = 0.01;
+            double var_xy = std::max(var_d0 * mm2cm2, 0.1);   // floor: 0.1 cm²
+            double var_z  = std::max(var_z0 * mm2cm2, 0.1);
+            covInit(0,0) = var_xy;
+            covInit(1,1) = var_xy;
+            covInit(2,2) = var_z;
+
+            // Momentum block via Jacobian:
+            //   pT  = 0.3 * |Bz| / (|ω| * 1000)  → ∂pT/∂ω = -pT/ω
+            //   pz  = pT * tanL
+            //   σ²(pT) from σ²(ω):  var_pT = (pT/ω)² * var_om   [GeV² per (1/mm)²]
+            //   σ²(pz) from σ²(tanL): var_pz = pT² * var_tanL
+            //   σ²(phi) contributes rotation of (px,py) but not |pT|
+            double dpT_dom  = (std::abs(om) > 1e-10) ? -pT / om : 0.0;  // GeV·mm
+            double var_pT   = dpT_dom * dpT_dom * var_om;      // (GeV/c)²
+            double var_pz   = pT * pT * var_tanL;              // (GeV/c)²
+            // phi variance rotates (px,py) in the transverse plane:
+            //   px = pT*cos(φ_track), py = pT*sin(φ_track) → ∂px/∂phi ≈ -py, ∂py/∂phi ≈ px
+            double var_px_phi = mom.Y() * mom.Y() * var_phi;   // (GeV/c)²
+            double var_py_phi = mom.X() * mom.X() * var_phi;
+
+            // Combine pT magnitude uncertainty + angular uncertainty, then apply floor
+            double pT_floor = std::max(pT * 0.1, 0.1);  // 1% of pT or 0.1 GeV/c
+            double var_pT_floor = pT_floor * pT_floor;
+
+            covInit(3,3) = std::max(var_pT * ux*ux + var_px_phi, var_pT_floor);
+            covInit(4,4) = std::max(var_pT * uy*uy + var_py_phi, var_pT_floor);
+            covInit(5,5) = std::max(var_pz,                       var_pT_floor);
+        }
+
+        debug() << "─── GenFit Input ──────────────────────────────────────────────────────" << endmsg;
+        debug() << "  Seed state source : "
+                << (seedState.location == edm4hep::TrackState::AtLastHit ? "AtLastHit (4-hit circle fit)" :
+                    seedState.location == edm4hep::TrackState::AtFirstHit ? "AtFirstHit (3-hit seed)" : "other")
+                << endmsg;
+        debug() << "  Seed pos  (cm)    : (" << pos.X() << ", " << pos.Y() << ", " << pos.Z() << ")" << endmsg;
+        debug() << "  Seed mom  (GeV/c) : (" << mom.X() << ", " << mom.Y() << ", " << mom.Z()
+                << ")  |p|=" << mom.Mag() << "  pT=" << mom.Perp() << endmsg;
+        debug() << "  Seed cov diag (σ) :"
+                << "  x="   << std::sqrt(covInit(0,0)) << " cm"
+                << "  y="   << std::sqrt(covInit(1,1)) << " cm"
+                << "  z="   << std::sqrt(covInit(2,2)) << " cm"
+                << "  px="  << std::sqrt(covInit(3,3)) << " GeV/c"
+                << "  py="  << std::sqrt(covInit(4,4)) << " GeV/c"
+                << "  pz="  << std::sqrt(covInit(5,5)) << " GeV/c" << endmsg;
+        debug() << "  Hits to fit       : " << hits.size() << endmsg;
+        debug() << "───────────────────────────────────────────────────────────────────────" << endmsg;
+
+        genfit::Track finalGFTrack(rep, stateVec, covInit);
         
         // Add all seed hits to the track
         for (size_t i = 0; i < hits.size(); ++i) {
@@ -2661,131 +3145,202 @@ bool DisplacedTracking::fitTrackWithGenFit(
         }
         
         //------------------------------------------------------------------
-        // Fit the track with GenFit
+        // Fit the track with GenFit (KalmanFitterRefTrack)
         //------------------------------------------------------------------
-        
-        // Create and configure Kalman fitter
         genfit::KalmanFitterRefTrack fitter;
-        //genfit::DAF fitter;
         fitter.setMaxIterations(m_maxFitIterations);
         fitter.setMinIterations(3);
-        //fitter.setDebugLvl(m_debugLevel); 
-        //fitter.setBlowUpMaxVal(1000.0);
-        
-        // Perform the fit
-        debug() << "Starting GenFit Kalman fitting with " << finalGFTrack.getNumPoints() << " hits" << endmsg;
-        fitter.processTrack(&finalGFTrack);
 
-        //Process forward fit
-        genfit::Track forwardTrack = finalGFTrack;
-        //genfitFitter_->processTrack(&forwardTrack);
+        debug() << "─── GenFit Kalman Fit ─────────────────────────────────────────────────" << endmsg;
+        debug() << "  Fitter            : KalmanFitterRefTrack"
+                << "  max_iter=" << m_maxFitIterations << "  min_iter=3" << endmsg;
+        debug() << "  Points in track   : " << finalGFTrack.getNumPoints() << endmsg;
+        std::string capturedStderr;
+        {
+            // Save original stderr fd
+            int savedStderr = dup(STDERR_FILENO);
+            // Create a pipe to capture stderr
+            int pipefd[2];
+            if (pipe(pipefd) == 0) {
+                dup2(pipefd[1], STDERR_FILENO);
+                close(pipefd[1]);
 
+                fitter.processTrack(&finalGFTrack);
 
-        // Process backward fit
-        genfit::Track backwardTrack = forwardTrack;
-        backwardTrack.reverseTrack();
-        fitter.processTrack(&backwardTrack);
+                // Restore stderr — flush both C and C++ stderr before restoring
+                fflush(stderr);
+                std::cerr.flush();
+                dup2(savedStderr, STDERR_FILENO);
+                close(savedStderr);
+
+                // Read captured output
+                // Set non-blocking and drain the pipe
+                fcntl(pipefd[0], F_SETFL, O_NONBLOCK);
+                char buf[4096];
+                ssize_t n;
+                while ((n = read(pipefd[0], buf, sizeof(buf)-1)) > 0) {
+                    buf[n] = '\0';
+                    capturedStderr += buf;
+                }
+                close(pipefd[0]);
+
+                // If anything was captured, print it at warning level
+                if (!capturedStderr.empty()) {
+                    warning() << "GenFit stderr during fit: " << capturedStderr << endmsg;
+                }
+            } else {
+                // pipe() failed — just run without capture
+                close(savedStderr);
+                fitter.processTrack(&finalGFTrack);
+            }
+        }
+
+        // ---- Backward fit is commented out for now ----
+        // The forward fit is sufficient for the muon system seed quality.
+        // A proper bidirectional smooth requires combining forward+backward states
+        // at each measurement site (smoothing step), which GenFit's KalmanFitterRefTrack
+        // supports via processTrackWithRep with bidir=true.  Enable when convergence is stable.
+        //
+        // genfit::Track backwardTrack = finalGFTrack;
+        // backwardTrack.reverseTrack();
+        // fitter.processTrack(&backwardTrack);
 
         // Check fit quality
+        // processTrack() swallows ill-conditioned exceptions internally and sets isFitted=false.
+        // We detect Cholesky failures by capturing stderr during processTrack (GenFit prints to stderr).
         if (!finalGFTrack.getFitStatus()->isFitted()) {
-            warning() << "GenFit track fitting failed" << endmsg;
+            // Classify: ill-conditioned covariance vs other failure.
+            // The stderr output from processTrack was already captured in capturedStderr above.
+            if (capturedStderr.find("ill-conditioned") != std::string::npos ||
+                capturedStderr.find("not positive definite") != std::string::npos ||
+                capturedStderr.find("TDecompChol") != std::string::npos) {
+                warning() << "GenFit fit failed: ill-conditioned covariance (Cholesky failure)" << endmsg;
+                m_statGenFitIllCond++;
+            } else {
+                warning() << "GenFit track fitting failed (isFitted=false)" << endmsg;
+                m_statGenFitFailed++;
+            }
             return false;
         }
         
         // Get fit quality metrics
         double chi2 = finalGFTrack.getFitStatus()->getChi2();
-        int ndf = finalGFTrack.getFitStatus()->getNdf();
-        
-        debug() << "Track fitted successfully: chi2=" << chi2 
-                << ", ndf=" << ndf << ", chi2/ndf=" << (chi2/(ndf*1.0)) << endmsg;
-        
-        // Update the EDM4hep track with fit results
+        int ndf     = finalGFTrack.getFitStatus()->getNdf();
+        double chi2ndf = (ndf > 0) ? chi2 / ndf : -1.0;
+
+        debug() << "─── GenFit Result ─────────────────────────────────────────────────────" << endmsg;
+        debug() << "  Fit status        : " << (finalGFTrack.getFitStatus()->isFitted() ? "FITTED" : "FAILED") << endmsg;
+        debug() << "  chi2=" << std::fixed << std::setprecision(3) << chi2
+                << "  ndf=" << ndf
+                << "  chi2/ndf=" << chi2ndf << endmsg;
+
+        // Accumulate chi2/ndf for run statistics (store as integer × 1000 to keep atomic)
+        // Cap at chi2/ndf < 1000 to exclude numerically blown-up fits that are still
+        // flagged isFitted=true but have non-physical covariances.
+        // NOTE: GenFit chi2 is purely from position measurement residuals, NOT momentum.
+        // A huge chi2/ndf indicates the track model doesn't describe the hits well.
+        if (ndf > 0) {
+            if (chi2ndf < 1000.0) {
+                m_statGenFitChi2Count++;
+                m_statGenFitChi2Sum += static_cast<long long>(chi2ndf * 1000.0);
+                debug() << "  Running avg chi2/ndf=" << std::fixed << std::setprecision(3)
+                        << (m_statGenFitChi2Sum.load() / 1000.0 / m_statGenFitChi2Count.load())
+                        << "  (over " << m_statGenFitChi2Count.load() << " tracks)" << endmsg;
+            } else {
+                warning() << "  Non-physical chi2/ndf=" << std::fixed << std::setprecision(1) << chi2ndf
+                          << "  (chi2=" << chi2 << "  ndf=" << ndf << ") — excluded from average" << endmsg;
+                m_statGenFitChi2BadCount++;
+            }
+        }
+
+        // ---- Update chi2/ndf on the EDM4hep track ----
         finalTrack.setChi2(chi2);
         finalTrack.setNdf(ndf);
 
-        // Copy hits into output collection so PODIO can resolve the relation
-        for (const auto& hit : hits) {
-            auto outHit = outputHits.create();
-            outHit.setCellID(hit.getCellID()); outHit.setTime(hit.getTime());
-            outHit.setEDep(hit.getEDep()); outHit.setEDepError(hit.getEDepError());
-            outHit.setPosition(hit.getPosition()); outHit.setCovMatrix(hit.getCovMatrix());
-            outHit.setDu(hit.getDu()); outHit.setDv(hit.getDv());
-            propagateLink(outHit, hit);
-            finalTrack.addToTrackerHits(outHit);
-        }
-        // Add the original seed state to the track
-        edm4hep::TrackState seedStateCopy = seedState;
-        seedStateCopy.location = edm4hep::TrackState::AtFirstHit;  // Mark it as "other" location
-        finalTrack.addToTrackStates(seedStateCopy);
-        /*
-        // Get the track states at key positions and add them to EDM4hep track
-        try {
-            // State at first hit
-            //if (finalGFTrack.getNumPoints() > 0) {
-            //    genfit::MeasuredStateOnPlane stateFirst = 
-            //        finalGFTrack.getFittedState(0);
-            //    edm4hep::TrackState firstState = convertToEDM4hepState(stateFirst, 
-            //                                                          edm4hep::TrackState::AtFirstHit);
-            //    finalTrack.addToTrackStates(firstState);
-            //}
-            
-            try {
-                // Create a plane at the IP (origin)
-                TVector3 ipOrigin(0.0, 0.0, 0.0);  // IP at origin in cm
-                //TVector3 ipNormal(0.0, 0.0, 1.0);  // Normal vector pointing in z-direction
-                //genfit::SharedPlanePtr ipPlane(new genfit::DetPlane(ipOrigin, ipNormal));
-
-                genfit::AbsTrackRep* backwardRep = backwardTrack.getTrackRep(0);
-
-                auto stateAtIP = backwardTrack.getFittedState(backwardTrack.getNumPoints()-1);
-                //backwardRep->extrapolateToPoint(fittedState, IP);
-
-                // Extrapolate to the IP plane
-                //rep->extrapolateToPlane(stateAtIP, ipPlane);
-                backwardRep->extrapolateToPoint(stateAtIP, ipOrigin);
-                /*
-                fittedState.getPosMomCov(gen_position, gen_momentum, covariancePosMom);
-                auto stateVecIP = fittedState.getState();
-
-                    gen_momentum.SetX(-gen_momentum.X());
-                    gen_momentum.SetY(-gen_momentum.Y());
-                    gen_momentum.SetZ(-gen_momentum.Z());
-                */
-                /*
-                // Convert to EDM4hep format and save
-                edm4hep::TrackState ipState = convertToEDM4hepState(stateAtIP, 
-                                                                edm4hep::TrackState::AtIP);
-                finalTrack.addToTrackStates(ipState);
-                
-                debug() << "Successfully saved state at IP" << endmsg;
-                
-            } catch (genfit::Exception& e) {
-                warning() << "Failed to extrapolate to IP: " << e.what() 
-                        << " - only first hit state saved" << endmsg;
+        // Copy hits into output collection (only if not already filled by the seed fallback path)
+        if (finalTrack.trackerHits_size() == 0) {
+            for (const auto& hit : hits) {
+                auto outHit = outputHits.create();
+                outHit.setCellID(hit.getCellID()); outHit.setTime(hit.getTime());
+                outHit.setEDep(hit.getEDep()); outHit.setEDepError(hit.getEDepError());
+                outHit.setPosition(hit.getPosition()); outHit.setCovMatrix(hit.getCovMatrix());
+                outHit.setDu(hit.getDu()); outHit.setDv(hit.getDv());
+                propagateLink(outHit, hit);
+                finalTrack.addToTrackerHits(outHit);
             }
-            
-           
-            // State at last hit
-            //if (finalGFTrack.getNumPoints() > 1) {
-            //    genfit::MeasuredStateOnPlane stateLast = 
-            //        finalGFTrack.getFittedState(finalGFTrack.getNumPoints() - 1);
-            //    edm4hep::TrackState lastState = convertToEDM4hepState(stateLast, 
-            //                                                         edm4hep::TrackState::AtLastHit); // change it AtLastHit is already taken for 4-hit case 
-            //    finalTrack.addToTrackStates(lastState);
-            //}
-             
-        } catch (genfit::Exception& e) {
-            warning() << "Error extracting track states: " << e.what() << endmsg;
-            // Continue anyway - we'll use what we have
         }
-        */
-        debug() << "Successfully created " << finalTrack.trackStates_size() 
-                << " track states from GenFit fit" << endmsg;
+
+        // ----------------------------------------------------------------
+        // Save GenFit fitted states.
+        // Convention:
+        //   • AtFirstHit  → fitted state at first measurement (innermost hit in outer muon system)
+        //   • AtLastHit   → fitted state at last  measurement (used only if no 4-hit circle fit)
+        //   • AtOther     → GenFit fitted state at first hit (labelled separately so we can compare
+        //                    with the analytical seed which is also stored at AtFirstHit)
+        //
+        // We do NOT overwrite any state that was already added by the seeding / 4-hit circle fit
+        // (those are preserved for comparison).  Instead we use AtOther for the GenFit output.
+        // Inner-propagation result will be saved at AtVertex (see propagation section below).
+        // ----------------------------------------------------------------
+
+        // Determine which locations are already occupied in this track
+        auto hasLocation = [&](int loc) {
+            for (int j = 0; j < finalTrack.trackStates_size(); ++j)
+                if (finalTrack.getTrackStates(j).location == loc) return true;
+            return false;
+        };
+
+        // ---- State at first measurement ----
+        if (finalGFTrack.getNumPoints() > 0) {
+            try {
+                genfit::MeasuredStateOnPlane stateFirst = finalGFTrack.getFittedState(0);
+                // Save as AtOther so it does not overwrite the analytical AtFirstHit seed
+                edm4hep::TrackState gfFirst = convertToEDM4hepState(stateFirst,
+                                                    edm4hep::TrackState::AtOther);
+                // Only add if AtOther is not yet used (inner propagation uses it later)
+                if (!hasLocation(edm4hep::TrackState::AtOther)) {
+                    finalTrack.addToTrackStates(gfFirst);
+                    debug() << "  Saved fitted state : AtOther (first measurement)" << endmsg;
+                } else {
+                    finalTrack.addToTrackStates(gfFirst);
+                    debug() << "  Saved fitted state : AtOther (additional)" << endmsg;
+                }
+            } catch (genfit::Exception& e) {
+                warning() << "Could not extract fitted state at first hit: " << e.what() << endmsg;
+            }
+        }
+
+        // ---- State at last measurement ----
+        // AtLastHit is RESERVED for the 4-hit analytical circle fit (set earlier in findTracks).
+        // GenFit's fitted state at the last measurement is NOT stored here to keep the semantics
+        // clean: AtFirstHit = analytical seed, AtLastHit = 4-hit circle, AtOther = GenFit at first hit.
+        // For 3-hit tracks the last-measurement GenFit state is redundant (very close to AtOther).
+        // Only add it if the 4-hit circle fit already filled AtLastHit (i.e. it's a 4-hit track)
+        // in which case we add the GenFit last-hit state at AtOther2 — but since EDM4hep has no
+        // second AtOther slot, we simply skip it. Summary: for 3-hit tracks, no AtLastHit is stored.
+        if (finalGFTrack.getNumPoints() > 1 && hasLocation(edm4hep::TrackState::AtLastHit)) {
+            // 4-hit track: AtLastHit already has the circle fit; optionally compare with GenFit last.
+            // Currently skipped — the circle fit is the preferred reference.
+            debug() << "Skipping GenFit AtLastHit add (4-hit circle fit already occupies AtLastHit)" << endmsg;
+        }
+
+        debug() << "  Track states total : " << finalTrack.trackStates_size()
+                << "  hits: " << finalTrack.trackerHits_size() << endmsg;
+        debug() << "───────────────────────────────────────────────────────────────────────" << endmsg;
         
         return true;
         
     } catch (genfit::Exception& e) {
-        error() << "GenFit exception during track fitting: " << e.what() << endmsg;
+        std::string exMsg = e.what();
+        // Distinguish ill-conditioned covariance (Cholesky failure) from other errors
+        if (exMsg.find("ill-conditioned") != std::string::npos ||
+            exMsg.find("not positive definite") != std::string::npos) {
+            warning() << "GenFit: ill-conditioned covariance matrix (numerics): " << exMsg << endmsg;
+            m_statGenFitIllCond++;
+        } else {
+            error() << "GenFit exception during track fitting: " << exMsg << endmsg;
+            m_statGenFitException++;
+        }
         return false;
     }
 }
@@ -2885,7 +3440,8 @@ bool DisplacedTracking::findCompatibleExtraHit(
 
 bool DisplacedTracking::fitCircleToFourHits(
     const std::vector<edm4hep::TrackerHitPlane>& hits,
-    double& x0, double& y0, double& radius, double& chi2) const {
+    double& x0, double& y0, double& radius, double& chi2,
+    Eigen::Matrix3d& fitCov3x3) const {
     
     if (hits.size() != 4) {
         warning() << "fitCircleToFourHits expects exactly 4 hits, got " << hits.size() << endmsg;
@@ -3019,6 +3575,29 @@ bool DisplacedTracking::fitCircleToFourHits(
     x0 = params(0);
     y0 = params(1);
     radius = params(2);
+
+    // ── Compute fit covariance on [x0, y0, R] from the final Gauss-Newton Jacobian ──
+    // Cov(params) = (J^T W J)^{-1}  where W=diag(w_i) from the WLS weights.
+    // Build the final J at the converged parameters.
+    {
+        Eigen::MatrixXd Jf(4, 3);
+        for (int i = 0; i < 4; ++i) {
+            double xi = points[i].x(), yi = points[i].y();
+            double dx = xi - x0, dy = yi - y0;
+            double dist = std::sqrt(dx*dx + dy*dy);
+            double w = std::sqrt(weights(i));
+            if (dist > 1e-12) {
+                Jf(i,0) = -w * dx / dist;
+                Jf(i,1) = -w * dy / dist;
+                Jf(i,2) = -w;
+            } else {
+                Jf(i,0) = Jf(i,1) = Jf(i,2) = 0;
+            }
+        }
+        Eigen::Matrix3d JtJ = Jf.transpose() * Jf;
+        // Use pseudo-inverse via LDLT (should be full-rank for a good fit)
+        fitCov3x3 = JtJ.ldlt().solve(Eigen::Matrix3d::Identity());
+    }
 
     dd4hep::Position fieldPos(0, 0, 0);  // Default center position      
     // Use average position of hits for better field estimate

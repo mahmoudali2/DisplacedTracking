@@ -55,33 +55,43 @@ public:
     }
     
     /**
-     * Get material parameters at current position
+     * Get material parameters at current position.
+     * Returns vacuum-equivalent material when the position is outside the
+     * world volume (materialAt throws in that case).
      */
     virtual genfit::Material getMaterialParameters() override {
-        // Get material at current position
-        dd4hep::Material material = m_manager->materialAt(m_currentPos);
-        
-        // Convert to GenFit Material
-        double density = material.density() / (dd4hep::g/dd4hep::cm3); // Convert to g/cm³
-        double Z = material.Z();
-        double A = material.A() / (dd4hep::g/dd4hep::mole); // Convert to g/mole
-        double radiationLength = material.radLength() / dd4hep::cm; // Convert to cm
-        double meanExcitationEnergy = 16.0e-9 * pow(Z, 0.9); // Approximation in GeV
-        
-        return genfit::Material(density, Z, A, radiationLength, meanExcitationEnergy);
+        try {
+            dd4hep::Material material = m_manager->materialAt(m_currentPos);
+            double density  = material.density() / (dd4hep::g/dd4hep::cm3);
+            double Z        = material.Z();
+            double A        = material.A() / (dd4hep::g/dd4hep::mole);
+            double radLen   = material.radLength() / dd4hep::cm;
+            double meanExcE = 16.0e-9 * std::pow(Z, 0.9);  // approximate, in GeV
+            return genfit::Material(density, Z, A, radLen, meanExcE);
+        } catch (...) {
+            // Position is outside the geometry world — return vacuum
+            return genfit::Material(0.0, 0.0, 1.0, 1e9, 1e-9);
+        }
     }
     
     /**
-    * Find distance to next material boundary
-    * For the moment putting no near boundaries 
-    */
-    virtual double findNextBoundary(const genfit::RKTrackRep* rep,
+     * Find distance to next material boundary.
+     *
+     * Returns a step limit that prevents GenFit's RK integrator from jumping
+     * over a material boundary.  We use a conservative fixed step of 0.5 cm
+     * in the muon system — small enough to capture boundaries but large enough
+     * to keep the step count reasonable.  A full boundary-search would need
+     * per-step geometry traversal that is expensive; for the muon system the
+     * simple cap is adequate.
+     */
+    virtual double findNextBoundary(const genfit::RKTrackRep* /*rep*/,
                                 const genfit::M1x7& state7,
                                 double step,
-                                bool varField) override {
-
-       // Default large distance (10m)
-       return 1.0e6; 
+                                bool /*varField*/) override {
+        // Clamp to a conservative maximum step
+        // state7 = {x, y, z, px/p, py/p, pz/p, q/p} in cm
+        const double maxStep = 0.5;  // cm — safe for the muon detector geometry
+        return std::min(std::abs(step), maxStep);
     }
     
 private:
