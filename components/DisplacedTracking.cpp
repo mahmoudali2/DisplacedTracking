@@ -376,8 +376,9 @@ StatusCode DisplacedTracking::finalize() {
     double avgChi2ndf = (nGFChi2N > 0) 
                         ? (m_statGenFitChi2Sum.load() / 1000.0) / nGFChi2N 
                         : 0.0;
-    int nBadGeom = m_statTripletBadGeom.load();
-    int nPTCut   = m_statTripletsCutByPT.load();
+    int nBadGeom  = m_statTripletBadGeom.load();
+    int nPTCut    = m_statTripletsCutByPT.load();
+    int nAngRej   = m_statAngleGuardRejected.load();
     double trkPerEvt = (nEvt>0)   ? double(nTrk)/double(nEvt) : 0.0;
     double seedEff   = (nCombos>0)? 100.0*double(nValid)/double(nCombos) : 0.0;
     double innerFrac = (nTrk>0)   ? 100.0*double(nInner)/double(nTrk) : 0.0;
@@ -407,6 +408,7 @@ StatusCode DisplacedTracking::finalize() {
         << "║  TRIPLET SEEDING                                         ║\n"
         << "║    Combinations tried         : " << std::setw(7) << nCombos << "                   ║\n"
         << "║    Valid triplets formed      : " << std::setw(7) << nValid  << "  (" << std::setw(5) << std::fixed << std::setprecision(1) << seedEff  << "% efficiency)  ║\n"
+        << "║    Rejected by angle guard    : " << std::setw(7) << nAngRej << "                   ║\n"
         << "║    Marginal geometry (warned) : " << std::setw(7) << nBadGeom << "                   ║\n"
         << "║    Rejected by MaxSeedPT cut  : " << std::setw(7) << nPTCut  << "                   ║\n"
         << "╠══════════════════════════════════════════════════════════╣\n"
@@ -417,7 +419,7 @@ StatusCode DisplacedTracking::finalize() {
         << "║  TRACK STATES STORED                                     ║\n"
         << "║    AtFirstHit  (seed state)   : " << std::setw(7) << nSF     << "                   ║\n"
         << "║    AtLastHit   (4-hit circle) : " << std::setw(7) << nSL     << "                   ║\n"
-        << "║    AtCalorimeter              : " << std::setw(7) << nSC     << "                   ║\n"
+        << "║    AtCalorimeter (direct fit) : " << std::setw(7) << nSC     << "                   ║\n"
         << "║    AtOther     (GenFit fit)   : " << std::setw(7) << nSO     << "                   ║\n"
         << "║    AtVertex    (inner prop.)  : " << std::setw(7) << nSV     << "                   ║\n"
         << "╠══════════════════════════════════════════════════════════╣\n"
@@ -740,8 +742,10 @@ void DisplacedTracking::findTracks(
         }
         
         info() << "Remaining unused hits: " << remainingHits << endmsg;
-        for (const auto& [layer, count] : unusedHitsPerLayer) {
-            info() << "  Layer " << layer << ": " << count << " unused hits" << endmsg;
+        if (msgLevel(MSG::DEBUG)) {
+            for (const auto& [layer, count] : unusedHitsPerLayer) {
+                debug() << "  Layer " << layer << ": " << count << " unused hits" << endmsg;
+            }
         }
         
         if (remainingHits < 3) {
@@ -871,7 +875,7 @@ void DisplacedTracking::findTracks(
         // -------------------------------------------------------------------------
         // Try to seed from the INNER layers (0,1,2) first (across all composites)
         // -------------------------------------------------------------------------
-        info() << "Phase A: Trying inner-layer seeding (layers 0,1,2) for iteration " << trackNumber << "..." << endmsg;
+        debug() << "Phase A: Trying inner-layer seeding (layers 0,1,2) for iteration " << trackNumber << "..." << endmsg;
 
         // Determine availability in layers 0,1,2 and layer3
         int layer0Count = hitsByLayerNumber.count(0) ? hitsByLayerNumber[0].size() : 0;
@@ -882,7 +886,7 @@ void DisplacedTracking::findTracks(
         // Case 1: we have hits in all inner three layers -> form all combinations [layer0 x layer1 x layer2],
         // pick the single best triplet (highest pT), mark its hits used and add it as a candidate.
         if (layer0Count > 0 && layer1Count > 0 && layer2Count > 0) {
-            info() << "Inner layers 0,1,2 have unused hits. Forming triplets from these layers and selecting best pT." << endmsg;
+            debug() << "Inner layers 0,1,2 have unused hits. Forming triplets from these layers and selecting best pT." << endmsg;
 
             std::vector<TrackCandidate> innerCandidates;
             // iterate all combinations using aggregated layer lists (which reference allHitInfo indices)
@@ -945,7 +949,7 @@ void DisplacedTracking::findTracks(
                     if (innerCandidates.size() > 1) evtUsedPtInner = true;
                 }
             } else {
-                info() << "No valid inner triplet seeds found in layers 0,1,2 for iteration " << trackNumber << endmsg;
+                debug() << "No valid inner triplet seeds found in layers 0,1,2 for iteration " << trackNumber << endmsg;
             }
         }
         // Case 2: fewer than 3 hits across layers 0..2 -> allow third hit from layer 3 (if present)
@@ -1016,10 +1020,10 @@ void DisplacedTracking::findTracks(
                     m_statInnerSeedUsed++;
                     if (kept.size() > 1) evtUsedPtInner2 = true;
                 } else {
-                    info() << "No valid triplets formed from inner+layer3 strategy for iteration " << trackNumber << endmsg;
+                    debug() << "No valid triplets formed from inner+layer3 strategy for iteration " << trackNumber << endmsg;
                 }
             } else {
-                info() << "Not enough inner hits (or no layer3) to form inner-preferred triplets for iteration " << trackNumber << "; will proceed to Phase 1/2 fallback." << endmsg;
+                debug() << "Not enough inner hits (or no layer3) to form inner-preferred triplets for iteration " << trackNumber << "; will proceed to Phase 1/2 fallback." << endmsg;
             }
         }
 
@@ -1033,7 +1037,7 @@ void DisplacedTracking::findTracks(
             int consecutiveTriplets = 0;
             int maxEarlyLayersToTry = std::min(size_t(5), compositeLayerIDs.size());
 
-            info() << "Phase 1: Testing consecutive layer triplets for iteration " << trackNumber << "..." << endmsg;
+            debug() << "Phase 1: Testing consecutive layer triplets for iteration " << trackNumber << "..." << endmsg;
 
             for (size_t i = 0; i + 2 < compositeLayerIDs.size() && i < (size_t)std::max(0, maxEarlyLayersToTry - 2); ++i) {
                 int composite1 = compositeLayerIDs[i];
@@ -1154,7 +1158,7 @@ void DisplacedTracking::findTracks(
                     foundGoodConsecutiveTriplets = true;
                     if (isInnerLayerTriplet) {
                         foundInnerLayerTriplets = true;
-                        info() << "Found " << (validTriplets - tripletsBefore) 
+                        debug() << "Found " << (validTriplets - tripletsBefore) 
                                << " good triplets in inner layers (0,1,2) for iteration " << trackNumber << " - stopping consecutive layer tests" << endmsg;
                         // We break the top loop because we prefer inner triplets if found here
                         break;
@@ -1166,7 +1170,7 @@ void DisplacedTracking::findTracks(
             bool tryAllCombinations = !foundInnerLayerTriplets && (!foundGoodConsecutiveTriplets || compositeLayerIDs.size() <= 3);
 
             if (tryAllCombinations) {
-                info() << "Phase 2: Trying all layer combinations for iteration " << trackNumber << " (no inner layer triplets found)..." << endmsg;
+                debug() << "Phase 2: Trying all layer combinations for iteration " << trackNumber << " (no inner layer triplets found)..." << endmsg;
 
                 for (size_t i = 0; i < compositeLayerIDs.size() - 2; ++i) {
                     for (size_t j = i + 1; j < compositeLayerIDs.size() - 1; ++j) {
@@ -1234,15 +1238,15 @@ void DisplacedTracking::findTracks(
 
                                                 trackCandidates.emplace_back(newTrack, pT, hitIndices, usedComposites);
 
-                                                if (msgLevel(MSG::INFO)) {
+                                                if (msgLevel(MSG::DEBUG)) {
                                                     int layer1 = std::abs(composite1) % 1000;
                                                     int layer2 = std::abs(composite2) % 1000;
                                                     int layer3 = std::abs(composite3) % 1000;
 
-                                                    info() << "✓ Valid triplet #" << validTriplets << " found (Phase 2) for iteration " << trackNumber << ":" << endmsg;
-                                                    info() << "  Layers: " << layer1 << " -> " << layer2 << " -> " << layer3 
+                                                    debug() << "✓ Valid triplet #" << validTriplets << " found (Phase 2) for iteration " << trackNumber << ":" << endmsg;
+                                                    debug() << "  Layers: " << layer1 << " -> " << layer2 << " -> " << layer3 
                                                            << " (composites: " << composite1 << "," << composite2 << "," << composite3 << ")" << endmsg;
-                                                    info() << "  Track pT: " << pT << " GeV/c" << endmsg;
+                                                    debug() << "  Track pT: " << pT << " GeV/c" << endmsg;
                                                 }
                                             }
                                         } catch (...) {
@@ -1255,11 +1259,11 @@ void DisplacedTracking::findTracks(
                     }
                 }
             } else if (foundInnerLayerTriplets) {
-                info() << "Phase 2: SKIPPED - Found good triplets in inner layers (0,1,2) for iteration " << trackNumber << endmsg;
+                debug() << "Phase 2: SKIPPED - Found good triplets in inner layers (0,1,2) for iteration " << trackNumber << endmsg;
             }
         } // end fallback seeding
 
-        info() << "Seed generation complete for iteration " << trackNumber << ": " << trackCandidates.size()
+        debug() << "Seed generation complete for iteration " << trackNumber << ": " << trackCandidates.size()
             << " triplet candidates from " << tripletCandidates
             << " combinations (" << validTriplets << " valid)" << endmsg;
 
@@ -1479,6 +1483,18 @@ void DisplacedTracking::findTracks(
                     << "  omega=" << seedAtFirst.omega << " 1/mm"
                     << "  z0=" << seedAtFirst.Z0 << " mm"
                     << "  tanL=" << seedAtFirst.tanLambda << endmsg;
+        }
+
+        // ── Copy AtCalorimeter (direct-formula) state from seed track ────────────
+        // The state was built inside createTripletSeed and attached to the seed
+        // track object. Transfer it now to finalTrack so the per-track counter
+        // and the ROOT output both see it.
+        for (int j = 0; j < seedTrack.trackStates_size(); ++j) {
+            if (seedTrack.getTrackStates(j).location == edm4hep::TrackState::AtCalorimeter) {
+                finalTrack.addToTrackStates(seedTrack.getTrackStates(j));
+                debug() << "Copied AtCalorimeter (direct-formula) state to finalTrack" << endmsg;
+                break;
+            }
         }
 
         // Test 4-hit circle fitting if we have at least 4 hits.
@@ -1729,7 +1745,7 @@ void DisplacedTracking::findTracks(
             if (st.location == edm4hep::TrackState::AtOther) {
                 bestState = st;
                 foundStateForProp = true;
-                info() << "Using AtOther state (GenFit fitted) for inner propagation" << endmsg;
+                debug() << "Using AtOther state (GenFit fitted) for inner propagation" << endmsg;
                 break;
             }
         }
@@ -1739,7 +1755,7 @@ void DisplacedTracking::findTracks(
                 if (st.location == edm4hep::TrackState::AtLastHit) {
                     bestState = st;
                     foundStateForProp = true;
-                    info() << "Using AtLastHit state (4-hit circle) for inner propagation" << endmsg;
+                    debug() << "Using AtLastHit state (4-hit circle) for inner propagation" << endmsg;
                     break;
                 }
             }
@@ -1750,7 +1766,7 @@ void DisplacedTracking::findTracks(
                 if (st.location == edm4hep::TrackState::AtFirstHit) {
                     bestState = st;
                     foundStateForProp = true;
-                    info() << "Using AtFirstHit state (3-hit seed) for inner propagation" << endmsg;
+                    debug() << "Using AtFirstHit state (3-hit seed) for inner propagation" << endmsg;
                     break;
                 }
             }
@@ -1893,15 +1909,15 @@ void DisplacedTracking::findTracks(
         if (hasVertex)      m_statStateAtVertex++;
         if (hasLastHit) m_statFourHitTracks++; else m_statThreeHitTracks++;
         // Count charge from the best available state
-        // (prefer AtFirstHit, fall back to AtOther, then AtLastHit)
+        // (prefer AtLastHit, fall back to AtOther, then AtFirstHit)
         {
             int chargePriority = 99;
             double chargeOmega = 0.0;
             for (int sIdx = 0; sIdx < finalTrack.trackStates_size(); ++sIdx) {
                 auto ts = finalTrack.getTrackStates(sIdx);
-                int prio = (ts.location == edm4hep::TrackState::AtFirstHit) ? 0 :
+                int prio = (ts.location == edm4hep::TrackState::AtLastHit) ? 0 :
                            (ts.location == edm4hep::TrackState::AtOther)    ? 1 :
-                           (ts.location == edm4hep::TrackState::AtLastHit)  ? 2 : 99;
+                           (ts.location == edm4hep::TrackState::AtFirstHit)  ? 2 : 99;
                 if (prio < chargePriority) {
                     chargePriority = prio;
                     chargeOmega = ts.omega;
@@ -2075,18 +2091,29 @@ bool DisplacedTracking::createTripletSeed(
         return false;
     }
     
-    // Check angle consistency
-    Eigen::Vector3d v1 = p2 - p1;
-    Eigen::Vector3d v2 = p3 - p2;
-    v1.normalize();
-    v2.normalize();
-    /*
-    double cosAngle = v1.dot(v2);
-    if (cosAngle < 0.75) { // Allow up to about 25 degrees deviation
-        debug() << "Hits not along a consistent path, angle too large" << endmsg;
-        return false;
+    // Check angle consistency in the transverse (xy) plane.
+    // A real displaced muon track bends gently between adjacent layers; a wild kink
+    // in the transverse direction signals a noise triplet.
+    // Threshold is steered by MinCosAngle2d (default 0.5, ~60 deg). Set to -1 to disable.
+    {
+        Eigen::Vector3d v1 = p2 - p1;
+        Eigen::Vector3d v2 = p3 - p2;
+        if (m_minCosAngle2d.value() > -1.0) {
+            Eigen::Vector2d v1_2d(v1.x(), v1.y());
+            Eigen::Vector2d v2_2d(v2.x(), v2.y());
+            double norm1 = v1_2d.norm();
+            double norm2 = v2_2d.norm();
+            if (norm1 > 1e-9 && norm2 > 1e-9) {
+                double cosAngle2d = v1_2d.dot(v2_2d) / (norm1 * norm2);
+                if (cosAngle2d < m_minCosAngle2d.value()) {
+                    debug() << "Triplet rejected: transverse angle too large (cosAngle2d="
+                            << cosAngle2d << " < " << m_minCosAngle2d.value() << ")" << endmsg;
+                    m_statAngleGuardRejected++;
+                    return false;
+                }
+            }
+        }
     }
-    */
     debug() << "Fitting circle through points (cm): " 
             << "(" << p1.x() << "," << p1.y() << "), "
             << "(" << p2.x() << "," << p2.y() << "), "
@@ -2105,6 +2132,11 @@ bool DisplacedTracking::createTripletSeed(
     
     debug() << "Direct formula method: center=(" << x0_direct << "," << y0_direct 
             << "), radius=" << radius_direct << " cm" << endmsg;
+
+    // ── Direct-formula diagnostic state (AtCalorimeter) ────────────────────────
+    // directValid is true here (early return above if not). The direct-formula
+    // parameters are saved unconditionally — AtCalorimeter is always produced
+    // regardless of whether the sagitta method succeeds or fails below.
     
     // Calculate using sagitta method
     double sagitta = calculateSagitta(p1, p2, p3);
@@ -2114,8 +2146,10 @@ bool DisplacedTracking::createTripletSeed(
     Eigen::Vector2d p3_2d(p3.x(), p3.y());
     double chordLength = (p3_2d - p1_2d).norm();
     
-    // Simplified sagitta radius calculation
-    double sagittaRadius = (chordLength * chordLength) / (8 * sagitta);
+    // Simplified sagitta radius (used for debug print and geometry sanity check only)
+    double sagittaRadius = (std::abs(sagitta) > 1e-6)
+        ? (chordLength * chordLength) / (8 * sagitta)
+        : radius_direct;  // fallback when sagitta ≈ 0
     
     debug() << "Sagitta method: sagitta = " << sagitta << " cm, chord = " 
             << chordLength << " cm, radius = " << sagittaRadius << " cm" << endmsg;
@@ -2126,8 +2160,13 @@ bool DisplacedTracking::createTripletSeed(
         p1, p2, p3, x0_sagitta, y0_sagitta, radius_sagitta);
     
     if (!sagittaValid) {
-        debug() << "Sagitta center calculation failed" << endmsg;
-        return false;
+        // Sagitta fails for nearly-straight high-pT tracks (sagitta ≈ 0).
+        // Fall back to the direct formula for the main track parameters.
+        // directStateReady is guaranteed true here (direct formula succeeded above).
+        debug() << "Sagitta center calculation failed — using direct formula as main fit" << endmsg;
+        x0_sagitta     = x0_direct;
+        y0_sagitta     = y0_direct;
+        radius_sagitta = radius_direct;
     }
     
     debug() << "Sagitta full method: center=(" << x0_sagitta << "," << y0_sagitta 
@@ -2232,7 +2271,7 @@ bool DisplacedTracking::createTripletSeed(
     double z0 = b; // z0 calculation remains the same
     
     debug() << "Impact parameters: d0=" << d0 << " cm, z0=" << z0 << " cm" << endmsg;
-    
+
     // Track parameters
     double qOverPt = charge / pT;
     double phi = std::atan2(y0, x0) + (clockwise ? -M_PI/2 : M_PI/2);
@@ -2393,6 +2432,70 @@ bool DisplacedTracking::createTripletSeed(
 
     // Add track state to track
     edm_track.addToTrackStates(state);
+
+    // ── Direct-formula diagnostic state (AtCalorimeter) ────────────────────────
+    // directValid is guaranteed true (early return above). Always saved.
+    {
+        // phi angles from the direct-formula center
+        double phi1_d = std::atan2(p1.y() - y0_direct, p1.x() - x0_direct);
+        double phi2_d = std::atan2(p2.y() - y0_direct, p2.x() - x0_direct);
+        double phi3_d = std::atan2(p3.y() - y0_direct, p3.x() - x0_direct);
+        // unwrap
+        if (phi2_d - phi1_d >  M_PI) phi2_d -= 2*M_PI;
+        if (phi2_d - phi1_d < -M_PI) phi2_d += 2*M_PI;
+        if (phi3_d - phi2_d >  M_PI) phi3_d -= 2*M_PI;
+        if (phi3_d - phi2_d < -M_PI) phi3_d += 2*M_PI;
+
+        // z-fit with direct-formula arc-lengths
+        double s2_d = radius_direct * std::abs(phi2_d - phi1_d);
+        double s3_d = radius_direct * std::abs(phi3_d - phi1_d);
+        double a_d, b_d;
+        fitLine(0.0, p1.z(), s2_d, p2.z(), s3_d, p3.z(), a_d, b_d);
+
+        double theta_d     = std::atan2(1.0, a_d);
+        double eta_d       = -std::log(std::tan(theta_d / 2.0));
+        double tanLambda_d = std::sinh(eta_d);
+
+        double pT_direct_val = 0.3 * std::abs(actualBz) * radius_direct / 100.0;
+        double phi_d = std::atan2(y0_direct, x0_direct) + (clockwise ? -M_PI/2 : M_PI/2);
+        if (phi_d >  M_PI) phi_d -= 2*M_PI;
+        if (phi_d < -M_PI) phi_d += 2*M_PI;
+
+        double d0_d    = std::sqrt(x0_direct*x0_direct + y0_direct*y0_direct) - radius_direct;
+        double omega_d = charge / (radius_direct * 10.0);   // 1/mm
+        double d0_d_mm = d0_d * 10.0;
+        double z0_d_mm = b_d  * 10.0;
+
+        edm4hep::TrackState stateD = createTrackState(
+            d0_d_mm, phi_d, omega_d, z0_d_mm, tanLambda_d,
+            edm4hep::TrackState::AtCalorimeter);
+        stateD.referencePoint = edm4hep::Vector3f(firstHitPos[0], firstHitPos[1], firstHitPos[2]);
+
+        // Propagate omega variance with same Jacobian used for AtFirstHit
+        {
+            auto getSigmaXY_d = [](const edm4hep::TrackerHitPlane& h) -> double {
+                double su = h.getDu(), sv = h.getDv();
+                if (su <= 0) su = 0.4;
+                if (sv <= 0) sv = 0.4;
+                return std::sqrt(su*su + sv*sv) / 10.0; // cm
+            };
+            double sigma_xy2_d = getSigmaXY_d(hit2);
+            double chordL_d    = std::sqrt(std::pow(p3.x()-p1.x(),2) + std::pow(p3.y()-p1.y(),2));
+            double sigma_R_d   = (chordL_d > 1e-3)
+                                 ? 2.0 * sigma_xy2_d * radius_direct / chordL_d
+                                 : 0.5 * radius_direct;
+            double dOmega_dR_d = -charge / (radius_direct * radius_direct * 10.0);
+            double var_omega_d = dOmega_dR_d * dOmega_dR_d * sigma_R_d * sigma_R_d;
+            var_omega_d = std::max(var_omega_d, std::pow(0.2 * std::abs(omega_d), 2));
+            stateD.setCovMatrix(var_omega_d,
+                edm4hep::TrackParams::omega, edm4hep::TrackParams::omega);
+        }
+
+        edm_track.addToTrackStates(stateD);
+        debug() << "AtCalorimeter (direct-formula): pT=" << pT_direct_val
+                << " GeV/c, d0=" << d0_d_mm << " mm, phi=" << phi_d
+                << " rad, omega=" << omega_d << " 1/mm" << endmsg;
+    }
     
     // Copy input hits into the output collection so PODIO can resolve the relation
     auto outHit1 = outputHits.create();

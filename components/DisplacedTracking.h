@@ -341,6 +341,10 @@ private:
         "Target radius in cm for inner RK4 propagation"};
     Gaudi::Property<double> m_maxSeedPT{this, "MaxSeedPT", 200.0,
         "Maximum allowed seed pT in GeV/c. Triplets above this threshold are rejected unless they are the only option, in which case the lowest-pT candidate is kept."};
+    Gaudi::Property<double> m_minCosAngle2d{this, "MinCosAngle2d", 0.5,
+        "Minimum cos(angle) between consecutive hit-segment vectors in the transverse (xy) plane for triplet seeding. "
+        "Rejects triplets where the transverse direction changes by more than acos(value). "
+        "Default 0.5 (~60 deg). Set to -1.0 to disable."};
 
     // Services
     ServiceHandle<IGeoSvc> m_geoSvc{this, "GeoSvc", "GeoSvc", "Detector geometry service"};
@@ -395,6 +399,8 @@ private:
     mutable std::atomic<int> m_statTripletBadGeom{0};
     // Triplets rejected by MaxSeedPT threshold (fallback used when all above threshold)
     mutable std::atomic<int> m_statTripletsCutByPT{0};
+    // Triplets rejected by the 2D transverse angle-consistency guard
+    mutable std::atomic<int> m_statAngleGuardRejected{0};
     // =========================================================
 
 };
