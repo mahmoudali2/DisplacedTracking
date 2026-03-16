@@ -339,6 +339,8 @@ private:
         "Propagate outer track inward through the solenoid boundary using RK4 (saves state at AtVertex)"};
     Gaudi::Property<double> m_innerPropTargetRadius{this, "InnerPropTargetRadius", 100.0,
         "Target radius in cm for inner RK4 propagation"};
+    Gaudi::Property<double> m_maxSeedPT{this, "MaxSeedPT", 200.0,
+        "Maximum allowed seed pT in GeV/c. Triplets above this threshold are rejected unless they are the only option, in which case the lowest-pT candidate is kept."};
 
     // Services
     ServiceHandle<IGeoSvc> m_geoSvc{this, "GeoSvc", "GeoSvc", "Detector geometry service"};
@@ -391,6 +393,8 @@ private:
 
     // Triplet quality: flag bad geometry (direct vs sagitta radius disagreement > 2×)
     mutable std::atomic<int> m_statTripletBadGeom{0};
+    // Triplets rejected by MaxSeedPT threshold (fallback used when all above threshold)
+    mutable std::atomic<int> m_statTripletsCutByPT{0};
     // =========================================================
 
 };

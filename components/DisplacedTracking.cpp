@@ -377,6 +377,7 @@ StatusCode DisplacedTracking::finalize() {
                         ? (m_statGenFitChi2Sum.load() / 1000.0) / nGFChi2N 
                         : 0.0;
     int nBadGeom = m_statTripletBadGeom.load();
+    int nPTCut   = m_statTripletsCutByPT.load();
     double trkPerEvt = (nEvt>0)   ? double(nTrk)/double(nEvt) : 0.0;
     double seedEff   = (nCombos>0)? 100.0*double(nValid)/double(nCombos) : 0.0;
     double innerFrac = (nTrk>0)   ? 100.0*double(nInner)/double(nTrk) : 0.0;
@@ -407,6 +408,7 @@ StatusCode DisplacedTracking::finalize() {
         << "║    Combinations tried         : " << std::setw(7) << nCombos << "                   ║\n"
         << "║    Valid triplets formed      : " << std::setw(7) << nValid  << "  (" << std::setw(5) << std::fixed << std::setprecision(1) << seedEff  << "% efficiency)  ║\n"
         << "║    Marginal geometry (warned) : " << std::setw(7) << nBadGeom << "                   ║\n"
+        << "║    Rejected by MaxSeedPT cut  : " << std::setw(7) << nPTCut  << "                   ║\n"
         << "╠══════════════════════════════════════════════════════════╣\n"
         << "║  HIT MULTIPLICITY                                        ║\n"
         << "║    Tracks with 4 hits         : " << std::setw(7) << n4hit   << "                   ║\n"
@@ -1273,6 +1275,42 @@ void DisplacedTracking::findTracks(
             info() << "No track candidates found in iteration " << trackNumber << " - stopping track search" << endmsg;
             break;
         }
+
+        // ── MaxSeedPT threshold filter ──────────────────────────────────────
+        // Reject triplets whose pT exceeds m_maxSeedPT (e.g. numerically
+        // pathological high-curvature seeds).  If ALL candidates are above
+        // the threshold we keep the single lowest-pT one as a fallback so
+        // we never silently drop a track-finding iteration.
+        if (m_maxSeedPT < std::numeric_limits<double>::max()) {
+            std::vector<TrackCandidate> below, above;
+            for (auto& tc : trackCandidates) {
+                if (tc.pT <= m_maxSeedPT) below.push_back(tc);
+                else                       above.push_back(tc);
+            }
+
+            if (!below.empty()) {
+                // Normal case: some candidates pass the cut
+                int nCut = static_cast<int>(above.size());
+                if (nCut > 0) {
+                    info() << "MaxSeedPT filter: rejected " << nCut
+                           << " triplet(s) with pT > " << m_maxSeedPT << " GeV/c for iteration " << trackNumber << endmsg;
+                    m_statTripletsCutByPT += nCut;
+                }
+                trackCandidates.swap(below);
+            } else {
+                // All candidates exceeded threshold — fallback to lowest-pT one
+                auto lowestIt = std::min_element(above.begin(), above.end(),
+                    [](const TrackCandidate& a, const TrackCandidate& b){ return a.pT < b.pT; });
+                warning() << "MaxSeedPT filter: all " << above.size()
+                          << " triplet(s) exceed threshold (" << m_maxSeedPT
+                          << " GeV/c) for iteration " << trackNumber
+                          << ". Keeping lowest-pT fallback with pT=" << lowestIt->pT << " GeV/c" << endmsg;
+                int nCut = static_cast<int>(above.size()) - 1;
+                if (nCut > 0) m_statTripletsCutByPT += nCut;
+                trackCandidates = { *lowestIt };
+            }
+        }
+        // ────────────────────────────────────────────────────────────────────
 
         // Sort candidates by decreasing pT for better track selection
         std::sort(trackCandidates.begin(), trackCandidates.end(),
@@ -2195,10 +2233,6 @@ bool DisplacedTracking::createTripletSeed(
     
     debug() << "Impact parameters: d0=" << d0 << " cm, z0=" << z0 << " cm" << endmsg;
     
-    std::cout << "Debug d0: centerToOrigin=" << std::sqrt(std::pow(x0, 2) + std::pow(y0, 2)) 
-          << "cm, radius=" << radius << "cm, raw d0=" 
-          << (std::sqrt(std::pow(x0, 2) + std::pow(y0, 2)) - radius) << "cm" << std::endl;
-
     // Track parameters
     double qOverPt = charge / pT;
     double phi = std::atan2(y0, x0) + (clockwise ? -M_PI/2 : M_PI/2);
