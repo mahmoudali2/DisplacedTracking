@@ -482,6 +482,18 @@ int DisplacedTracking::getLayerID(uint64_t cellID) const {
     return m_bitFieldCoder->get(cellID, "layer");
 }
 
+// Compute composite layer ID that encodes both region and layer number:
+//   barrel:    compositeID = layerID
+//   +endcap:   compositeID = 1000 + layerID
+//   -endcap:   compositeID = -1000 - layerID
+int DisplacedTracking::getCompositeID(uint64_t cellID) const {
+    int layerID = getLayerID(cellID);
+    int typeID  = getTypeID(cellID);
+    if      (typeID ==  0) return layerID;
+    else if (typeID ==  1) return  1000 + layerID;
+    else                   return -1000 - layerID;
+}
+
 // Group surfaces by detector layer
 std::map<int, std::vector<const dd4hep::rec::Surface*>> DisplacedTracking::getSurfacesByLayer() const {
     std::map<int, std::vector<const dd4hep::rec::Surface*>> result;
@@ -761,17 +773,9 @@ void DisplacedTracking::findTracks(
             const dd4hep::rec::Surface* surface = findSurface(hit);
 
             if (surface) {
-                int layerID = getLayerID(hit.getCellID());
-                int typeID = getTypeID(hit.getCellID());
-
-                int compositeID;
-                if (typeID == 0) {
-                    compositeID = layerID;
-                } else if (typeID == 1) {
-                    compositeID = 1000 + layerID;
-                } else {
-                    compositeID = -1000 - layerID;
-                }
+                int layerID     = getLayerID(hit.getCellID());
+                int typeID      = getTypeID(hit.getCellID());
+                int compositeID = getCompositeID(hit.getCellID());
 
                 allHitInfo.emplace_back(i, hit, layerID, typeID, compositeID);
                 hitIndicesByCompositeLayer[compositeID].push_back(allHitInfo.size() - 1);
@@ -1364,46 +1368,47 @@ void DisplacedTracking::findTracks(
 
         debug() << "Successfully built trackHits vector with " << trackHits.size() << " hits for track " << trackNumber << endmsg;
 
-        // Try to extend the track with a 4th hit (use globalUsedHits to avoid conflicts)
+        // Extend the track by searching for extra hits in subsequent layers.
+        // The seed direction is derived from the 3-hit seed (hit2 - hit0) in 3D.
+        // The cone half-angle (35°) gates candidates; the loop continues until
+        // no further compatible hit is found.
         bool foundExtraHit = false;
         if (trackHits.size() >= 3) {
             try {
-                // Get the layer of the last hit
-                int lastLayerID = getLayerID(trackHits.back().getCellID());
-                info() << "Searching for 4th hit for track " << trackNumber << " - last hit is in layer " << lastLayerID << endmsg;
+                // Compute seed direction from first and last seed hit (mm -> cm, then normalize)
+                const auto& p0 = trackHits.front().getPosition();
+                const auto& p2 = trackHits.back().getPosition();
+                Eigen::Vector3d seedDir(
+                    (p2[0] - p0[0]) / 10.0,
+                    (p2[1] - p0[1]) / 10.0,
+                    (p2[2] - p0[2]) / 10.0);
+                if (seedDir.norm() < 1e-6) {
+                    warning() << "Degenerate seed direction for track " << trackNumber << " — skipping extension" << endmsg;
+                } else {
+                    seedDir.normalize();
 
-                // Count available unused hits
-                int unusedHitCount = 0;
-                std::map<int, int> hitsPerLayer;
-                for (size_t i = 0; i < globalUsedHits.size(); ++i) {
-                    if (!globalUsedHits[i]) {
-                        unusedHitCount++;
-                        int layerID = getLayerID((*hits)[i].getCellID());
-                        hitsPerLayer[layerID]++;
-                    }
-                }
-
-                info() << "Available unused hits for track " << trackNumber << ": " << unusedHitCount << endmsg;
-                for (const auto& [layer, count] : hitsPerLayer) {
-                    info() << "  Layer " << layer << ": " << count << " unused hits" << endmsg;
-                }
-
-                foundExtraHit = findCompatibleExtraHit(trackHits, hits, globalUsedHits);
-
-                // If a 4th hit was added, find its index in the global collection and
-                // ensure it is marked in globalUsedHits (findCompatibleExtraHit does this
-                // via reference, but we also record the index for bookkeeping).
-                if (foundExtraHit && trackHits.size() == 4) {
-                    const auto& fourthHit = trackHits.back();
-                    for (size_t k = 0; k < hits->size(); ++k) {
-                        if (!globalUsedHits[k] &&
-                            (*hits)[k].getCellID() == fourthHit.getCellID()) {
-                            // Already marked by findCompatibleExtraHit; log for clarity
-                            debug() << "4th hit confirmed marked: global index " << k
-                                    << " layer=" << getLayerID(fourthHit.getCellID()) << endmsg;
-                            globalUsedHits[k] = true;  // belt-and-suspenders
-                            break;
+                    // Count available unused hits per composite layer for diagnostics
+                    int unusedHitCount = 0;
+                    std::map<int, int> hitsPerComposite;
+                    for (size_t i = 0; i < globalUsedHits.size(); ++i) {
+                        if (!globalUsedHits[i]) {
+                            unusedHitCount++;
+                            hitsPerComposite[getCompositeID((*hits)[i].getCellID())]++;
                         }
+                    }
+                    info() << "Searching for extra hits for track " << trackNumber
+                           << " - last compositeID=" << getCompositeID(trackHits.back().getCellID())
+                           << " | unused hits: " << unusedHitCount << endmsg;
+                    for (const auto& [composite, count] : hitsPerComposite) {
+                        info() << "  CompositeID " << composite << ": " << count << " unused hits" << endmsg;
+                    }
+
+                    size_t hitsBefore = trackHits.size();
+                    foundExtraHit = findCompatibleExtraHit(trackHits, hits, globalUsedHits, seedDir);
+
+                    if (foundExtraHit) {
+                        info() << "Extended track " << trackNumber
+                               << " from " << hitsBefore << " to " << trackHits.size() << " hits" << endmsg;
                     }
                 }
             } catch (const std::exception& ex) {
@@ -1413,10 +1418,8 @@ void DisplacedTracking::findTracks(
             }
         }
 
-        if (foundExtraHit) {
-            info() << "Extended track " << trackNumber << " from 3 to 4 hits" << endmsg;
-        } else {
-            debug() << "Keeping track " << trackNumber << " with " << trackHits.size() << " hits (no compatible extra hit found)" << endmsg;
+        if (!foundExtraHit) {
+            debug() << "Keeping track " << trackNumber << " with " << trackHits.size() << " hits (no extra hits found)" << endmsg;
         }
 
         // Create a new track
@@ -1440,13 +1443,19 @@ void DisplacedTracking::findTracks(
                     << "  tanL=" << seedAtFirst.tanLambda << endmsg;
         }
 
-        // Test 4-hit circle fitting if we have 4 hits
-        if (trackHits.size() == 4) {
+        // Test 4-hit circle fitting if we have at least 4 hits.
+        // Always uses the first 4 hits for the analytical circle fit — a quality
+        // gate on the seed extension. If the 4th hit produces a poor chi2 it is
+        // removed and any further hits that were appended by the extension loop
+        // are also discarded (they were built on top of a bad 4th hit).
+        if (trackHits.size() >= 4) {
+            // Slice first 4 hits for the circle fitter
+            std::vector<edm4hep::TrackerHitPlane> first4(trackHits.begin(), trackHits.begin() + 4);
             double x0, y0, radius, chi2;
             Eigen::Matrix3d fitCov3x3 = Eigen::Matrix3d::Zero();
             bool fit4Hits = false;
             try {
-                fit4Hits = fitCircleToFourHits(trackHits, x0, y0, radius, chi2, fitCov3x3);
+                fit4Hits = fitCircleToFourHits(first4, x0, y0, radius, chi2, fitCov3x3);
             } catch (const std::exception& ex) {
                 warning() << "Exception in fitCircleToFourHits for track " << trackNumber << ": " << ex.what() << endmsg;
             } catch (...) {
@@ -1454,14 +1463,17 @@ void DisplacedTracking::findTracks(
             }
 
             if (fit4Hits) {
-                info() << "4-hit circle fit successful for track " << trackNumber << "!" << endmsg;
+                info() << "4-hit circle fit successful for track " << trackNumber
+                       << " (total hits: " << trackHits.size() << ")" << endmsg;
                 info() << "  Center: (" << x0 << ", " << y0 << ") cm" << endmsg;
                 info() << "  Radius: " << radius << " cm" << endmsg;
                 info() << "  Chi2/DOF: " << chi2 << endmsg;
 
                 if (chi2 > 50.0) {
-                    warning() << "Poor circle fit (chi2=" << chi2 << ") for track " << trackNumber << ", removing 4th hit" << endmsg;
-                    trackHits.pop_back();
+                    warning() << "Poor circle fit (chi2=" << chi2 << ") for track " << trackNumber
+                              << " — removing 4th hit and all subsequent extension hits" << endmsg;
+                    // Truncate back to 3 hits: the 4th hit (and anything built on top of it) is rejected
+                    trackHits.resize(3);
                 } else {
                     // Query actual B field at the average position of the 4 hits
                     double sumX = 0, sumY = 0, sumZ = 0;
@@ -3345,97 +3357,130 @@ bool DisplacedTracking::fitTrackWithGenFit(
     }
 }
 
-// Looking for compatible hits in the +3 layer (initially extra 4th layer)
+// Extend a track by searching for compatible extra hits in subsequent layers.
+// Starts from the current last hit and loops until no more hits are found.
+// 
+// Layer acceptance: uses compositeID (barrel=layerID, +endcap=1000+layerID,
+//   -endcap=-1000-layerID) so barrel and endcap layers are never conflated.
+//   Same-composite-layer hits are NOT accepted (disabled — needs tighter spatial
+//   cut to avoid fake combinatorics; TODO: to fix ..re-enable with ~1 cm threshold).
+//   Cross-region transitions (e.g. barrel seed -> endcap continuation) are handled
+//   naturally by the cone cut — no compositeID arithmetic needed across regions.
+//
+// Hit acceptance uses a forward cone from the seed direction:
+//   - the delta vector from the last hit to the candidate must point within
+//     coneHalfAngleDeg of seedDirection (rejects hits behind or off-axis)
+//   - distance must be within m_maxDist
 bool DisplacedTracking::findCompatibleExtraHit(
     std::vector<edm4hep::TrackerHitPlane>& trackHits,
     const edm4hep::TrackerHitPlaneCollection* allHits,
-    std::vector<bool>& usedHits) const {
-    
-    if (trackHits.size() != 3) {
-        debug() << "Expected 3 hits for extension, got " << trackHits.size() << endmsg;
+    std::vector<bool>& usedHits,
+    const Eigen::Vector3d& seedDirection,
+    double coneHalfAngleDeg) const {
+
+    if (trackHits.size() < 3) {
+        debug() << "Need at least 3 hits for extension, got " << trackHits.size() << endmsg;
         return false;
     }
-    
-    // Get the last hit (3rd hit) position and layer
-    const auto& lastHit = trackHits[2];
-    const auto& lastPos = lastHit.getPosition();
-    Eigen::Vector3d lastHitPos(lastPos[0] / 10.0, lastPos[1] / 10.0, lastPos[2] / 10.0); // mm to cm
-    
-    int lastLayerID = getLayerID(lastHit.getCellID());
-    
-    debug() << "Looking for compatible 4th hit - last hit in layer " << lastLayerID 
-            << " at position (" << lastHitPos.x() << "," << lastHitPos.y() << "," << lastHitPos.z() << ") cm" << endmsg;
-    
-    double bestDistance = 1e6;
-    int bestHitIndex = -1;
-    edm4hep::TrackerHitPlane bestHit;
-    
-    // Search through all hits for candidates
-    for (size_t i = 0; i < allHits->size(); ++i) {
-        if (usedHits[i]) continue; // Skip already used hits
-        
-        const auto& candidateHit = (*allHits)[i];
-        int candidateLayerID = getLayerID(candidateHit.getCellID());
-        
-        // Accept hits from same layer OR next consecutive layers
-        // This handles duplicate hits in same layer (same cellID issue)
-        bool layerAcceptable = false;
-        std::string layerReason;
-        
-        if (candidateLayerID == lastLayerID) {
-            layerAcceptable = true;
-            layerReason = "same layer";
-        } else if (candidateLayerID == lastLayerID + 1) {
-            layerAcceptable = true;
-            layerReason = "next layer";
-        } else if (candidateLayerID > lastLayerID + 1 && candidateLayerID <= lastLayerID + 2) {
-            layerAcceptable = true;
-            layerReason = "layer skip allowed";
+
+    const double cosHalfAngle = std::cos(coneHalfAngleDeg * M_PI / 180.0);
+    // Normalize seed direction once
+    const Eigen::Vector3d dir = seedDirection.normalized();
+
+    bool anyFound = false;
+
+    // Loop: each iteration tries to add one more hit beyond the current last hit.
+    // Stops when no compatible hit is found for the current last layer.
+    while (true) {
+        const auto& lastHit      = trackHits.back();
+        const auto& lastPos      = lastHit.getPosition();
+        Eigen::Vector3d lastHitPos(lastPos[0] / 10.0, lastPos[1] / 10.0, lastPos[2] / 10.0); // mm->cm
+
+        int lastCompositeID = getCompositeID(lastHit.getCellID());
+
+        debug() << "Extra-hit search loop: current last hit compositeID=" << lastCompositeID
+                << " at (" << lastHitPos.x() << "," << lastHitPos.y() << "," << lastHitPos.z() << ") cm"
+                << " | track now has " << trackHits.size() << " hits" << endmsg;
+
+        double bestDistance  = 1e6;
+        int    bestHitIndex  = -1;
+        edm4hep::TrackerHitPlane bestHit;
+
+        for (size_t i = 0; i < allHits->size(); ++i) {
+            if (usedHits[i]) continue;
+
+            const auto& candHit      = (*allHits)[i];
+            int candCompositeID      = getCompositeID(candHit.getCellID());
+
+            // --- Layer gate ---
+            // Reject hits in the same composite layer (see comment above).
+            if (candCompositeID == lastCompositeID) continue;
+
+            // For same-region (barrel->barrel or endcap->endcap) we require the
+            // composite layer number to be strictly greater (outward direction).
+            // For cross-region transitions we rely purely on the cone cut below,
+            // so we only hard-reject hits that are clearly inward in the same region.
+            int lastType    = getTypeID(lastHit.getCellID());
+            int candType    = getTypeID(candHit.getCellID());
+            int lastLayerN  = getLayerID(lastHit.getCellID());
+            int candLayerN  = getLayerID(candHit.getCellID());
+            if (lastType == candType) {
+                // Same region: require outward step in physical layer number.
+                // For barrel and +endcap, layerID increases outward.
+                // For -endcap, layerID also increases outward (layer 0 is closest to IP),
+                // so comparing raw layerIDs is correct for all three regions.
+                if (candLayerN <= lastLayerN) continue;
+                // Allow at most a skip of 2 physical layers (no wild jumps)
+                if (candLayerN > lastLayerN + 2) continue;
+            }
+            // Cross-region: no compositeID arithmetic constraint — cone decides
+
+            // --- Cone gate ---
+            const auto& candPos = candHit.getPosition();
+            Eigen::Vector3d candHitPos(candPos[0] / 10.0, candPos[1] / 10.0, candPos[2] / 10.0);
+
+            Eigen::Vector3d delta = candHitPos - lastHitPos;
+            double distance = delta.norm();
+            if (distance < 1e-6) continue; // degenerate
+
+            double cosTheta = delta.dot(dir) / distance;
+
+            // Must be within the forward cone and within max distance
+            if (cosTheta < cosHalfAngle) {
+                debug() << "Candidate hit " << i << " compositeID=" << candCompositeID
+                        << " rejected by cone (cosTheta=" << cosTheta
+                        << " < " << cosHalfAngle << ")" << endmsg;
+                continue;
+            }
+            if (distance > m_maxDist.value()) continue;
+
+            debug() << "Candidate hit " << i << " compositeID=" << candCompositeID
+                    << " distance=" << distance << " cm cosTheta=" << cosTheta << endmsg;
+
+            if (distance < bestDistance) {
+                bestDistance = distance;
+                bestHitIndex = static_cast<int>(i);
+                bestHit      = candHit;
+            }
         }
-        
-        if (!layerAcceptable) continue;
-        
-        // Calculate distance to last hit
-        const auto& candidatePos = candidateHit.getPosition();
-        Eigen::Vector3d candidateHitPos(candidatePos[0] / 10.0, candidatePos[1] / 10.0, candidatePos[2] / 10.0); // mm to cm
-        
-        double distance = (candidateHitPos - lastHitPos).norm();
-        
-        debug() << "Candidate hit " << i << " in layer " << candidateLayerID 
-                << " (" << layerReason << ") at distance " << distance << " cm" << endmsg;
-        
-        // small distance threshold for same layer, stricter for next layers
-        double maxDistance = (candidateLayerID == lastLayerID) ? 1.0 : m_maxDist.value(); // 1cm for same layer (Gas gap ~6mm) but taking into account the smaearing effect, 100cm for others
-        
-        // Check if distance is within acceptable range
-        if (distance < maxDistance && distance < bestDistance) {
-            bestDistance = distance;
-            bestHitIndex = i;
-            bestHit = candidateHit;
-            
-            debug() << "  -> New best candidate: distance=" << distance 
-                    << " cm, layer=" << candidateLayerID << " (" << layerReason << ")" << endmsg;
+
+        if (bestHitIndex < 0) {
+            debug() << "No compatible extra hit found beyond compositeID=" << lastCompositeID
+                    << " — stopping extension loop" << endmsg;
+            break;
         }
-    }
-    
-    if (bestHitIndex >= 0) {
-        int bestLayerID = getLayerID(bestHit.getCellID());
-        std::string layerType = (bestLayerID == lastLayerID) ? "same layer" : "next layer";
-        
-        info() << "Found compatible 4th hit at distance " << bestDistance 
-               << " cm in layer " << bestLayerID << " (" << layerType << ")" << endmsg;
-        
-        // Add the best hit to the track
+
+        int bestCompositeID = getCompositeID(bestHit.getCellID());
+        info() << "Found extra hit: compositeID=" << bestCompositeID
+               << " distance=" << bestDistance << " cm"
+               << " (track now has " << trackHits.size() + 1 << " hits)" << endmsg;
+
         trackHits.push_back(bestHit);
-        
-        // Mark it as used
         usedHits[bestHitIndex] = true;
-        
-        return true;
-    } else {
-        debug() << "No compatible 4th hit found within acceptable distance thresholds" << endmsg;
-        return false;
+        anyFound = true;
     }
+
+    return anyFound;
 }
 
 bool DisplacedTracking::fitCircleToFourHits(

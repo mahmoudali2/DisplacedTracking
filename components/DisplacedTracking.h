@@ -209,6 +209,8 @@ private:
     int getTypeID(uint64_t cellID) const;
     // Extract layer ID from cell ID
     int getLayerID(uint64_t cellID) const;
+    // Compute composite layer ID: barrel->layerID, +endcap->1000+layerID, -endcap->-1000-layerID
+    int getCompositeID(uint64_t cellID) const;
     // Get PT
     double getPT(const edm4hep::TrackState& state) const;
     // Get position vector from track state
@@ -237,7 +239,9 @@ private:
     bool findCompatibleExtraHit(
         std::vector<edm4hep::TrackerHitPlane>& trackHits,
         const edm4hep::TrackerHitPlaneCollection* allHits,
-        std::vector<bool>& usedHits) const;
+        std::vector<bool>& usedHits,
+        const Eigen::Vector3d& seedDirection,
+        double coneHalfAngleDeg = 35.0) const;
         
     // Fit circle to 4 hits using least squares and calculate chi2
     // fitCov3x3 is the 3×3 covariance matrix on [x0, y0, R] in cm² from the WLS fit.
