@@ -96,17 +96,15 @@ StatusCode DisplacedTracking::initialize() {
         dd4hep::Position(solenoidRadius, 0, 0),
         dd4hep::Position(0, solenoidRadius, 0),
         dd4hep::Position(solenoidRadius/sqrt(2), solenoidRadius/sqrt(2), 0),           
-        dd4hep::Position(229, 0, 0),
-        dd4hep::Position(0, 231, 0),
-        dd4hep::Position(0, 0, 219),
+        dd4hep::Position(249, 0, 0),
+        dd4hep::Position(0, 251, 0),
+        dd4hep::Position(0, 0, 249),
         dd4hep::Position(0, 0, 218),
         dd4hep::Position(0, 0, -217),
-        dd4hep::Position(600, 500, 200),
-        dd4hep::Position(500, 500, 250),
-        dd4hep::Position(500, 500, -250),
-        dd4hep::Position(100, 300, 350),
-        dd4hep::Position(500, 500, 500),
-        dd4hep::Position(-500, -500, -500)     
+        dd4hep::Position(0, 500, 0),
+        dd4hep::Position(460, 0, 0),
+        dd4hep::Position(200, 200, 460),
+        dd4hep::Position(460, 0, 460)   
     };
 
     info() << "Magnetic field at different positions:" << endmsg;
