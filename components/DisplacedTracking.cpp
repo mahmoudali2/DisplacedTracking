@@ -697,6 +697,21 @@ void DisplacedTracking::findTracks(
         return;
     }
 
+    // ── DEBUG: sanity-check U/V on the first input hit ─────────────────────────
+    // If these are zero here, the problem is upstream in the digitizer, not in
+    // this algorithm.  If they are non-zero here but zero in the output hits,
+    // the missing setU/setV copies below are the root cause.
+    if (msgLevel(MSG::DEBUG) && hits->size() > 0) {
+        const auto& dbgHit = (*hits)[0];
+        debug() << "[UV-DEBUG] Input hit[0]:"
+                << "  u=(" << dbgHit.getU().a << "," << dbgHit.getU().b << ")"
+                << "  v=(" << dbgHit.getV().a << "," << dbgHit.getV().b << ")"
+                << "  du=" << dbgHit.getDu()
+                << "  dv=" << dbgHit.getDv()
+                << "  cellID=" << dbgHit.getCellID()
+                << endmsg;
+    }
+
     // Build a map from input TrackerHitPlane objectID -> SimTrackerHit
     // using the existing RecoSim link collection from the digitizer
     std::unordered_map<uint32_t, edm4hep::SimTrackerHit> recoToSimMap;
@@ -1721,6 +1736,12 @@ void DisplacedTracking::findTracks(
                 outHit.setCovMatrix(hit.getCovMatrix());
                 outHit.setDu(hit.getDu());
                 outHit.setDv(hit.getDv());
+                outHit.setU(hit.getU());  // measurement direction vectors
+                outHit.setV(hit.getV());
+                debug() << "[UV-DEBUG] findTracks fallback outHit:"
+                        << "  u=(" << outHit.getU().a << "," << outHit.getU().b << ")"
+                        << "  v=(" << outHit.getV().a << "," << outHit.getV().b << ")"
+                        << "  du=" << outHit.getDu() << "  dv=" << outHit.getDv() << endmsg;
                 propagateLink(outHit, hit);
                 finalTrack.addToTrackerHits(outHit);
             }
@@ -2501,16 +2522,27 @@ bool DisplacedTracking::createTripletSeed(
     outHit1.setEDep(hit1.getEDep()); outHit1.setEDepError(hit1.getEDepError());
     outHit1.setPosition(hit1.getPosition()); outHit1.setCovMatrix(hit1.getCovMatrix());
     outHit1.setDu(hit1.getDu()); outHit1.setDv(hit1.getDv());
+    outHit1.setU(hit1.getU()); outHit1.setV(hit1.getV());  // measurement direction vectors
     auto outHit2 = outputHits.create();
     outHit2.setCellID(hit2.getCellID()); outHit2.setTime(hit2.getTime());
     outHit2.setEDep(hit2.getEDep()); outHit2.setEDepError(hit2.getEDepError());
     outHit2.setPosition(hit2.getPosition()); outHit2.setCovMatrix(hit2.getCovMatrix());
     outHit2.setDu(hit2.getDu()); outHit2.setDv(hit2.getDv());
+    outHit2.setU(hit2.getU()); outHit2.setV(hit2.getV());  // measurement direction vectors
     auto outHit3 = outputHits.create();
     outHit3.setCellID(hit3.getCellID()); outHit3.setTime(hit3.getTime());
     outHit3.setEDep(hit3.getEDep()); outHit3.setEDepError(hit3.getEDepError());
     outHit3.setPosition(hit3.getPosition()); outHit3.setCovMatrix(hit3.getCovMatrix());
     outHit3.setDu(hit3.getDu()); outHit3.setDv(hit3.getDv());
+    outHit3.setU(hit3.getU()); outHit3.setV(hit3.getV());  // measurement direction vectors
+    debug() << "[UV-DEBUG] createTripletSeed output hits:"
+            << "  hit1 u=(" << outHit1.getU().a << "," << outHit1.getU().b << ")"
+            << "  v=(" << outHit1.getV().a << "," << outHit1.getV().b << ")"
+            << "  hit2 u=(" << outHit2.getU().a << "," << outHit2.getU().b << ")"
+            << "  v=(" << outHit2.getV().a << "," << outHit2.getV().b << ")"
+            << "  hit3 u=(" << outHit3.getU().a << "," << outHit3.getU().b << ")"
+            << "  v=(" << outHit3.getV().a << "," << outHit3.getV().b << ")"
+            << endmsg;
     propagateLink(outHit1, hit1);
     propagateLink(outHit2, hit2);
     propagateLink(outHit3, hit3);
@@ -3412,6 +3444,11 @@ bool DisplacedTracking::fitTrackWithGenFit(
                 outHit.setEDep(hit.getEDep()); outHit.setEDepError(hit.getEDepError());
                 outHit.setPosition(hit.getPosition()); outHit.setCovMatrix(hit.getCovMatrix());
                 outHit.setDu(hit.getDu()); outHit.setDv(hit.getDv());
+                outHit.setU(hit.getU()); outHit.setV(hit.getV());  // measurement direction vectors
+                debug() << "[UV-DEBUG] fitTrackWithGenFit outHit:"
+                        << "  u=(" << outHit.getU().a << "," << outHit.getU().b << ")"
+                        << "  v=(" << outHit.getV().a << "," << outHit.getV().b << ")"
+                        << "  du=" << outHit.getDu() << "  dv=" << outHit.getDv() << endmsg;
                 propagateLink(outHit, hit);
                 finalTrack.addToTrackerHits(outHit);
             }
