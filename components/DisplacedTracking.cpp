@@ -351,6 +351,9 @@ StatusCode DisplacedTracking::finalize() {
     int nTrk    = m_statTracksReconstructed.load();
     int nPos    = m_statPositiveCharge.load();
     int nNeg    = m_statNegativeCharge.load();
+    int nUndet  = m_statChargeUndetermined.load();
+    int nMatch  = m_statChargeMatch.load();
+    int nMis    = m_statChargeMismatch.load();
     int nInner  = m_statInnerSeedUsed.load();
     int nFall   = m_statFallbackSeedUsed.load();
     int nPtI    = m_statHighestPtInner.load();
@@ -391,8 +394,12 @@ StatusCode DisplacedTracking::finalize() {
         << "║  Avg tracks / event           : " << std::setw(7) << std::fixed << std::setprecision(2) << trkPerEvt << "                   ║\n"
         << "╠══════════════════════════════════════════════════════════╣\n"
         << "║  CURVATURE / CHARGE SIGN                                 ║\n"
-        << "║    Positive particles (w < 0) : " << std::setw(7) << nPos    << "                   ║\n"
-        << "║    Negative particles (w > 0) : " << std::setw(7) << nNeg    << "                   ║\n"
+        << "║    Positive particles (w > 0) : " << std::setw(7) << nPos    << "                   ║\n"
+        << "║    Negative particles (w < 0) : " << std::setw(7) << nNeg    << "                   ║\n"
+        << "║    Unreliable sign (near-str) : " << std::setw(7) << nUndet  << "                   ║\n"
+        << "║  4-hit(AtLastHit) vs 3-hit(AtFirstHit) sign check      ║\n"
+        << "║    Charge sign MATCH          : " << std::setw(7) << nMatch  << "  (4-hit tracks only)  ║\n"
+        << "║    Charge sign MISMATCH       : " << std::setw(7) << nMis    << "  (4-hit tracks only)  ║\n"
         << "╠══════════════════════════════════════════════════════════╣\n"
         << "║  SEEDING STRATEGY                                        ║\n"
         << "║    Inner-layer seed (0,1,2)   : " << std::setw(7) << nInner  << "  (" << std::setw(5) << std::fixed << std::setprecision(1) << innerFrac << "% of tracks)  ║\n"
@@ -1542,28 +1549,126 @@ void DisplacedTracking::findTracks(
                     // Truncate back to 3 hits: the 4th hit (and anything built on top of it) is rejected
                     trackHits.resize(3);
                 } else {
-                    // Query actual B field at the average position of the 4 hits
+                    // Query B field at the centroid of the 4 hits.
+                    // EDM4hep hit positions are in mm; DD4hep magneticField() expects cm
+                    // (same convention as createTripletSeed which uses p.x() in cm).
+                    // Dividing by 10 converts mm → cm.
                     double sumX = 0, sumY = 0, sumZ = 0;
                     for (const auto& h : trackHits) {
                         const auto& pos = h.getPosition();
-                        sumX += pos[0];
-                        sumY += pos[1];
-                        sumZ += pos[2];
+                        sumX += pos[0] / 10.0;  // mm → cm
+                        sumY += pos[1] / 10.0;
+                        sumZ += pos[2] / 10.0;
                     }
                     dd4hep::Position avgPos(sumX / trackHits.size(),
                                            sumY / trackHits.size(),
                                            sumZ / trackHits.size());
                     double bField4 = m_field.magneticField(avgPos).z() / dd4hep::tesla;
                     double pT = 0.3 * std::abs(bField4) * radius / 100.0; // GeV/c
-                    double d0 = std::sqrt(x0*x0 + y0*y0) - radius;
-                    double phi = std::atan2(y0, x0) - M_PI/2;
-                    double omega = 1.0 / (radius * 10.0); // Assuming positive charge
+                    double bSign4 = (bField4 >= 0.0) ? 1.0 : -1.0;
+
+                    // Determine charge sign independently from the 4 hit positions.
+                    // Two consecutive triplet cross products (0-1-2 and 1-2-3) are each
+                    // normalised by their chord-length product to obtain sin(bend_angle).
+                    // Summing the two normalised values gives equal weight to both triplets
+                    // regardless of hit spacing — fully independent of the 3-hit seed charge.
+                    // Hit positions from EDM4hep are in mm.
+                    const auto& h0p = trackHits[0].getPosition();
+                    const auto& h1p = trackHits[1].getPosition();
+                    const auto& h2p = trackHits[2].getPosition();
+                    const auto& h3p = trackHits[3].getPosition();
+                    double v12x = h1p[0]-h0p[0], v12y = h1p[1]-h0p[1];
+                    double v23x = h2p[0]-h1p[0], v23y = h2p[1]-h1p[1];
+                    double v34x = h3p[0]-h2p[0], v34y = h3p[1]-h2p[1];
+                    double crossZ_012 = v12x*v23y - v12y*v23x;
+                    double crossZ_123 = v23x*v34y - v23y*v34x;
+
+                    // Chord lengths (mm) — needed for normalisation and threshold
+                    double len12 = std::sqrt(v12x*v12x + v12y*v12y);
+                    double len23 = std::sqrt(v23x*v23x + v23y*v23y);
+                    double len34 = std::sqrt(v34x*v34x + v34y*v34y);
+                    // Normalise: sin(bend) ∈ [-1,+1] for each triplet
+                    double sin_012 = (len12*len23 > 1e-6) ? crossZ_012 / (len12*len23) : 0.0;
+                    double sin_123 = (len23*len34 > 1e-6) ? crossZ_123 / (len23*len34) : 0.0;
+                    double sinBendSum4 = sin_012 + sin_123;  // range [-2, +2]
+
+                    // Reliability threshold: bend must exceed 0.5 mm over the lever arm
+                    // (same criterion as the 3-hit seed, but positions here are in mm)
+                    double avgChord4 = (len12 + len23 + len34) / 3.0;  // mm
+                    double sinThreshold4 = (avgChord4 > 1e-6) ? 0.5 / avgChord4 : 1.0;
+                    bool chargeReliable4 = (std::abs(sinBendSum4) >= sinThreshold4);
+
+                    double charge4 = bSign4 * (sinBendSum4 < 0.0 ? 1.0 : -1.0);
+
+                    if (!chargeReliable4) {
+                        debug() << "4-hit charge UNRELIABLE (near-straight track):"
+                                << "  sinBendSum4=" << sinBendSum4
+                                << "  threshold=" << sinThreshold4
+                                << "  avgChord=" << avgChord4 << " mm" << endmsg;
+                    }
+
+                    // Compare against 3-hit seed charge for the match/mismatch diagnostic
+                    double chargeSeed = (seedState.omega >= 0.0) ? 1.0 : -1.0;
+                    if (charge4 != chargeSeed) {
+                        debug() << "4-hit charge DIFFERS from 3-hit seed:"
+                                << "  charge4=" << charge4
+                                << (chargeReliable4 ? "" : " [UNRELIABLE]")
+                                << "  chargeSeed=" << chargeSeed
+                                << "  sinBendSum4=" << sinBendSum4
+                                << "  sin_012=" << sin_012
+                                << "  sin_123=" << sin_123 << endmsg;
+                    }
+
+                    // MC truth debug: extract charge and momentum from the MCParticle
+                    // linked to the first hit via the RecoSim map built at the top of findTracks.
+                    {
+                        auto mcIt = recoToSimMap.find(trackHits[0].id().index);
+                        if (mcIt != recoToSimMap.end()) {
+                            auto mcPart = mcIt->second.getParticle();
+                            if (mcPart.isAvailable()) {
+                                const auto& mom = mcPart.getMomentum();
+                                double mcPt = std::sqrt(mom.x*mom.x + mom.y*mom.y);
+                                debug() << "[MC-TRUTH 4-hit] charge=" << mcPart.getCharge()
+                                        << "  PDG=" << mcPart.getPDG()
+                                        << "  px=" << mom.x << " GeV/c"
+                                        << "  py=" << mom.y << " GeV/c"
+                                        << "  pz=" << mom.z << " GeV/c"
+                                        << "  pT=" << mcPt << " GeV/c"
+                                        << "  reco_charge4=" << charge4
+                                        << (chargeReliable4 ? "" : " [UNRELIABLE]")
+                                        << endmsg;
+                            } else {
+                                debug() << "[MC-TRUTH 4-hit] MCParticle not available for hit[0]" << endmsg;
+                            }
+                        } else {
+                            debug() << "[MC-TRUTH 4-hit] No sim link found for hit[0]" << endmsg;
+                        }
+                    }
+
+                    double d0  = std::sqrt(x0*x0 + y0*y0) - radius;
+                    // phi: tangent direction at reference point, sign depends on curvature
+                    // clockwise (charge>0 in B>0): phi = atan2(y0,x0) - π/2
+                    // counter-clockwise (charge<0 in B>0): phi = atan2(y0,x0) + π/2
+                    double phi = std::atan2(y0, x0) + charge4 * (-M_PI/2);
+                    if (phi >  M_PI) phi -= 2*M_PI;
+                    if (phi < -M_PI) phi += 2*M_PI;
+
+                    // omega = charge / R  (R in mm), same convention as createTripletSeed
+                    double omega = charge4 / (radius * 10.0);
+
+                    debug() << "4-hit AtLastHit: charge=" << charge4
+                            << (chargeReliable4 ? "" : " [UNRELIABLE]")
+                            << "  pT=" << pT << " GeV/c"
+                            << "  sinBendSum4=" << sinBendSum4
+                            << "  omega=" << std::scientific << std::setprecision(4)
+                            << omega << std::defaultfloat << " 1/mm" << endmsg;
 
                     edm4hep::TrackState circleFitState = createTrackState(
                         d0*10.0, phi, omega, seedState.Z0, seedState.tanLambda, 
                         edm4hep::TrackState::AtLastHit);
 
-                    // Set reference point to position of last hit
+                    // Reference point is intentionally the first hit for both 3-hit and 4-hit
+                    // states so the two states share a common reference and can be compared directly.
                     const auto& firstHitPos = trackHits.front().getPosition();
                     circleFitState.referencePoint = edm4hep::Vector3f(
                         firstHitPos[0], firstHitPos[1], firstHitPos[2]);
@@ -1927,24 +2032,58 @@ void DisplacedTracking::findTracks(
         if (hasOther)       m_statStateAtOther++;
         if (hasVertex)      m_statStateAtVertex++;
         if (hasLastHit) m_statFourHitTracks++; else m_statThreeHitTracks++;
-        // Count charge from the best available state
-        // (prefer AtLastHit, fall back to AtOther, then AtFirstHit)
+        // Count charge from the best available analytical state:
+        //   priority 0 → AtLastHit  (4-hit WLS circle fit, most reliable)
+        //   priority 1 → AtFirstHit (3-hit seed, always present)
+        //   AtOther (GenFit) is NOT used for charge classification: with only
+        //   3 hits (~1 NDF) the fitted ω sign is numerically unreliable.
+        //
+        // When both AtLastHit AND AtFirstHit exist (i.e. 4-hit tracks), compare
+        // their charge signs as a self-consistency check of the two analytical methods.
         {
-            int chargePriority = 99;
-            double chargeOmega = 0.0;
+            double omegaLastHit  = 0.0;  bool hasLastHitOmega  = false;
+            double omegaFirstHit = 0.0;  bool hasFirstHitOmega = false;
+
             for (int sIdx = 0; sIdx < finalTrack.trackStates_size(); ++sIdx) {
                 auto ts = finalTrack.getTrackStates(sIdx);
-                int prio = (ts.location == edm4hep::TrackState::AtLastHit) ? 0 :
-                           (ts.location == edm4hep::TrackState::AtOther)    ? 1 :
-                           (ts.location == edm4hep::TrackState::AtFirstHit)  ? 2 : 99;
-                if (prio < chargePriority) {
-                    chargePriority = prio;
-                    chargeOmega = ts.omega;
+                if (ts.location == edm4hep::TrackState::AtLastHit) {
+                    omegaLastHit     = ts.omega;
+                    hasLastHitOmega  = true;
+                } else if (ts.location == edm4hep::TrackState::AtFirstHit) {
+                    omegaFirstHit    = ts.omega;
+                    hasFirstHitOmega = true;
                 }
             }
-            if (chargePriority < 99) {
-                if (chargeOmega < 0.0) m_statPositiveCharge++;
-                else                   m_statNegativeCharge++;
+
+            // Primary charge counter: prefer 4-hit AtLastHit, fall back to 3-hit AtFirstHit
+            double omegaForCharge = hasLastHitOmega ? omegaLastHit : omegaFirstHit;
+            bool   hasAnyOmega   = hasLastHitOmega || hasFirstHitOmega;
+
+            if (hasAnyOmega) {
+                // EDM4hep convention: omega = charge / R  →  omega > 0 means positive charge
+                if (omegaForCharge > 0.0) m_statPositiveCharge++;
+                else                      m_statNegativeCharge++;
+
+                debug() << "Charge classification: omega="  << omegaForCharge
+                        << " 1/mm (from " << (hasLastHitOmega ? "AtLastHit/4-hit" : "AtFirstHit/3-hit")
+                        << ")  →  " << (omegaForCharge > 0 ? "positive" : "negative") << endmsg;
+            }
+
+            // Self-consistency check: only fires for 4-hit tracks where both states exist.
+            // Compares the 4-hit WLS circle (AtLastHit) against the 3-hit seed (AtFirstHit).
+            // A mismatch here would indicate a genuine inconsistency between the two fits.
+            if (hasLastHitOmega && hasFirstHitOmega) {
+                bool lastPos  = (omegaLastHit  > 0.0);
+                bool firstPos = (omegaFirstHit > 0.0);
+                if (lastPos == firstPos) {
+                    m_statChargeMatch++;
+                    debug() << "Charge sign MATCH (4-hit vs 3-hit):    AtLastHit=" << omegaLastHit
+                            << "  AtFirstHit=" << omegaFirstHit << endmsg;
+                } else {
+                    m_statChargeMismatch++;
+                    debug() << "Charge sign MISMATCH (4-hit vs 3-hit): AtLastHit=" << omegaLastHit
+                            << "  AtFirstHit=" << omegaFirstHit << endmsg;
+                }
             }
         }
         // Continue to next iteration to find more tracks
@@ -2234,18 +2373,62 @@ bool DisplacedTracking::createTripletSeed(
     double y0 = y0_sagitta;
     double pT = pT_sagitta_full;
     
-    // Determine helix direction and charge
+    // Determine helix direction and charge.
+    //
+    // The phi-angle method (phi3 < phi1) is numerically unstable for high-pT
+    // tracks where radius >> arc length: the angular sweep is tiny and floating-
+    // point noise in atan2 can flip the sign.
+    //
+    // The cross-product method is purely hit-position arithmetic:
+    //   v12 = p2 - p1,  v23 = p3 - p2
+    //   crossZ = v12.x * v23.y - v12.y * v23.x  =  |v12||v23| sin(bend_angle)
+    //   crossZ > 0  → left turn  → counter-clockwise
+    //   crossZ < 0  → right turn → clockwise
+    //
+    // For very high-pT tracks (near-straight), |sin(bend_angle)| → 0 and crossZ
+    // itself becomes noise-dominated.  We normalise by the chord product to get
+    // sin(bend_angle) directly, then apply a minimum threshold.
+    // sin_threshold = 0.5 mm / (avg_chord_cm * 10)  ≈ reliable down to ~pT where
+    // the bend over the available lever arm exceeds 0.5 mm (≈ one hit resolution).
     double phi1 = std::atan2(p1.y() - y0, p1.x() - x0);
     double phi2 = std::atan2(p2.y() - y0, p2.x() - x0);
     double phi3 = std::atan2(p3.y() - y0, p3.x() - x0);
-    
-    // Unwrap angles
-    if (phi2 - phi1 > M_PI) phi2 -= 2*M_PI;
+
+    // Unwrap for arc-length use only
+    if (phi2 - phi1 > M_PI)  phi2 -= 2*M_PI;
     if (phi2 - phi1 < -M_PI) phi2 += 2*M_PI;
-    if (phi3 - phi2 > M_PI) phi3 -= 2*M_PI;
+    if (phi3 - phi2 > M_PI)  phi3 -= 2*M_PI;
     if (phi3 - phi2 < -M_PI) phi3 += 2*M_PI;
-    
-    bool clockwise = (phi3 < phi1);
+
+    // Cross product of consecutive chord vectors in the xy plane
+    double v12x = p2.x() - p1.x(),  v12y = p2.y() - p1.y();
+    double v23x = p3.x() - p2.x(),  v23y = p3.y() - p2.y();
+    double crossZ = v12x * v23y - v12y * v23x;   // cm²
+
+    double len12 = std::sqrt(v12x*v12x + v12y*v12y);
+    double len23 = std::sqrt(v23x*v23x + v23y*v23y);
+    double chordProduct = len12 * len23;   // cm²
+
+    // Normalised bend: sin(angle between chords) = crossZ / (|v12| |v23|)
+    // Threshold: bend must exceed 0.5 mm over the available lever arm.
+    // 0.5 mm = 0.05 cm  →  sin_threshold = 0.05 / avg_chord
+    double avgChord = 0.5 * (len12 + len23);
+    double sinBend  = (chordProduct > 1e-6) ? std::abs(crossZ) / chordProduct : 0.0;
+    double sinThreshold = (avgChord > 1e-6) ? 0.05 / avgChord : 1.0;  // 0.5 mm / chord
+
+    bool chargeReliable = (sinBend >= sinThreshold);
+
+    bool clockwise;
+    if (chargeReliable) {
+        clockwise = (crossZ < 0.0);
+    } else {
+        // Track is too straight to determine charge sign from geometry alone.
+        // Use crossZ sign as best guess but mark as unreliable.
+        clockwise = (crossZ < 0.0);
+        debug() << "WARNING: near-straight track — crossZ=" << crossZ
+                << " sinBend=" << sinBend << " threshold=" << sinThreshold
+                << " — charge sign unreliable" << endmsg;
+    }
 
     // Geometric rotation direction gives charge sign only when B > 0.
     // For B < 0 the Lorentz force reverses, so the rotation sense flips:
@@ -2256,6 +2439,8 @@ bool DisplacedTracking::createTripletSeed(
     double charge = bSign * (clockwise ? 1.0 : -1.0);
 
     debug() << "Track direction: " << (clockwise ? "clockwise" : "counter-clockwise")
+            << "  crossZ=" << crossZ << "  sinBend=" << sinBend
+            << (chargeReliable ? "" : "  [UNRELIABLE]")
             << ", Bz=" << actualBz << " T, charge: " << charge << endmsg;
     
     // Fit z-component
@@ -2313,7 +2498,8 @@ bool DisplacedTracking::createTripletSeed(
             << qOverPt << ", " << phi << ", " << eta << ", " << d0 << ", " << z0 << ")" << endmsg;
     
     debug() << "EDM4hep parameters: d0=" << d0_mm << " mm, phi=" << phi 
-            << ", omega=" << omega << " 1/mm, z0=" << z0_mm 
+            << ", omega=" << std::scientific << std::setprecision(4) << omega 
+            << std::defaultfloat << " 1/mm, z0=" << z0_mm 
             << " mm, tanLambda=" << tanLambda << endmsg;
 
     // Create EDM4hep track
@@ -2558,7 +2744,10 @@ bool DisplacedTracking::createTripletSeed(
     usedHits[idx1] = true;
     usedHits[idx2] = true;
     usedHits[idx3] = true;
-    
+
+    // Count unreliable charge seeds for diagnostics
+    if (!chargeReliable) m_statChargeUndetermined++;
+
     debug() << "Created valid EDM4hep track with 3 hits" << endmsg;
     return true;
 }

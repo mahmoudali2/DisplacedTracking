@@ -401,6 +401,10 @@ private:
     mutable std::atomic<int> m_statTripletsCutByPT{0};
     // Triplets rejected by the 2D transverse angle-consistency guard
     mutable std::atomic<int> m_statAngleGuardRejected{0};
+    // Charge sign agreement between analytical (AtLastHit/AtFirstHit) and GenFit (AtOther)
+    mutable std::atomic<int> m_statChargeMatch{0};     // both states agree on sign
+    mutable std::atomic<int> m_statChargeMismatch{0};  // states disagree on sign
+    mutable std::atomic<int> m_statChargeUndetermined{0}; // |crossZ| too small to trust
     // =========================================================
 
 };
