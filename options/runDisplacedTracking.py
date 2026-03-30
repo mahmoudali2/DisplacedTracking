@@ -20,9 +20,9 @@ geoservice.EnableGeant4Geo = False
 # displaced tracker algorithm
 displaced = DisplacedTracking()
 displaced.DetectorName = "Muon-System"                   # Name of the detector to process      
-displaced.MaxChi2 = 100.0                                # Maximum chi-square for hit acceptance
+displaced.MaxChi2 = 10.0                                 # Maximum chi-square for hit acceptance
 displaced.MaxDist = 160.0                                # Maximum distance between two hits (cm)
-displaced.MinCosAngle2d = 0.5                            # Minimum cos(angle) between consecutive hit-segment vectors in the transverse (xy) plane for triplet seeding.
+displaced.MinCosAngle2d = 0.7                            # Minimum cos(angle) between consecutive hit-segment vectors in the transverse (xy) plane for triplet seeding.
 displaced.MaxSeedPT = 200.0                              # GeV Maximum Pt for the seed 
 displaced.ParticleType = "muon"                          # Particle type for material effects
 displaced.EncodingStringParameterName = "MuonSystemReadoutID"
@@ -43,8 +43,8 @@ displaced.OutputRecoSimLinkCollection = ["DisplacedTrackHitSimLinks"]    # Outpu
 
 # Input/Output service
 iosvc = IOSvc()
-iosvc.Input = "output_files/performance/3L_uGun_IDEA_MS_digi_100k.root"            # Input file with digitized hits
-iosvc.Output = "output_files/pt_res/3L_30cm_uGun_100k_tracks.root"              # Output file for reconstructed tracks
+iosvc.Input = "output_files/fake_rate/4L_50cm_10K_digi.root"            # Input file with digitized hits
+iosvc.Output = "output_files/fake_rate/4L_50cm_10K_tracks.root"              # Output file for reconstructed tracks
 
 # Application manager configuration
 ApplicationMgr(

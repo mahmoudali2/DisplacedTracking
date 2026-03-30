@@ -69,8 +69,6 @@
 
 // Include our adapter classes
 #include "GenFitAdapters.h"
-#include "GenfitField.hpp"
-#include "GenfitMaterialInterface.h"
 
 // Forward declarations
 namespace dd4hep {
