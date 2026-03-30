@@ -1543,7 +1543,7 @@ void DisplacedTracking::findTracks(
                 info() << "  Radius: " << radius << " cm" << endmsg;
                 info() << "  Chi2/DOF: " << chi2 << endmsg;
 
-                if (chi2 > 50.0) {
+                if (chi2 > 10.0) {
                     warning() << "Poor circle fit (chi2=" << chi2 << ") for track " << trackNumber
                               << " — removing 4th hit and all subsequent extension hits" << endmsg;
                     // Truncate back to 3 hits: the 4th hit (and anything built on top of it) is rejected
