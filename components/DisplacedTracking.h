@@ -345,6 +345,14 @@ private:
         "Maximum total φ spread in radians across all hits in a combination (max - min φ, "
         "relative to the innermost hit). Rejects combos spanning more than this azimuthal window. "
         "Set to -1 to disable."};
+    Gaudi::Property<double> m_maxConsecHitDist{this, "MaxConsecutiveHitDistance", 100.0,
+        "Maximum 3D distance in cm between consecutive (inner→outer ordered) hits in a combination. "
+        "Rejects combos where adjacent-layer hits are implausibly far apart (e.g. hits from "
+        "different physical tracks combined across a large gap). Set to -1 to disable."};
+    Gaudi::Property<double> m_maxPairHitDist{this, "MaxPairHitDistance", 200.0,
+        "Maximum 3D distance in cm between any pair of hits in a combination. "
+        "Catches ghost combos that span widely separated detector regions. "
+        "Must be >= MaxConsecutiveHitDistance. Set to -1 to disable."};
     // ────────────────────────────────────────────────────────────────────────
 
     // Services
@@ -385,6 +393,8 @@ private:
     mutable std::atomic<int> m_statIsolationRejected{0};    // rejected by HitIsolationCut
     mutable std::atomic<int> m_statConsecPhiRejected{0};    // rejected by MaxConsecDeltaPhi
     mutable std::atomic<int> m_statPhiSpreadRejected{0};    // rejected by MaxComboPhiSpread
+    mutable std::atomic<int> m_statConsecDistRejected{0};   // rejected by MaxConsecutiveHitDistance
+    mutable std::atomic<int> m_statPairDistRejected{0};     // rejected by MaxPairHitDistance
     mutable std::atomic<int> m_statOutlierHitsRemoved{0};   // total hits removed by outlier rejection
 
     // Hit multiplicity distribution

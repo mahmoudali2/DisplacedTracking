@@ -361,6 +361,8 @@ StatusCode DisplacedTracking::finalize() {
     int nIsoRej        = m_statIsolationRejected.load();
     int nConsecPhiRej  = m_statConsecPhiRejected.load();
     int nPhiSpreadRej  = m_statPhiSpreadRejected.load();
+    int nConsecDistRej = m_statConsecDistRejected.load();
+    int nPairDistRej   = m_statPairDistRejected.load();
     int nOutlier       = m_statOutlierHitsRemoved.load();
     int nH3       = m_statNhit3.load();
     int nH4       = m_statNhit4.load();
@@ -409,6 +411,8 @@ StatusCode DisplacedTracking::finalize() {
         << "║    Rejected by LayerSpan cut  : " << std::setw(7) << nLSRej   << "                   ║\n"
         << "║    Rejected by consec Δφ cut  : " << std::setw(7) << nConsecPhiRej  << "                   ║\n"
         << "║    Rejected by φ spread cut   : " << std::setw(7) << nPhiSpreadRej  << "                   ║\n"
+        << "║    Rejected by consec dist    : " << std::setw(7) << nConsecDistRej << "                   ║\n"
+        << "║    Rejected by pair dist      : " << std::setw(7) << nPairDistRej   << "                   ║\n"
         << "║    Rejected by Isolation cut  : " << std::setw(7) << nIsoRej        << "                   ║\n"
         << "║    Outlier hits removed       : " << std::setw(7) << nOutlier<< "  (" << std::setw(5) << std::fixed << std::setprecision(2) << avgOutlier << " / track)      ║\n"
         << "╠══════════════════════════════════════════════════════════╣\n"
@@ -963,6 +967,8 @@ void DisplacedTracking::findTracks(
         int evtFitFail       = 0;  // fit itself returned false
         int evtConsecPhiRej  = 0;  // rejected by MaxConsecDeltaPhi
         int evtPhiSpreadRej  = 0;  // rejected by MaxComboPhiSpread
+        int evtConsecDistRej = 0;  // rejected by MaxConsecutiveHitDistance
+        int evtPairDistRej   = 0;  // rejected by MaxPairHitDistance
 
         // ── Quality-cut lambdas ───────────────────────────────────────────────────
 
@@ -1064,6 +1070,48 @@ void DisplacedTracking::findTracks(
                     debug() << "    road FAIL (φ spread): spread=" << spread
                             << " rad  cut=" << maxSpread << " rad" << endmsg;
                     return false;
+                }
+            }
+            return true;
+        };
+
+        // Reject combos where hits are too far apart in 3D space.
+        // Two sub-cuts controlled by Gaudi properties (values in cm; positions in mm):
+        //   MaxConsecutiveHitDistance : max 3D dist between consecutive (inner→outer) hits
+        //   MaxPairHitDistance        : max 3D dist between any two hits in the combo
+        auto passesDistanceCuts = [&](const std::vector<size_t>& gIdxVec) -> bool {
+            const int    nH        = static_cast<int>(gIdxVec.size());
+            const double maxConsec = m_maxConsecHitDist.value();
+            const double maxPair   = m_maxPairHitDist.value();
+
+            if (maxConsec > 0.0) {
+                for (int i = 0; i < nH - 1; ++i) {
+                    const auto& pa = (*hits)[gIdxVec[i]].getPosition();
+                    const auto& pb = (*hits)[gIdxVec[i+1]].getPosition();
+                    double dx = pb[0]-pa[0], dy = pb[1]-pa[1], dz = pb[2]-pa[2];
+                    double d  = std::sqrt(dx*dx + dy*dy + dz*dz) * 0.1; // mm → cm
+                    if (d > maxConsec) {
+                        debug() << "    dist FAIL (consec): hit " << gIdxVec[i]
+                                << "→" << gIdxVec[i+1]
+                                << "  d=" << d << " cm  cut=" << maxConsec << " cm" << endmsg;
+                        return false;
+                    }
+                }
+            }
+            if (maxPair > 0.0) {
+                for (int i = 0; i < nH - 1; ++i) {
+                    for (int j = i + 1; j < nH; ++j) {
+                        const auto& pa = (*hits)[gIdxVec[i]].getPosition();
+                        const auto& pb = (*hits)[gIdxVec[j]].getPosition();
+                        double dx = pb[0]-pa[0], dy = pb[1]-pa[1], dz = pb[2]-pa[2];
+                        double d  = std::sqrt(dx*dx + dy*dy + dz*dz) * 0.1; // mm → cm
+                        if (d > maxPair) {
+                            debug() << "    dist FAIL (pair): hit " << gIdxVec[i]
+                                    << "↔" << gIdxVec[j]
+                                    << "  d=" << d << " cm  cut=" << maxPair << " cm" << endmsg;
+                            return false;
+                        }
+                    }
                 }
             }
             return true;
@@ -1173,6 +1221,33 @@ void DisplacedTracking::findTracks(
                                     debug() << "  k=" << k << " " << comboLabel()
                                             << " -> REJECT φ spread" << endmsg;
                                 }
+                            } else if (!passesDistanceCuts(gIdxVec)) {
+                                // Determine which sub-cut fired for the counter
+                                bool consecFail = false;
+                                {
+                                    const double mc = m_maxConsecHitDist.value();
+                                    if (mc > 0.0) {
+                                        const int nH = static_cast<int>(gIdxVec.size());
+                                        for (int ri = 0; ri < nH - 1 && !consecFail; ++ri) {
+                                            const auto& pa = (*hits)[gIdxVec[ri]].getPosition();
+                                            const auto& pb = (*hits)[gIdxVec[ri+1]].getPosition();
+                                            double dx=pb[0]-pa[0], dy=pb[1]-pa[1], dz=pb[2]-pa[2];
+                                            if (std::sqrt(dx*dx+dy*dy+dz*dz)*0.1 > mc)
+                                                consecFail = true;
+                                        }
+                                    }
+                                }
+                                if (consecFail) {
+                                    m_statConsecDistRejected++;
+                                    evtConsecDistRej++;
+                                    debug() << "  k=" << k << " " << comboLabel()
+                                            << " -> REJECT consec dist" << endmsg;
+                                } else {
+                                    m_statPairDistRejected++;
+                                    evtPairDistRej++;
+                                    debug() << "  k=" << k << " " << comboLabel()
+                                            << " -> REJECT pair dist" << endmsg;
+                                }
                             } else if (!allIsolated(gIdxVec)) {
                                 m_statIsolationRejected++;
                                 evtIsoRej++;
@@ -1204,11 +1279,23 @@ void DisplacedTracking::findTracks(
                                             << " -> REJECT chi2 threshold="
                                             << m_nHitMaxChi2NDF.value() << endmsg;
                                 } else {
-                                    // Prefer more hits; among same k prefer lower chi2.
-                                    // This prevents 3-hit chi2=0 (NDF=0) from always
-                                    // beating higher-k combinations.
-                                    bool isBetter = (k > bestCombo.nHits) ||
-                                                    (k == bestCombo.nHits && cchi2ndf < bestCombo.chi2ndf);
+                                    // Selection priority:
+                                    //  1. More hits always beats fewer hits.
+                                    //  2. Same hit count, different k > 3: prefer lower chi2/NDF.
+                                    //  3. Both combos have k=3 (NDF=0, chi2 always 0): the chi2
+                                    //     gives no information.  Instead prefer the combo whose
+                                    //     circle has the largest radius (= highest pT), capped
+                                    //     by MaxSeedPT at track-finalisation.  This picks the
+                                    //     most "straight" (least curved = most energetic)
+                                    //     combination, which is more likely to be the signal muon
+                                    //     rather than a low-pT secondary spiral.
+                                    bool isBetter;
+                                    if (k == 3 && bestCombo.nHits == 3) {
+                                        isBetter = (cr > bestCombo.radius);
+                                    } else {
+                                        isBetter = (k > bestCombo.nHits) ||
+                                                   (k == bestCombo.nHits && cchi2ndf < bestCombo.chi2ndf);
+                                    }
                                     if (isBetter) {
                                         bestCombo.hiiVec    = hiiVec;
                                         bestCombo.gIdxVec   = gIdxVec;
@@ -1261,6 +1348,8 @@ void DisplacedTracking::findTracks(
                << " | evaluated=" << evtCombosEval
                << " consecPhiRej=" << evtConsecPhiRej
                << " phiSpreadRej=" << evtPhiSpreadRej
+               << " consecDistRej=" << evtConsecDistRej
+               << " pairDistRej=" << evtPairDistRej
                << " isoRej=" << evtIsoRej
                << " chi2Rej=" << evtChi2Rej
                << " fitFail=" << evtFitFail
