@@ -170,30 +170,14 @@ public:
         double innerFieldStrength, double outerFieldStrength,
         const Eigen::Vector3d& p1, const Eigen::Vector3d& p2, const Eigen::Vector3d& p3) const;    
 
-    // Create a track seed from three hits (triplet seeding)
-    bool createTripletSeed(const edm4hep::TrackerHitPlane& hit1,
-                        const edm4hep::TrackerHitPlane& hit2,
-                        const edm4hep::TrackerHitPlane& hit3,
-                        edm4hep::TrackCollection* tracks,
-                        edm4hep::TrackerHitPlaneCollection& outputHits,
-                        const LinkPropagator& propagateLink,
-                        std::vector<bool>& usedHits,
-                        size_t idx1, size_t idx2, size_t idx3) const;
-
     // Helper functions for circle fitting
-    bool fitCircle(double x1, double y1, double x2, double y2, double x3, double y3, 
+    bool fitCircle(double x1, double y1, double x2, double y2, double x3, double y3,
                 double& x0, double& y0, double& radius) const;
 
     // Helper function for line fitting
     void fitLine(double x1, double y1, double x2, double y2, double x3, double y3,
                 double& slope, double& intercept) const;
 
-    // Set maximum chi-square for hit acceptance
-    void setMaxChi2(double chi2) { m_maxChi2 = chi2; }
-    
-    // Get maximum chi-square
-    double getMaxChi2() const { return m_maxChi2; }
-    
     // Calculate radiation length between two points
     double getRadiationLength(const dd4hep::rec::Vector3D& start, const dd4hep::rec::Vector3D& end) const;
     
@@ -233,20 +217,14 @@ private:
     // Group surfaces by detector layer
     std::map<int, std::vector<const dd4hep::rec::Surface*>> getSurfacesByLayer() const;
 
-    // Looking for compatible hits in the +3 layer (initially extra 4th layer)
-    bool findCompatibleExtraHit(
-        std::vector<edm4hep::TrackerHitPlane>& trackHits,
-        const edm4hep::TrackerHitPlaneCollection* allHits,
-        std::vector<bool>& usedHits,
-        const Eigen::Vector3d& seedDirection,
-        double coneHalfAngleDeg = 35.0) const;
-        
-    // Fit circle to 4 hits using least squares and calculate chi2
-    // fitCov3x3 is the 3×3 covariance matrix on [x0, y0, R] in cm² from the WLS fit.
-    // It is set on success and used by the caller to propagate uncertainties to EDM4hep track params.
-    bool fitCircleToFourHits(const std::vector<edm4hep::TrackerHitPlane>& hits,
-                            double& x0, double& y0, double& radius, double& chi2,
-                            Eigen::Matrix3d& fitCov3x3) const;
+    // Fit circle to N≥3 hits using weighted least-squares + Gauss-Newton refinement.
+    // fitCov3x3 is the 3×3 covariance on [x0,y0,R] (cm²).
+    // residualsCm returns the per-hit geometric residual (cm) — used for outlier rejection.
+    // Returns false if the fit is degenerate or NDF<1.
+    bool fitCircleNHits(const std::vector<edm4hep::TrackerHitPlane>& hits,
+                        double& x0, double& y0, double& radius, double& chi2ndf,
+                        Eigen::Matrix3d& fitCov3x3,
+                        std::vector<double>& residualsCm) const;
 
     // fitTrackWithGenFit with extrapolation support
     bool fitTrackWithGenFit(
@@ -324,10 +302,8 @@ private:
     
     // Properties
     Gaudi::Property<std::string> m_detectorName{this, "DetectorName", "Tracker", "Name of detector to process"};
-    Gaudi::Property<double> m_maxChi2{this, "MaxChi2", 10.0, "Maximum chi2 for hit-track compatibility"};
     Gaudi::Property<std::string> m_particleType{this, "ParticleType", "pion", "Particle type for material effects"};
     Gaudi::Property<std::string> m_encodingStringParameter{this, "EncodingStringParameterName", "GlobalTrackerReadoutID", "Name of DD4hep parameter with the encoding string"};
-    Gaudi::Property<double> m_maxDist{this, "MaxDist", 150.0, "Maximum distance between two hits (cm)"};
     // GenFit properties
     Gaudi::Property<int> m_maxFitIterations{this, "MaxFitIterations", 4, "Maximum iterations for track fitting"};
     Gaudi::Property<bool> m_useGenFit{this, "UseGenFit", true, "Use GenFit for track fitting"};
@@ -339,10 +315,37 @@ private:
         "Target radius in cm for inner RK4 propagation"};
     Gaudi::Property<double> m_maxSeedPT{this, "MaxSeedPT", 200.0,
         "Maximum allowed seed pT in GeV/c. Triplets above this threshold are rejected unless they are the only option, in which case the lowest-pT candidate is kept."};
-    Gaudi::Property<double> m_minCosAngle2d{this, "MinCosAngle2d", 0.5,
-        "Minimum cos(angle) between consecutive hit-segment vectors in the transverse (xy) plane for triplet seeding. "
-        "Rejects triplets where the transverse direction changes by more than acos(value). "
-        "Default 0.5 (~60 deg). Set to -1.0 to disable."};
+
+
+    // ── N-hit combinatorial strategy properties ─────────────────────────────
+    Gaudi::Property<int> m_minTrackHits{this, "MinTrackHits", 3,
+        "Minimum number of hits required to form a track."};
+    Gaudi::Property<int> m_maxCombinatorialHits{this, "MaxCombinatorialHits", 7,
+        "Maximum number of hits considered per combination (caps C(N,k) combinatorics). "
+        "Increase cautiously — C(10,7)=120 is fine, C(20,7)=77520 may be slow."};
+    Gaudi::Property<double> m_nHitMaxChi2NDF{this, "NHitMaxChi2NDF", 5.0,
+        "Maximum chi2/NDF of the N-hit circle fit to accept a combination."};
+    Gaudi::Property<double> m_outlierSigma{this, "OutlierSigma", 5.0,
+        "Outlier rejection threshold in units of SigmaHitDefault. "
+        "Hits with residual > OutlierSigma * SigmaHitDefault are iteratively removed."};
+    Gaudi::Property<double> m_sigmaHitDefault{this, "SigmaHitDefault", 0.04,
+        "Default hit position resolution in cm (0.04 cm = 0.4 mm) used when hit du/dv is not set."};
+    Gaudi::Property<double> m_hitIsolationCut{this, "HitIsolationCut", 2.0,
+        "Minimum distance in cm between a candidate hit and any other unused hit not in the "
+        "combination. Set to 0 to disable. Rejects hits inside secondary shower clusters."};
+    Gaudi::Property<int> m_minLayerSpan{this, "MinLayerSpan", 3,
+        "Minimum number of distinct composite detector layers that must be covered by a combination."};
+    Gaudi::Property<int> m_maxOutlierIterations{this, "MaxOutlierIterations", 3,
+        "Maximum rounds of outlier removal per track."};
+    Gaudi::Property<double> m_maxConsecDeltaPhi{this, "MaxConsecDeltaPhi", 0.5,
+        "Maximum |Δφ| in radians between consecutive (adjacent-layer) hits in a combination. "
+        "Rejects cross-track combos where the azimuthal step between layers is too large. "
+        "Set to -1 to disable."};
+    Gaudi::Property<double> m_maxComboPhiSpread{this, "MaxComboPhiSpread", 1.0,
+        "Maximum total φ spread in radians across all hits in a combination (max - min φ, "
+        "relative to the innermost hit). Rejects combos spanning more than this azimuthal window. "
+        "Set to -1 to disable."};
+    // ────────────────────────────────────────────────────────────────────────
 
     // Services
     ServiceHandle<IGeoSvc> m_geoSvc{this, "GeoSvc", "GeoSvc", "Detector geometry service"};
@@ -363,19 +366,35 @@ private:
     std::map<std::string, ParticleProperties> m_particleMap;
 
     // ==================== RUN STATISTICS ====================
+    // General
     mutable std::atomic<int> m_statTotalEvents{0};
     mutable std::atomic<int> m_statTracksReconstructed{0};
+
+    // Charge sign
     mutable std::atomic<int> m_statPositiveCharge{0};
     mutable std::atomic<int> m_statNegativeCharge{0};
-    mutable std::atomic<int> m_statInnerSeedUsed{0};
-    mutable std::atomic<int> m_statFallbackSeedUsed{0};
-    mutable std::atomic<int> m_statHighestPtInner{0};
-    mutable std::atomic<int> m_statHighestPtInner2{0};
-    mutable std::atomic<int> m_statHighestPtFallback{0};
-    mutable std::atomic<int> m_statTotalTripletCombos{0};
-    mutable std::atomic<int> m_statValidTriplets{0};
-    mutable std::atomic<int> m_statFourHitTracks{0};
-    mutable std::atomic<int> m_statThreeHitTracks{0};
+    mutable std::atomic<int> m_statChargeUndetermined{0};  // |sinBend| below reliability threshold
+    mutable std::atomic<int> m_statChargeMatch{0};         // AtLastHit vs AtFirstHit agree
+    mutable std::atomic<int> m_statChargeMismatch{0};      // AtLastHit vs AtFirstHit disagree
+
+    // N-hit combinatorial search
+    mutable std::atomic<int> m_statTotalTripletCombos{0};  // total C(N,k) combinations evaluated
+    mutable std::atomic<int> m_statValidTriplets{0};        // combinations that produced a track
+    mutable std::atomic<int> m_statDupCompositeRejected{0};  // rejected: ≥2 hits share a compositeID
+    mutable std::atomic<int> m_statLayerSpanRejected{0};    // rejected by MinLayerSpan cut
+    mutable std::atomic<int> m_statIsolationRejected{0};    // rejected by HitIsolationCut
+    mutable std::atomic<int> m_statConsecPhiRejected{0};    // rejected by MaxConsecDeltaPhi
+    mutable std::atomic<int> m_statPhiSpreadRejected{0};    // rejected by MaxComboPhiSpread
+    mutable std::atomic<int> m_statOutlierHitsRemoved{0};   // total hits removed by outlier rejection
+
+    // Hit multiplicity distribution
+    mutable std::atomic<int> m_statNhit3{0};
+    mutable std::atomic<int> m_statNhit4{0};
+    mutable std::atomic<int> m_statNhit5{0};
+    mutable std::atomic<int> m_statNhit6{0};
+    mutable std::atomic<int> m_statNhit7plus{0};
+
+    // Track states
     mutable std::atomic<int> m_statStateAtFirstHit{0};
     mutable std::atomic<int> m_statStateAtLastHit{0};
     mutable std::atomic<int> m_statStateAtCalorimeter{0};
@@ -385,24 +404,24 @@ private:
     mutable std::atomic<int> m_statGenFitSuccess{0};
 
     // GenFit detailed counters
-    mutable std::atomic<int>   m_statGenFitFailed{0};        // isFitted==false after processTrack
-    mutable std::atomic<int>   m_statGenFitIllCond{0};       // ill-conditioned covariance
-    mutable std::atomic<int>   m_statGenFitException{0};     // genfit::Exception thrown
-    mutable std::atomic<int>   m_statGenFitChi2Count{0};     // number of valid chi2/ndf values
-    mutable std::atomic<int>   m_statGenFitChi2BadCount{0};  // fits with chi2/ndf > 1000 (non-physical)
-    // chi2 sum stored as integer × 1000 to avoid non-atomic float (multiply by 1000 before storing)
-    mutable std::atomic<long long> m_statGenFitChi2Sum{0};   // sum of (chi2/ndf * 1000)
+    mutable std::atomic<int>       m_statGenFitFailed{0};
+    mutable std::atomic<int>       m_statGenFitIllCond{0};
+    mutable std::atomic<int>       m_statGenFitException{0};
+    mutable std::atomic<int>       m_statGenFitChi2Count{0};
+    mutable std::atomic<int>       m_statGenFitChi2BadCount{0};
+    mutable std::atomic<long long> m_statGenFitChi2Sum{0};
 
-    // Triplet quality: flag bad geometry (direct vs sagitta radius disagreement > 2×)
+    // Legacy counters (kept to avoid reference errors; no longer incremented)
     mutable std::atomic<int> m_statTripletBadGeom{0};
-    // Triplets rejected by MaxSeedPT threshold (fallback used when all above threshold)
     mutable std::atomic<int> m_statTripletsCutByPT{0};
-    // Triplets rejected by the 2D transverse angle-consistency guard
     mutable std::atomic<int> m_statAngleGuardRejected{0};
-    // Charge sign agreement between analytical (AtLastHit/AtFirstHit) and GenFit (AtOther)
-    mutable std::atomic<int> m_statChargeMatch{0};     // both states agree on sign
-    mutable std::atomic<int> m_statChargeMismatch{0};  // states disagree on sign
-    mutable std::atomic<int> m_statChargeUndetermined{0}; // |crossZ| too small to trust
+    mutable std::atomic<int> m_statInnerSeedUsed{0};
+    mutable std::atomic<int> m_statFallbackSeedUsed{0};
+    mutable std::atomic<int> m_statHighestPtInner{0};
+    mutable std::atomic<int> m_statHighestPtInner2{0};
+    mutable std::atomic<int> m_statHighestPtFallback{0};
+    mutable std::atomic<int> m_statFourHitTracks{0};
+    mutable std::atomic<int> m_statThreeHitTracks{0};
     // =========================================================
 
 };

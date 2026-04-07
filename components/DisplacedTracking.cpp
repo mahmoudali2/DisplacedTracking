@@ -347,44 +347,45 @@ StatusCode DisplacedTracking::finalize() {
     // ================================================================
     //                   RUN STATISTICS SUMMARY
     // ================================================================
-    int nEvt    = m_statTotalEvents.load();
-    int nTrk    = m_statTracksReconstructed.load();
-    int nPos    = m_statPositiveCharge.load();
-    int nNeg    = m_statNegativeCharge.load();
-    int nUndet  = m_statChargeUndetermined.load();
-    int nMatch  = m_statChargeMatch.load();
-    int nMis    = m_statChargeMismatch.load();
-    int nInner  = m_statInnerSeedUsed.load();
-    int nFall   = m_statFallbackSeedUsed.load();
-    int nPtI    = m_statHighestPtInner.load();
-    int nPtI2   = m_statHighestPtInner2.load();
-    int nPtF    = m_statHighestPtFallback.load();
-    int nCombos = m_statTotalTripletCombos.load();
-    int nValid  = m_statValidTriplets.load();
-    int n4hit   = m_statFourHitTracks.load();
-    int n3hit   = m_statThreeHitTracks.load();
-    int nSF     = m_statStateAtFirstHit.load();
-    int nSL     = m_statStateAtLastHit.load();
-    int nSC     = m_statStateAtCalorimeter.load();
-    int nSO     = m_statStateAtOther.load();
-    int nSV     = m_statStateAtVertex.load();
-    int nProp   = m_statInnerPropSuccess.load();
-    int nGF     = m_statGenFitSuccess.load();
-    int nGFFail = m_statGenFitFailed.load();
-    int nGFIll  = m_statGenFitIllCond.load();
-    int nGFExc  = m_statGenFitException.load();
-    int nGFChi2N = m_statGenFitChi2Count.load();
-    double avgChi2ndf = (nGFChi2N > 0) 
-                        ? (m_statGenFitChi2Sum.load() / 1000.0) / nGFChi2N 
+    int nEvt      = m_statTotalEvents.load();
+    int nTrk      = m_statTracksReconstructed.load();
+    int nPos      = m_statPositiveCharge.load();
+    int nNeg      = m_statNegativeCharge.load();
+    int nUndet    = m_statChargeUndetermined.load();
+    int nMatch    = m_statChargeMatch.load();
+    int nMis      = m_statChargeMismatch.load();
+    int nCombos   = m_statTotalTripletCombos.load();
+    int nValid    = m_statValidTriplets.load();
+    int nDupComp  = m_statDupCompositeRejected.load();
+    int nLSRej    = m_statLayerSpanRejected.load();
+    int nIsoRej        = m_statIsolationRejected.load();
+    int nConsecPhiRej  = m_statConsecPhiRejected.load();
+    int nPhiSpreadRej  = m_statPhiSpreadRejected.load();
+    int nOutlier       = m_statOutlierHitsRemoved.load();
+    int nH3       = m_statNhit3.load();
+    int nH4       = m_statNhit4.load();
+    int nH5       = m_statNhit5.load();
+    int nH6       = m_statNhit6.load();
+    int nH7p      = m_statNhit7plus.load();
+    int nSF       = m_statStateAtFirstHit.load();
+    int nSL       = m_statStateAtLastHit.load();
+    int nSC       = m_statStateAtCalorimeter.load();
+    int nSO       = m_statStateAtOther.load();
+    int nSV       = m_statStateAtVertex.load();
+    int nProp     = m_statInnerPropSuccess.load();
+    int nGF       = m_statGenFitSuccess.load();
+    int nGFFail   = m_statGenFitFailed.load();
+    int nGFIll    = m_statGenFitIllCond.load();
+    int nGFExc    = m_statGenFitException.load();
+    int nGFChi2N  = m_statGenFitChi2Count.load();
+    double avgChi2ndf = (nGFChi2N > 0)
+                        ? (m_statGenFitChi2Sum.load() / 1000.0) / nGFChi2N
                         : 0.0;
-    int nBadGeom  = m_statTripletBadGeom.load();
-    int nPTCut    = m_statTripletsCutByPT.load();
-    int nAngRej   = m_statAngleGuardRejected.load();
-    double trkPerEvt = (nEvt>0)   ? double(nTrk)/double(nEvt) : 0.0;
-    double seedEff   = (nCombos>0)? 100.0*double(nValid)/double(nCombos) : 0.0;
-    double innerFrac = (nTrk>0)   ? 100.0*double(nInner)/double(nTrk) : 0.0;
-    double propFrac  = (nTrk>0)   ? 100.0*double(nProp)/double(nTrk) : 0.0;
-    double gfFrac    = (nTrk>0)   ? 100.0*double(nGF)/double(nTrk) : 0.0;
+    double trkPerEvt  = (nEvt > 0)    ? double(nTrk)  / double(nEvt)   : 0.0;
+    double comboEff   = (nCombos > 0) ? 100.0*double(nValid)/double(nCombos) : 0.0;
+    double propFrac   = (nTrk > 0)    ? 100.0*double(nProp) / double(nTrk)  : 0.0;
+    double gfFrac     = (nTrk > 0)    ? 100.0*double(nGF)   / double(nTrk)  : 0.0;
+    double avgOutlier = (nValid > 0)  ? double(nOutlier)/double(nValid) : 0.0;
     info() << "\n"
         << "╔══════════════════════════════════════════════════════════╗\n"
         << "║          DISPLACED TRACKING  -  RUN SUMMARY             ║\n"
@@ -397,33 +398,30 @@ StatusCode DisplacedTracking::finalize() {
         << "║    Positive particles (w > 0) : " << std::setw(7) << nPos    << "                   ║\n"
         << "║    Negative particles (w < 0) : " << std::setw(7) << nNeg    << "                   ║\n"
         << "║    Unreliable sign (near-str) : " << std::setw(7) << nUndet  << "                   ║\n"
-        << "║  4-hit(AtLastHit) vs 3-hit(AtFirstHit) sign check      ║\n"
-        << "║    Charge sign MATCH          : " << std::setw(7) << nMatch  << "  (4-hit tracks only)  ║\n"
-        << "║    Charge sign MISMATCH       : " << std::setw(7) << nMis    << "  (4-hit tracks only)  ║\n"
+        << "║  N-hit AtLastHit vs AtFirstHit sign check                ║\n"
+        << "║    Charge sign MATCH          : " << std::setw(7) << nMatch  << "                   ║\n"
+        << "║    Charge sign MISMATCH       : " << std::setw(7) << nMis    << "                   ║\n"
         << "╠══════════════════════════════════════════════════════════╣\n"
-        << "║  SEEDING STRATEGY                                        ║\n"
-        << "║    Inner-layer seed (0,1,2)   : " << std::setw(7) << nInner  << "  (" << std::setw(5) << std::fixed << std::setprecision(1) << innerFrac << "% of tracks)  ║\n"
-        << "║    Fallback Phase 1/2 seed    : " << std::setw(7) << nFall   << "                   ║\n"
+        << "║  N-HIT COMBINATORIAL SEARCH                              ║\n"
+        << "║    C(N,k) combos evaluated    : " << std::setw(7) << nCombos  << "                   ║\n"
+        << "║    Tracks found (best combo)  : " << std::setw(7) << nValid   << "  (" << std::setw(5) << std::fixed << std::setprecision(1) << comboEff << "% of combos)  ║\n"
+        << "║    Rejected by dupComposite   : " << std::setw(7) << nDupComp << "                   ║\n"
+        << "║    Rejected by LayerSpan cut  : " << std::setw(7) << nLSRej   << "                   ║\n"
+        << "║    Rejected by consec Δφ cut  : " << std::setw(7) << nConsecPhiRej  << "                   ║\n"
+        << "║    Rejected by φ spread cut   : " << std::setw(7) << nPhiSpreadRej  << "                   ║\n"
+        << "║    Rejected by Isolation cut  : " << std::setw(7) << nIsoRej        << "                   ║\n"
+        << "║    Outlier hits removed       : " << std::setw(7) << nOutlier<< "  (" << std::setw(5) << std::fixed << std::setprecision(2) << avgOutlier << " / track)      ║\n"
         << "╠══════════════════════════════════════════════════════════╣\n"
-        << "║  HIGHEST-pT DISAMBIGUATION (# events with >1 candidate) ║\n"
-        << "║    Best-pT - inner 0,1,2      : " << std::setw(7) << nPtI   << "                   ║\n"
-        << "║    Best-pT - inner+layer3     : " << std::setw(7) << nPtI2  << "                   ║\n"
-        << "║    Best-pT - fallback Ph.1/2  : " << std::setw(7) << nPtF   << "                   ║\n"
-        << "╠══════════════════════════════════════════════════════════╣\n"
-        << "║  TRIPLET SEEDING                                         ║\n"
-        << "║    Combinations tried         : " << std::setw(7) << nCombos << "                   ║\n"
-        << "║    Valid triplets formed      : " << std::setw(7) << nValid  << "  (" << std::setw(5) << std::fixed << std::setprecision(1) << seedEff  << "% efficiency)  ║\n"
-        << "║    Rejected by angle guard    : " << std::setw(7) << nAngRej << "                   ║\n"
-        << "║    Marginal geometry (warned) : " << std::setw(7) << nBadGeom << "                   ║\n"
-        << "║    Rejected by MaxSeedPT cut  : " << std::setw(7) << nPTCut  << "                   ║\n"
-        << "╠══════════════════════════════════════════════════════════╣\n"
-        << "║  HIT MULTIPLICITY                                        ║\n"
-        << "║    Tracks with 4 hits         : " << std::setw(7) << n4hit   << "                   ║\n"
-        << "║    Tracks with 3 hits         : " << std::setw(7) << n3hit   << "                   ║\n"
+        << "║  HIT MULTIPLICITY PER TRACK                              ║\n"
+        << "║    3 hits                     : " << std::setw(7) << nH3     << "                   ║\n"
+        << "║    4 hits                     : " << std::setw(7) << nH4     << "                   ║\n"
+        << "║    5 hits                     : " << std::setw(7) << nH5     << "                   ║\n"
+        << "║    6 hits                     : " << std::setw(7) << nH6     << "                   ║\n"
+        << "║    7+ hits                    : " << std::setw(7) << nH7p    << "                   ║\n"
         << "╠══════════════════════════════════════════════════════════╣\n"
         << "║  TRACK STATES STORED                                     ║\n"
-        << "║    AtFirstHit  (seed state)   : " << std::setw(7) << nSF     << "                   ║\n"
-        << "║    AtLastHit   (4-hit circle) : " << std::setw(7) << nSL     << "                   ║\n"
+        << "║    AtFirstHit  (N-hit seed)   : " << std::setw(7) << nSF     << "                   ║\n"
+        << "║    AtLastHit   (N-hit circle) : " << std::setw(7) << nSL     << "                   ║\n"
         << "║    AtCalorimeter (direct fit) : " << std::setw(7) << nSC     << "                   ║\n"
         << "║    AtOther     (GenFit fit)   : " << std::setw(7) << nSO     << "                   ║\n"
         << "║    AtVertex    (inner prop.)  : " << std::setw(7) << nSV     << "                   ║\n"
@@ -728,6 +726,42 @@ void DisplacedTracking::findTracks(
         recoToSimMap[recoHit.id().index] = link.getTo();
     }
 
+    // ── MC truth overview: list all unique MCParticles associated with event hits ─
+    // Printed at DEBUG level once per event, before track finding begins.
+    if (msgLevel(MSG::DEBUG)) {
+        debug() << "MC truth particles for this event (from RecoSim links):" << endmsg;
+        std::unordered_set<int> seenMCIdx;
+        int nLinked = 0;
+        for (size_t gi = 0; gi < hits->size(); ++gi) {
+            auto it = recoToSimMap.find((*hits)[gi].id().index);
+            if (it == recoToSimMap.end()) continue;
+            nLinked++;
+            auto mcPart = it->second.getParticle();
+            if (!mcPart.isAvailable()) continue;
+            int mcIdx = mcPart.id().index;
+            if (!seenMCIdx.insert(mcIdx).second) continue;  // already printed
+            const auto& mom = mcPart.getMomentum();
+            const auto& vtx = mcPart.getVertex();
+            double mcPt  = std::sqrt(mom.x*mom.x + mom.y*mom.y);
+            double mcP   = std::sqrt(mcPt*mcPt + mom.z*mom.z);
+            double mcEta = (mcPt > 0.0) ? std::asinh(mom.z / mcPt) : 0.0;
+            double mcPhi = std::atan2(mom.y, mom.x);
+            double vtxR  = std::sqrt(vtx.x*vtx.x + vtx.y*vtx.y) / 10.0;  // mm→cm
+            debug() << "  [MC truth] PDG=" << mcPart.getPDG()
+                    << "  q=" << mcPart.getCharge()
+                    << "  pT=" << std::fixed << std::setprecision(3) << mcPt << " GeV/c"
+                    << "  pz=" << mom.z << " GeV/c"
+                    << "  |p|=" << mcP << " GeV/c"
+                    << "  phi=" << mcPhi << " rad"
+                    << "  eta=" << mcEta
+                    << "  vtx_R=" << vtxR << " cm"
+                    << "  vtx_z=" << vtx.z/10.0 << " cm"
+                    << endmsg;
+        }
+        debug() << "  => " << nLinked << "/" << hits->size() << " hits linked to sim, "
+                << seenMCIdx.size() << " unique MC particle(s)" << endmsg;
+    }
+
     // Helper lambda: given a newly created output hit whose data was copied from
     // an input hit, propagate the RecoSim link to the output link collection
     auto propagateLink = [&](const edm4hep::MutableTrackerHitPlane& outHit,
@@ -890,411 +924,566 @@ void DisplacedTracking::findTracks(
 
         edm4hep::TrackCollection candidateTracks;  // Temporary collection for this iteration
 
-        bool innerSeedChosen = false;
+        // ── N-HIT COMBINATORIAL SEEDING ───────────────────────────────────────────
+        // Strategy: try all C(N,k) hit combinations for k = MaxCombinatorialHits
+        // down to MinTrackHits, score each by chi2/NDF from a full N-hit circle fit,
+        // apply isolation and layer-span quality cuts, then iteratively remove outlier
+        // hits from the best combination.  Finally seed from its 3 innermost hits.
+        // ─────────────────────────────────────────────────────────────────────────
 
-        // -------------------------------------------------------------------------
-        // Try to seed from the INNER layers (0,1,2) first (across all composites)
-        // -------------------------------------------------------------------------
+        // Build a flat ordered list of allHitInfo indices, layer-sorted (inner→outer).
+        std::vector<size_t> orderedHII;
+        orderedHII.reserve(allHitInfo.size());
+        for (const auto& cid : compositeLayerIDs) {
+            for (size_t idx : hitIndicesByCompositeLayer[cid])
+                orderedHII.push_back(idx);
+        }
+
+        const int nAvail = static_cast<int>(orderedHII.size());
+        const int maxK   = std::min(nAvail, m_maxCombinatorialHits.value());
+        const int minK   = std::max(3, m_minTrackHits.value());
+
+        // Result of the best combination found so far
+        struct CombResult {
+            std::vector<size_t> hiiVec;       // indices into allHitInfo
+            std::vector<size_t> gIdxVec;      // indices into the full hit collection
+            double chi2ndf  = std::numeric_limits<double>::max();
+            double x0 = 0, y0 = 0, radius = 0;
+            Eigen::Matrix3d fitCov = Eigen::Matrix3d::Zero();
+            std::vector<double> residuals;
+            int nHits = 0;
+        };
+        CombResult bestCombo;
+        bool foundCombination = false;
+
+        // Per-event diagnostic counters (not atomic — single-threaded per event)
+        int evtCombosEval    = 0;  // combinations that reached the fit stage
+        int evtIsoRej        = 0;  // rejected by isolation cut
+        int evtChi2Rej       = 0;  // rejected by chi2/ndf threshold
+        int evtFitFail       = 0;  // fit itself returned false
+        int evtConsecPhiRej  = 0;  // rejected by MaxConsecDeltaPhi
+        int evtPhiSpreadRej  = 0;  // rejected by MaxComboPhiSpread
+
+        // ── Quality-cut lambdas ───────────────────────────────────────────────────
+
+        // Reverse map: global hit index → compositeID (for use in isolation check)
+        std::unordered_map<size_t, int> gIdxToComposite;
+        gIdxToComposite.reserve(allHitInfo.size());
+        for (const auto& hi : allHitInfo) {
+            gIdxToComposite[hi.index] = hi.compositeID;
+        }
+
+        // Isolation check: each selected hit must be at least m_hitIsolationCut cm
+        // away from every OTHER unused hit not in the current combination AND not in
+        // the same compositeID region.  Same-region secondary hits (delta-rays, Compton
+        // electrons from the muon in the same detector cell) are expected neighbours
+        // and must not disqualify the signal hit — the one-hit-per-compositeID
+        // constraint is already enforced structurally by the combinatorial loop.
+        auto allIsolated = [&](const std::vector<size_t>& gIdxVec) -> bool {
+            const double cut = m_hitIsolationCut.value();
+            if (cut <= 0.0) return true;
+            for (size_t gi : gIdxVec) {
+                const auto& refPos = (*hits)[gi].getPosition();
+                Eigen::Vector3d ref(refPos[0]/10.0, refPos[1]/10.0, refPos[2]/10.0);
+                // compositeID of this selected hit
+                int giComposite = -999;
+                auto cgit = gIdxToComposite.find(gi);
+                if (cgit != gIdxToComposite.end()) giComposite = cgit->second;
+                for (size_t j = 0; j < hits->size(); ++j) {
+                    if (j == gi) continue;
+                    if (globalUsedHits[j]) continue;
+                    bool inCombo = false;
+                    for (size_t si : gIdxVec) { if (si == j) { inCombo = true; break; } }
+                    if (inCombo) continue;
+                    // Skip hits that share the same compositeID as the selected hit:
+                    // those are same-region secondaries, not cross-region contamination.
+                    int jComposite = -999;
+                    auto cjit = gIdxToComposite.find(j);
+                    if (cjit != gIdxToComposite.end()) jComposite = cjit->second;
+                    if (jComposite == giComposite) continue;
+                    const auto& p = (*hits)[j].getPosition();
+                    Eigen::Vector3d cand(p[0]/10.0, p[1]/10.0, p[2]/10.0);
+                    double dist = (cand - ref).norm();
+                    if (dist < cut) {
+                        debug() << "    isolation FAIL: selected hit gIdx=" << gi
+                                << " compositeID=" << giComposite
+                                << " too close to neighbour gIdx=" << j
+                                << " compositeID=" << jComposite
+                                << "  dist=" << dist << " cm  cut=" << cut << " cm" << endmsg;
+                        return false;
+                    }
+                }
+            }
+            return true;
+        };
+
+        // Road cuts: consecutive-layer Δφ and total φ spread across the combo.
+        // Both cuts reject combinations whose hits span an azimuthal window too wide
+        // to belong to a single track.  Hits in gIdxVec are ordered inner→outer
+        // (slot order matches compositeLayerIDs which is sorted by layer number).
+        auto passesRoadCuts = [&](const std::vector<size_t>& gIdxVec) -> bool {
+            const int nH = static_cast<int>(gIdxVec.size());
+
+            // Pre-compute φ for each hit (mm positions, ratio is unit-independent)
+            std::vector<double> phi(nH);
+            for (int i = 0; i < nH; ++i) {
+                const auto& p = (*hits)[gIdxVec[i]].getPosition();
+                phi[i] = std::atan2(p[1], p[0]);
+            }
+
+            // Cut 1: consecutive-layer |Δφ|
+            const double maxConsec = m_maxConsecDeltaPhi.value();
+            if (maxConsec > 0.0) {
+                for (int i = 0; i < nH - 1; ++i) {
+                    double dPhi = phi[i+1] - phi[i];
+                    while (dPhi >  M_PI) dPhi -= 2*M_PI;
+                    while (dPhi < -M_PI) dPhi += 2*M_PI;
+                    dPhi = std::abs(dPhi);
+                    if (dPhi > maxConsec) {
+                        debug() << "    road FAIL (consec Δφ): gIdx="
+                                << gIdxVec[i] << "→" << gIdxVec[i+1]
+                                << "  dPhi=" << dPhi << " rad  cut=" << maxConsec << " rad" << endmsg;
+                        return false;
+                    }
+                }
+            }
+
+            // Cut 2: total φ spread (max - min relative to innermost hit, wrapped to [-π,π])
+            const double maxSpread = m_maxComboPhiSpread.value();
+            if (maxSpread > 0.0) {
+                double lo = 0.0, hi = 0.0;
+                for (int i = 1; i < nH; ++i) {
+                    double d = phi[i] - phi[0];
+                    while (d >  M_PI) d -= 2*M_PI;
+                    while (d < -M_PI) d += 2*M_PI;
+                    if (d < lo) lo = d;
+                    if (d > hi) hi = d;
+                }
+                double spread = hi - lo;
+                if (spread > maxSpread) {
+                    debug() << "    road FAIL (φ spread): spread=" << spread
+                            << " rad  cut=" << maxSpread << " rad" << endmsg;
+                    return false;
+                }
+            }
+            return true;
+        };
+
+        // ── Build per-compositeID hit lists for the structured combinatorial loop ─
+        // Each combination must use exactly ONE hit from each compositeID (detector
+        // region).  Iterating over compositeIDs first and picking one hit from each
+        // avoids generating the enormous number of same-region duplicates that the
+        // flat C(nAvail,k) loop would produce.
+        //
+        // compositeLayerIDs: already sorted inner→outer (computed above)
+        // hitsForComp[i] = vector of orderedHII indices for compositeLayerIDs[i]
+        const int nDistinct = static_cast<int>(compositeLayerIDs.size());
+        std::vector<std::vector<size_t>> hitsForComp(nDistinct);
+        for (int ci = 0; ci < nDistinct; ++ci) {
+            int cid = compositeLayerIDs[ci];
+            for (size_t hii : hitIndicesByCompositeLayer.at(cid)) {
+                // only include unused hits
+                if (!usedHits[allHitInfo[hii].index]) {
+                    hitsForComp[ci].push_back(hii);
+                }
+            }
+        }
+        // clamp maxK to number of distinct regions (can't pick more unique compositeIDs than exist)
+        const int maxKeff = std::min(maxK, nDistinct);
+
+        // ── Combinatorial loop: C(nDistinct, k) compositeID selections ───────────
+        // For each k from maxKeff down to minK:
+        //   Enumerate all C(nDistinct, k) subsets of compositeIDs,
+        //   then for each subset enumerate the Cartesian product of hit choices
+        //   (one hit per selected compositeID).
+        // This structurally enforces one-hit-per-region with zero wasted iterations.
+        //
+        // TODO (future enhancement): allow ≥2 hits per compositeID by extending
+        // the per-compositeID hit-count to >1 when their spatial separation exceeds
+        // a threshold, to recover efficiency in dense environments.
+        for (int k = maxKeff; k >= minK; --k) {
+            // Enumerate C(nDistinct, k) — indices into compositeLayerIDs
+            std::vector<int> cidxCombo(k);
+            for (int i = 0; i < k; ++i) cidxCombo[i] = i;
+
+            while (true) {
+                // For each of the k selected compositeID slots, build the list of
+                // available (unused) hii indices.
+                bool anySlotEmpty = false;
+                std::vector<std::vector<size_t>> slotHits(k);
+                for (int i = 0; i < k; ++i) {
+                    slotHits[i] = hitsForComp[cidxCombo[i]];
+                    if (slotHits[i].empty()) { anySlotEmpty = true; break; }
+                }
+
+                if (!anySlotEmpty) {
+                    // Enumerate Cartesian product: one hii from each slot
+                    std::vector<int> pos(k, 0);
+                    while (true) {
+                        std::vector<size_t> hiiVec(k), gIdxVec(k);
+                        for (int i = 0; i < k; ++i) {
+                            hiiVec[i]  = slotHits[i][pos[i]];
+                            gIdxVec[i] = allHitInfo[hiiVec[i]].index;
+                        }
+
+                        // Skip if any hit already used
+                        bool anyUsed = false;
+                        for (size_t gi : gIdxVec) {
+                            if (usedHits[gi]) { anyUsed = true; break; }
+                        }
+
+                        if (!anyUsed) {
+                            // Build compact combo label for debug
+                            auto comboLabel = [&]() -> std::string {
+                                std::string s = "[";
+                                for (int ii = 0; ii < k; ++ii) {
+                                    if (ii) s += ",";
+                                    s += std::to_string(gIdxVec[ii]);
+                                }
+                                return s + "]";
+                            };
+
+                            if (!passesRoadCuts(gIdxVec)) {
+                                // attribute to the specific road sub-cut
+                                // (passesRoadCuts logs which sub-cut fired at DEBUG level)
+                                // Determine which counter to increment by re-running each sub-cut
+                                bool consecFail = false;
+                                {
+                                    const int nH = static_cast<int>(gIdxVec.size());
+                                    const double maxConsec = m_maxConsecDeltaPhi.value();
+                                    if (maxConsec > 0.0) {
+                                        for (int ri = 0; ri < nH - 1 && !consecFail; ++ri) {
+                                            const auto& pa = (*hits)[gIdxVec[ri]].getPosition();
+                                            const auto& pb = (*hits)[gIdxVec[ri+1]].getPosition();
+                                            double dPhi = std::atan2(pb[1],pb[0]) - std::atan2(pa[1],pa[0]);
+                                            while (dPhi >  M_PI) dPhi -= 2*M_PI;
+                                            while (dPhi < -M_PI) dPhi += 2*M_PI;
+                                            if (std::abs(dPhi) > maxConsec) consecFail = true;
+                                        }
+                                    }
+                                }
+                                if (consecFail) {
+                                    m_statConsecPhiRejected++;
+                                    evtConsecPhiRej++;
+                                    debug() << "  k=" << k << " " << comboLabel()
+                                            << " -> REJECT consec Δφ" << endmsg;
+                                } else {
+                                    m_statPhiSpreadRejected++;
+                                    evtPhiSpreadRej++;
+                                    debug() << "  k=" << k << " " << comboLabel()
+                                            << " -> REJECT φ spread" << endmsg;
+                                }
+                            } else if (!allIsolated(gIdxVec)) {
+                                m_statIsolationRejected++;
+                                evtIsoRej++;
+                                debug() << "  k=" << k << " " << comboLabel()
+                                        << " -> REJECT isolation" << endmsg;
+                            } else {
+                                m_statTotalTripletCombos++;
+                                evtCombosEval++;
+                                std::vector<edm4hep::TrackerHitPlane> comboHits;
+                                comboHits.reserve(k);
+                                for (size_t gi : gIdxVec) comboHits.push_back((*hits)[gi]);
+
+                                double cx0, cy0, cr, cchi2ndf;
+                                Eigen::Matrix3d cCov = Eigen::Matrix3d::Zero();
+                                std::vector<double> cRes;
+                                bool fitOK = false;
+                                try {
+                                    fitOK = fitCircleNHits(comboHits, cx0, cy0, cr, cchi2ndf, cCov, cRes);
+                                } catch (...) {}
+
+                                if (!fitOK) {
+                                    evtFitFail++;
+                                    debug() << "  k=" << k << " " << comboLabel()
+                                            << " -> REJECT fit failed" << endmsg;
+                                } else if (cchi2ndf >= m_nHitMaxChi2NDF.value()) {
+                                    evtChi2Rej++;
+                                    debug() << "  k=" << k << " " << comboLabel()
+                                            << " chi2/ndf=" << cchi2ndf
+                                            << " -> REJECT chi2 threshold="
+                                            << m_nHitMaxChi2NDF.value() << endmsg;
+                                } else {
+                                    // Prefer more hits; among same k prefer lower chi2.
+                                    // This prevents 3-hit chi2=0 (NDF=0) from always
+                                    // beating higher-k combinations.
+                                    bool isBetter = (k > bestCombo.nHits) ||
+                                                    (k == bestCombo.nHits && cchi2ndf < bestCombo.chi2ndf);
+                                    if (isBetter) {
+                                        bestCombo.hiiVec    = hiiVec;
+                                        bestCombo.gIdxVec   = gIdxVec;
+                                        bestCombo.chi2ndf   = cchi2ndf;
+                                        bestCombo.x0        = cx0;
+                                        bestCombo.y0        = cy0;
+                                        bestCombo.radius    = cr;
+                                        bestCombo.fitCov    = cCov;
+                                        bestCombo.residuals = cRes;
+                                        bestCombo.nHits     = k;
+                                        foundCombination    = true;
+                                        debug() << "  k=" << k << " " << comboLabel()
+                                                << " chi2/ndf=" << cchi2ndf
+                                                << " -> NEW BEST" << endmsg;
+                                    } else {
+                                        debug() << "  k=" << k << " " << comboLabel()
+                                                << " chi2/ndf=" << cchi2ndf
+                                                << " -> not better (best k="
+                                                << bestCombo.nHits << " chi2/ndf="
+                                                << bestCombo.chi2ndf << ")" << endmsg;
+                                    }
+                                }
+                            }
+                        }
+
+                        // Advance Cartesian-product position (odometer)
+                        int carry = k - 1;
+                        while (carry >= 0) {
+                            pos[carry]++;
+                            if (pos[carry] < static_cast<int>(slotHits[carry].size())) break;
+                            pos[carry] = 0;
+                            carry--;
+                        }
+                        if (carry < 0) break;
+                    }
+                }
+
+                // Advance C(nDistinct, k) combination
+                int i = k - 1;
+                while (i >= 0 && cidxCombo[i] == nDistinct - k + i) --i;
+                if (i < 0) break;
+                ++cidxCombo[i];
+                for (int j = i+1; j < k; ++j) cidxCombo[j] = cidxCombo[j-1] + 1;
+            }
+        }
+
+        // ── Per-event combinatorial summary ──────────────────────────────────────
+        info() << "  N-hit search [trk " << trackNumber << "]: "
+               << nAvail << " avail hits in " << nDistinct << " regions, k=" << maxKeff << "→" << minK
+               << " | evaluated=" << evtCombosEval
+               << " consecPhiRej=" << evtConsecPhiRej
+               << " phiSpreadRej=" << evtPhiSpreadRej
+               << " isoRej=" << evtIsoRej
+               << " chi2Rej=" << evtChi2Rej
+               << " fitFail=" << evtFitFail
+               << (foundCombination
+                   ? (" | BEST k=" + std::to_string(bestCombo.nHits)
+                      + " chi2/ndf=" + std::to_string(bestCombo.chi2ndf))
+                   : " | NO COMBINATION FOUND")
+               << endmsg;
+
+        if (!foundCombination) {
+            info() << "No valid N-hit combination found for track " << trackNumber << " — stopping" << endmsg;
+            break;
+        }
+
+        // ── Print best combination hit details ────────────────────────────────────
+        {
+            info() << "  Best combo: " << bestCombo.nHits << " hits, chi2/ndf="
+                   << bestCombo.chi2ndf << endmsg;
+            for (int bi = 0; bi < bestCombo.nHits; ++bi) {
+                size_t gi  = bestCombo.gIdxVec[bi];
+                size_t hii = bestCombo.hiiVec[bi];
+                const auto& pos = (*hits)[gi].getPosition();
+                double res = (bi < static_cast<int>(bestCombo.residuals.size()))
+                             ? bestCombo.residuals[bi] : -1.0;
+                info() << "    hit[" << bi << "] gIdx=" << gi
+                       << " compositeID=" << allHitInfo[hii].compositeID
+                       << " pos=(" << std::fixed << std::setprecision(1)
+                       << pos[0]/10.0 << "," << pos[1]/10.0 << "," << pos[2]/10.0
+                       << ") cm  residual=" << std::setprecision(4) << res << " cm"
+                       << endmsg;
+            }
+        }
+
+        // ── Outlier rejection: remove worst-residual hit and refit ────────────────
+        {
+            const double outlierCutCm = m_outlierSigma.value() * m_sigmaHitDefault.value();
+            for (int iter = 0; iter < m_maxOutlierIterations.value(); ++iter) {
+                if (static_cast<int>(bestCombo.gIdxVec.size()) <= minK) break;
+
+                // Find worst residual
+                size_t worstIdx = 0;
+                double worstRes = 0.0;
+                for (size_t ri = 0; ri < bestCombo.residuals.size(); ++ri) {
+                    if (bestCombo.residuals[ri] > worstRes) {
+                        worstRes = bestCombo.residuals[ri];
+                        worstIdx = ri;
+                    }
+                }
+                if (worstRes <= outlierCutCm) break;  // all hits within cut
+
+                {
+                    size_t wGi = bestCombo.gIdxVec[worstIdx];
+                    size_t wHii = bestCombo.hiiVec[worstIdx];
+                    const auto& wPos = (*hits)[wGi].getPosition();
+                    info() << "  Outlier iter " << iter+1 << ": removing hit[" << worstIdx
+                           << "] gIdx=" << wGi
+                           << " compositeID=" << allHitInfo[wHii].compositeID
+                           << " pos=(" << std::fixed << std::setprecision(1)
+                           << wPos[0]/10.0 << "," << wPos[1]/10.0 << "," << wPos[2]/10.0
+                           << ") cm  residual=" << std::setprecision(4) << worstRes
+                           << " cm (cut=" << outlierCutCm << " cm)" << endmsg;
+                }
+                m_statOutlierHitsRemoved++;
+
+                bestCombo.gIdxVec.erase(bestCombo.gIdxVec.begin() + worstIdx);
+                bestCombo.hiiVec.erase(bestCombo.hiiVec.begin()   + worstIdx);
+                bestCombo.residuals.erase(bestCombo.residuals.begin() + worstIdx);
+                bestCombo.nHits = static_cast<int>(bestCombo.gIdxVec.size());
+
+                if (bestCombo.nHits < minK) break;
+
+                // Refit on remaining hits
+                std::vector<edm4hep::TrackerHitPlane> refitHits;
+                for (size_t gi : bestCombo.gIdxVec) refitHits.push_back((*hits)[gi]);
+                double rx0, ry0, rr, rchi2;
+                Eigen::Matrix3d rCov;
+                std::vector<double> rRes;
+                bool refitOK = false;
+                try { refitOK = fitCircleNHits(refitHits, rx0, ry0, rr, rchi2, rCov, rRes); }
+                catch (...) {}
+                if (refitOK) {
+                    bestCombo.x0        = rx0; bestCombo.y0      = ry0;
+                    bestCombo.radius    = rr;  bestCombo.chi2ndf = rchi2;
+                    bestCombo.fitCov    = rCov; bestCombo.residuals = rRes;
+                }
+            }
+        }
+
+        // ── Mark selected hits as used ────────────────────────────────────────────
+        for (size_t gi : bestCombo.gIdxVec) usedHits[gi] = true;
+
+        // ── Build N-hit track state ───────────────────────────────────────────────
+        // All parameters come from the N-hit circle fit in bestCombo.
+        // This uses all N hits for both the xy circle and the z vs arc-length fit,
+        // giving better resolution than a 3-hit seed.
+
+        const int  Nh   = bestCombo.nHits;
+        const double cx = bestCombo.x0;     // cm
+        const double cy = bestCombo.y0;     // cm
+        const double cr = bestCombo.radius; // cm
+
+        // ── Charge sign from N-hit normalised cross-product sum ───────────────────
+        // Query B field at hit centroid (EDM4hep positions in mm, DD4hep expects cm)
+        {   double sumXf=0, sumYf=0, sumZf=0;
+            for (size_t gi : bestCombo.gIdxVec) {
+                const auto& p = (*hits)[gi].getPosition();
+                sumXf += p[0]/10.0; sumYf += p[1]/10.0; sumZf += p[2]/10.0;
+            }
+            dd4hep::Position avgPosN(sumXf/Nh, sumYf/Nh, sumZf/Nh);
+            double bFieldN = m_field.magneticField(avgPosN).z() / dd4hep::tesla;
+            double bSignN  = (bFieldN >= 0.0) ? 1.0 : -1.0;
+
+            double sinBendSumN = 0.0, avgChordN = 0.0;
+            int nTripN = 0;
+            for (int ti = 0; ti <= Nh-3; ++ti) {
+                const auto& pa = (*hits)[bestCombo.gIdxVec[ti  ]].getPosition();
+                const auto& pb = (*hits)[bestCombo.gIdxVec[ti+1]].getPosition();
+                const auto& pc = (*hits)[bestCombo.gIdxVec[ti+2]].getPosition();
+                double vabx=pb[0]-pa[0], vaby=pb[1]-pa[1];
+                double vbcx=pc[0]-pb[0], vbcy=pc[1]-pb[1];
+                double crossZ = vabx*vbcy - vaby*vbcx;
+                double lenAB  = std::sqrt(vabx*vabx + vaby*vaby);
+                double lenBC  = std::sqrt(vbcx*vbcx + vbcy*vbcy);
+                double sinB   = (lenAB*lenBC > 1e-6) ? crossZ/(lenAB*lenBC) : 0.0;
+                sinBendSumN += sinB;
+                avgChordN   += (lenAB+lenBC)/2.0;
+                ++nTripN;
+            }
+            if (nTripN > 0) { sinBendSumN /= nTripN; avgChordN /= nTripN; }
+
+            bool chargeReliableN = (avgChordN > 1e-6) &&
+                                   (std::abs(sinBendSumN) >= 0.5/avgChordN);
+            double chargeN = bSignN * (sinBendSumN < 0.0 ? 1.0 : -1.0);
+
+            // ── z vs arc-length linear fit from all N hits ────────────────────────
+            const auto& p0ref = (*hits)[bestCombo.gIdxVec[0]].getPosition();
+            double angle0 = std::atan2(p0ref[1]/10.0 - cy, p0ref[0]/10.0 - cx);
+            double sumS=0, sumZ=0, sumSS=0, sumSZ=0;
+            for (int i = 0; i < Nh; ++i) {
+                const auto& pi = (*hits)[bestCombo.gIdxVec[i]].getPosition();
+                double xi = pi[0]/10.0 - cx, yi = pi[1]/10.0 - cy;
+                double dAngle = std::atan2(yi, xi) - angle0;
+                while (dAngle >  M_PI) dAngle -= 2*M_PI;
+                while (dAngle < -M_PI) dAngle += 2*M_PI;
+                // Multiply by chargeN so s is always positive in the direction of
+                // travel.  Without this, negative-charge tracks (clockwise rotation,
+                // dAngle < 0 for outer hits) produce s < 0 even though physical
+                // arc-length increases, causing tanLambda to have the wrong sign.
+                double s = chargeN * cr * dAngle;  // arc length in cm, sign-corrected
+                double z = pi[2] / 10.0;      // z in cm
+                sumS += s; sumZ += z; sumSS += s*s; sumSZ += s*z;
+            }
+            double det = Nh*sumSS - sumS*sumS;
+            double z0_cm = 0.0, tanLambda = 0.0;
+            if (std::abs(det) > 1e-10) {
+                z0_cm     = (sumZ*sumSS - sumS*sumSZ) / det;
+                tanLambda = (Nh*sumSZ  - sumS*sumZ)  / det;
+            } else {
+                z0_cm = sumZ / Nh;
+            }
+
+            // ── Track parameters from N-hit circle ────────────────────────────────
+            double d0_cm  = std::sqrt(cx*cx + cy*cy) - cr;
+            double phi    = std::atan2(cy, cx) + chargeN * (-M_PI/2.0);
+            if (phi >  M_PI) phi -= 2*M_PI;
+            if (phi < -M_PI) phi += 2*M_PI;
+            double omega  = chargeN / (cr * 10.0);   // 1/mm
+            double pTN    = 0.3 * std::abs(bFieldN) * cr / 100.0; // GeV/c
+
+            info() << "N-hit seed: " << Nh << " hits  pT=" << pTN << " GeV/c"
+                   << "  charge=" << chargeN
+                   << (chargeReliableN ? "" : " [UNRELIABLE]")
+                   << "  chi2/ndf=" << bestCombo.chi2ndf << endmsg;
+
+            // ── Build AtFirstHit state ─────────────────────────────────────────────
+            edm4hep::TrackState nHitSeedState = createTrackState(
+                d0_cm * 10.0,   // cm → mm
+                phi,
+                omega,          // already in 1/mm
+                z0_cm * 10.0,   // cm → mm
+                tanLambda,
+                edm4hep::TrackState::AtFirstHit);
+            const auto& firstHitPos = (*hits)[bestCombo.gIdxVec[0]].getPosition();
+            nHitSeedState.referencePoint = edm4hep::Vector3f(
+                firstHitPos[0], firstHitPos[1], firstHitPos[2]);
+
+            // Propagate N-hit fit covariance to track parameter covariance
+            {
+                double r2 = cx*cx + cy*cy, dist0 = std::sqrt(r2);
+                Eigen::Vector3d grad_d0(
+                    (dist0>1e-9) ? cx/dist0 : 0.0,
+                    (dist0>1e-9) ? cy/dist0 : 0.0, -1.0);
+                Eigen::Vector3d grad_phi(
+                    (r2>1e-12) ? -cy/r2 : 0.0,
+                    (r2>1e-12) ?  cx/r2 : 0.0, 0.0);
+                double cSign = (omega>0) ? 1.0 : -1.0;
+                Eigen::Vector3d grad_omega(0.0, 0.0, -cSign/(cr*cr*10.0));
+                double var_d0_mm2    = grad_d0.dot(bestCombo.fitCov * grad_d0) * 100.0;
+                double var_phi_rad2  = grad_phi.dot(bestCombo.fitCov * grad_phi);
+                double var_omega_mm2 = grad_omega.dot(bestCombo.fitCov * grad_omega);
+                nHitSeedState.covMatrix[0]  = static_cast<float>(var_d0_mm2);
+                nHitSeedState.covMatrix[2]  = static_cast<float>(var_phi_rad2);
+                nHitSeedState.covMatrix[5]  = static_cast<float>(var_omega_mm2);
+            }
+
+            // Pack into a track object so downstream code finds AtFirstHit
+            auto nhSeedTrack = candidateTracks.create();
+            nhSeedTrack.addToTrackStates(nHitSeedState);
+
+            tripletCandidates = 1; validTriplets = 1;
+            m_statTotalTripletCombos++;
+            m_statValidTriplets++;
+
+            std::vector<int> usedComps;
+            for (size_t hii : bestCombo.hiiVec) usedComps.push_back(allHitInfo[hii].compositeID);
+            trackCandidates.emplace_back(nhSeedTrack, pTN, bestCombo.gIdxVec, usedComps);
+        }
+
+        bool innerSeedChosen = true;
+
         debug() << "Phase A: Trying inner-layer seeding (layers 0,1,2) for iteration " << trackNumber << "..." << endmsg;
 
-        // Determine availability in layers 0,1,2 and layer3
-        int layer0Count = hitsByLayerNumber.count(0) ? hitsByLayerNumber[0].size() : 0;
-        int layer1Count = hitsByLayerNumber.count(1) ? hitsByLayerNumber[1].size() : 0;
-        int layer2Count = hitsByLayerNumber.count(2) ? hitsByLayerNumber[2].size() : 0;
-        int layer3Count = hitsByLayerNumber.count(3) ? hitsByLayerNumber[3].size() : 0;
-
-        // Case 1: we have hits in all inner three layers -> form all combinations [layer0 x layer1 x layer2],
-        // pick the single best triplet (highest pT), mark its hits used and add it as a candidate.
-        if (layer0Count > 0 && layer1Count > 0 && layer2Count > 0) {
-            debug() << "Inner layers 0,1,2 have unused hits. Forming triplets from these layers and selecting best pT." << endmsg;
-
-            std::vector<TrackCandidate> innerCandidates;
-            // iterate all combinations using aggregated layer lists (which reference allHitInfo indices)
-            for (size_t idx0 : hitsByLayerNumber[0]) {
-                for (size_t idx1 : hitsByLayerNumber[1]) {
-                    for (size_t idx2 : hitsByLayerNumber[2]) {
-                        const HitInfo& h0 = allHitInfo[idx0];
-                        const HitInfo& h1 = allHitInfo[idx1];
-                        const HitInfo& h2 = allHitInfo[idx2];
-
-                        // check bounds & used flags
-                        if (h0.index >= usedHits.size() || h1.index >= usedHits.size() || h2.index >= usedHits.size()) continue;
-                        if (usedHits[h0.index] || usedHits[h1.index] || usedHits[h2.index]) continue;
-
-                        tripletCandidates++;
-
-                        size_t prevSize = candidateTracks.size();
-                        bool seedValid = false;
-                        try {
-                            seedValid = createTripletSeed(h0.hit, h1.hit, h2.hit, &candidateTracks, outputHits, propagateLink, usedHits, h0.index, h1.index, h2.index);
-                        } catch (const std::exception& ex) {
-                            warning() << "Exception in createTripletSeed (inner): " << ex.what() << endmsg;
-                            continue;
-                        } catch (...) {
-                            continue;
-                        }
-
-                        if (seedValid && candidateTracks.size() > prevSize) {
-                            // newly added track
-                            validTriplets++;
-
-                            auto newTrack = candidateTracks[candidateTracks.size() - 1];
-                            double pT = extractPTFromTrack(newTrack);
-                            std::vector<size_t> hitIndices = {h0.index, h1.index, h2.index};
-                            std::vector<int> usedComposites = {h0.compositeID, h1.compositeID, h2.compositeID};
-                            innerCandidates.emplace_back(newTrack, pT, hitIndices, usedComposites);
-
-                            // Undo marking used for selection stage
-                            usedHits[h0.index] = false;
-                            usedHits[h1.index] = false;
-                            usedHits[h2.index] = false;
-                        }
-                    }
-                }
-            }
-
-            if (!innerCandidates.empty()) {
-                // choose best by pT (highest)
-                auto bestIt = std::max_element(innerCandidates.begin(), innerCandidates.end(),
-                                               [](const TrackCandidate& a, const TrackCandidate& b){ return a.pT < b.pT; });
-                if (bestIt != innerCandidates.end()) {
-                    // Add the selected best candidate (and mark its hits used)
-                    trackCandidates.push_back(*bestIt);
-                    for (size_t hi : bestIt->hitIndices) {
-                        if (hi < usedHits.size()) usedHits[hi] = true;
-                    }
-                    innerSeedChosen = true;
-                    info() << "Chosen best inner-layer triplet for iteration " << trackNumber << " with pT=" << bestIt->pT << " GeV/c" << endmsg;
-                    m_statInnerSeedUsed++;
-                    if (innerCandidates.size() > 1) evtUsedPtInner = true;
-                }
-            } else {
-                debug() << "No valid inner triplet seeds found in layers 0,1,2 for iteration " << trackNumber << endmsg;
-            }
-        }
-        // Case 2: fewer than 3 hits across layers 0..2 -> allow third hit from layer 3 (if present)
-        else {
-            int totalInnerHits = layer0Count + layer1Count + layer2Count;
-            if (totalInnerHits >= 2 && layer3Count > 0) {
-                info() << "Less than full inner set; forming triplets using any two hits from layers 0..2 plus one hit from layer 3 for iteration " << trackNumber << endmsg;
-
-                // build vector of all inner indices
-                std::vector<size_t> innerIndices;
-                for (int l = 0; l <= 2; ++l) {
-                    if (hitsByLayerNumber.count(l)) {
-                        for (size_t idx : hitsByLayerNumber[l]) innerIndices.push_back(idx);
-                    }
-                }
-
-                // layer3 indices
-                std::vector<size_t> layer3Indices;
-                if (hitsByLayerNumber.count(3)) layer3Indices = hitsByLayerNumber[3];
-
-                // combine: two from innerIndices + one from layer3Indices
-                for (size_t a = 0; a < innerIndices.size(); ++a) {
-                    for (size_t b = a + 1; b < innerIndices.size(); ++b) {
-                        for (size_t idx3 : layer3Indices) {
-                            const HitInfo& hA = allHitInfo[innerIndices[a]];
-                            const HitInfo& hB = allHitInfo[innerIndices[b]];
-                            const HitInfo& hC = allHitInfo[idx3];
-
-                            if (hA.index >= usedHits.size() || hB.index >= usedHits.size() || hC.index >= usedHits.size()) continue;
-                            if (usedHits[hA.index] || usedHits[hB.index] || usedHits[hC.index]) continue;
-
-                            tripletCandidates++;
-                            size_t prevSize = candidateTracks.size();
-                            bool seedValid = false;
-                            try {
-                                seedValid = createTripletSeed(hA.hit, hB.hit, hC.hit, &candidateTracks, outputHits, propagateLink, usedHits, hA.index, hB.index, hC.index);
-                            } catch (const std::exception& ex) {
-                                warning() << "Exception in createTripletSeed (inner+layer3): " << ex.what() << endmsg;
-                                continue;
-                            } catch (...) {
-                                continue;
-                            }
-
-                            if (seedValid && candidateTracks.size() > prevSize) {
-                                validTriplets++;
-                                auto newTrack = candidateTracks[candidateTracks.size() - 1];
-                                double pT = extractPTFromTrack(newTrack);
-                                std::vector<size_t> hitIndices = {hA.index, hB.index, hC.index};
-                                std::vector<int> usedComposites = {hA.compositeID, hB.compositeID, hC.compositeID};
-                                trackCandidates.emplace_back(newTrack, pT, hitIndices, usedComposites);
-                            }
-                        }
-                    }
-                }
-
-                if (!trackCandidates.empty()) {
-                    // If multiple choices, keep the one with highest pT
-                    std::sort(trackCandidates.begin(), trackCandidates.end(),
-                              [](const TrackCandidate& a, const TrackCandidate& b){ return a.pT > b.pT; });
-                    // Mark used hits for the chosen best and discard the rest
-                    const auto& best = trackCandidates.front();
-                    for (size_t hi : best.hitIndices) if (hi < usedHits.size()) usedHits[hi] = true;
-                    // keep only best
-                    std::vector<TrackCandidate> kept = {best};
-                    trackCandidates.swap(kept);
-                    innerSeedChosen = true;
-                    info() << "Selected best combined inner+layer3 triplet for iteration " << trackNumber << " with pT=" << best.pT << " GeV/c" << endmsg;
-                    m_statInnerSeedUsed++;
-                    if (kept.size() > 1) evtUsedPtInner2 = true;
-                } else {
-                    debug() << "No valid triplets formed from inner+layer3 strategy for iteration " << trackNumber << endmsg;
-                }
-            } else {
-                debug() << "Not enough inner hits (or no layer3) to form inner-preferred triplets for iteration " << trackNumber << "; will proceed to Phase 1/2 fallback." << endmsg;
-            }
-        }
-
-        // If we successfully chose an inner seed, skip broad Phase 1/2 search for this iteration
-        if (!innerSeedChosen) {
-            // ---------------------------------------------------------------------
-            // PHASE 1: Consecutive layer triplets (but now compositeLayerIDs are sorted nearest-to-IP)
-            // ---------------------------------------------------------------------
-            bool foundGoodConsecutiveTriplets = false;
-            bool foundInnerLayerTriplets = false;  // Track if we found triplets in inner layers (0,1,2)
-            int consecutiveTriplets = 0;
-            int maxEarlyLayersToTry = std::min(size_t(5), compositeLayerIDs.size());
-
-            debug() << "Phase 1: Testing consecutive layer triplets for iteration " << trackNumber << "..." << endmsg;
-
-            for (size_t i = 0; i + 2 < compositeLayerIDs.size() && i < (size_t)std::max(0, maxEarlyLayersToTry - 2); ++i) {
-                int composite1 = compositeLayerIDs[i];
-                int composite2 = compositeLayerIDs[i+1];
-                int composite3 = compositeLayerIDs[i+2];
-
-                debug() << "Testing consecutive triplet: regions " 
-                        << composite1 << " -> " << composite2 << " -> " << composite3 << endmsg;
-
-                // Check if this triplet uses the first inner layers (0,1,2)
-                bool isInnerLayerTriplet = false;
-                int layer1 = std::abs(composite1) % 1000;
-                int layer2 = std::abs(composite2) % 1000;
-                int layer3 = std::abs(composite3) % 1000;
-
-                if ((layer1 == 0 && layer2 == 1 && layer3 == 2) ||
-                    (layer1 <= 2 && layer2 <= 2 && layer3 <= 2)) {
-                    isInnerLayerTriplet = true;
-                    debug() << "Testing inner layer triplet: layers " << layer1 << "," << layer2 << "," << layer3 << endmsg;
-                }
-
-                int tripletsBefore = validTriplets;
-
-                for (size_t idx1 : hitIndicesByCompositeLayer[composite1]) {
-                    for (size_t idx2 : hitIndicesByCompositeLayer[composite2]) {
-                        for (size_t idx3 : hitIndicesByCompositeLayer[composite3]) {
-
-                            if (idx1 >= allHitInfo.size() || idx2 >= allHitInfo.size() || idx3 >= allHitInfo.size()) {
-                                error() << "HitInfo index out of bounds: " << idx1 << ", " << idx2 << ", " << idx3 
-                                        << " (allHitInfo.size: " << allHitInfo.size() << ")" << endmsg;
-                                continue;
-                            }
-
-                            const HitInfo& hitInfo1 = allHitInfo[idx1];
-                            const HitInfo& hitInfo2 = allHitInfo[idx2];
-                            const HitInfo& hitInfo3 = allHitInfo[idx3];
-
-                            if (hitInfo1.index >= usedHits.size() || 
-                                hitInfo2.index >= usedHits.size() || 
-                                hitInfo3.index >= usedHits.size()) {
-                                error() << "Hit index out of bounds: " << hitInfo1.index << ", " 
-                                        << hitInfo2.index << ", " << hitInfo3.index 
-                                        << " (usedHits.size: " << usedHits.size() << ")" << endmsg;
-                                continue;
-                            }
-
-                            if (usedHits[hitInfo1.index] || 
-                                usedHits[hitInfo2.index] || 
-                                usedHits[hitInfo3.index]) {
-                                continue;
-                            }
-
-                            tripletCandidates++;
-
-                            size_t prevSize = candidateTracks.size();
-
-                            bool seedValid = false;
-                            try {
-                                seedValid = createTripletSeed(
-                                    hitInfo1.hit, hitInfo2.hit, hitInfo3.hit, 
-                                    &candidateTracks, outputHits, propagateLink, usedHits,
-                                    hitInfo1.index, hitInfo2.index, hitInfo3.index);
-                            } catch (const std::exception& ex) {
-                                warning() << "Exception in createTripletSeed: " << ex.what() << endmsg;
-                                continue;
-                            }
-
-                            if (seedValid && candidateTracks.size() > prevSize) {
-                                validTriplets++;
-                                consecutiveTriplets++;
-
-                                if (!usedHits[hitInfo1.index] || !usedHits[hitInfo2.index] || !usedHits[hitInfo3.index]) {
-                                    warning() << "createTripletSeed didn't mark hits as used - fixing" << endmsg;
-                                    usedHits[hitInfo1.index] = true;
-                                    usedHits[hitInfo2.index] = true;
-                                    usedHits[hitInfo3.index] = true;
-                                }
-
-                                auto newTrack = candidateTracks[candidateTracks.size() - 1];
-                                double pT = extractPTFromTrack(newTrack);
-
-                                std::vector<size_t> hitIndices = {hitInfo1.index, hitInfo2.index, hitInfo3.index};
-                                std::vector<int> usedComposites = {composite1, composite2, composite3};
-
-                                trackCandidates.emplace_back(newTrack, pT, hitIndices, usedComposites);
-
-                                if (msgLevel(MSG::INFO)) {
-                                    edm4hep::TrackState trackState;
-                                    bool foundTrackState = false;
-                                    for (int l = 0; l < newTrack.trackStates_size(); ++l) {
-                                        auto state = newTrack.getTrackStates(l);
-                                        if (state.location == edm4hep::TrackState::AtFirstHit) {
-                                            trackState = state;
-                                            foundTrackState = true;
-                                            break;
-                                        }
-                                    }
-
-                                    if (foundTrackState) {
-                                        double tanLambda = trackState.tanLambda;
-                                        double theta = std::atan2(1.0, tanLambda);
-                                        double eta = -std::log(std::tan(theta/2.0));
-
-                                        info() << "✓ Valid triplet #" << validTriplets << " found for iteration " << trackNumber << ":" << endmsg;
-                                        info() << "  Layers: " << layer1 << " -> " << layer2 << " -> " << layer3 
-                                               << " (composites: " << composite1 << "," << composite2 << "," << composite3 << ")" << endmsg;
-                                        info() << "  Track parameters: pT=" << pT << " GeV/c, eta=" << eta 
-                                               << ", phi=" << trackState.phi << " rad" << endmsg;
-                                        info() << "  Impact parameters: d0=" << trackState.D0/10.0 << " cm, z0=" << trackState.Z0/10.0 << " cm" << endmsg;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                if (validTriplets > tripletsBefore) {
-                    foundGoodConsecutiveTriplets = true;
-                    if (isInnerLayerTriplet) {
-                        foundInnerLayerTriplets = true;
-                        debug() << "Found " << (validTriplets - tripletsBefore) 
-                               << " good triplets in inner layers (0,1,2) for iteration " << trackNumber << " - stopping consecutive layer tests" << endmsg;
-                        // We break the top loop because we prefer inner triplets if found here
-                        break;
-                    }
-                }
-            }
-
-            // PHASE 2: All combinations if needed - SKIP if we found inner layer triplets above
-            bool tryAllCombinations = !foundInnerLayerTriplets && (!foundGoodConsecutiveTriplets || compositeLayerIDs.size() <= 3);
-
-            if (tryAllCombinations) {
-                debug() << "Phase 2: Trying all layer combinations for iteration " << trackNumber << " (no inner layer triplets found)..." << endmsg;
-
-                for (size_t i = 0; i < compositeLayerIDs.size() - 2; ++i) {
-                    for (size_t j = i + 1; j < compositeLayerIDs.size() - 1; ++j) {
-                        for (size_t k = j + 1; k < compositeLayerIDs.size(); ++k) {
-
-                            int composite1 = compositeLayerIDs[i];
-                            int composite2 = compositeLayerIDs[j];  
-                            int composite3 = compositeLayerIDs[k];
-
-                            // Skip if already tested in Phase 1
-                            if (foundGoodConsecutiveTriplets && 
-                                i < maxEarlyLayersToTry - 2 && j == i + 1 && k == i + 2) {
-                                continue;
-                            }
-
-                            for (size_t idx1 : hitIndicesByCompositeLayer[composite1]) {
-                                for (size_t idx2 : hitIndicesByCompositeLayer[composite2]) {
-                                    for (size_t idx3 : hitIndicesByCompositeLayer[composite3]) {
-
-                                        if (idx1 >= allHitInfo.size() || idx2 >= allHitInfo.size() || idx3 >= allHitInfo.size()) {
-                                            continue;
-                                        }
-
-                                        const HitInfo& hitInfo1 = allHitInfo[idx1];
-                                        const HitInfo& hitInfo2 = allHitInfo[idx2];
-                                        const HitInfo& hitInfo3 = allHitInfo[idx3];
-
-                                        if (hitInfo1.index >= usedHits.size() || 
-                                            hitInfo2.index >= usedHits.size() || 
-                                            hitInfo3.index >= usedHits.size()) {
-                                            continue;
-                                        }
-
-                                        if (usedHits[hitInfo1.index] || 
-                                            usedHits[hitInfo2.index] || 
-                                            usedHits[hitInfo3.index]) {
-                                            continue;
-                                        }
-
-                                        tripletCandidates++;
-
-                                        size_t prevSize = candidateTracks.size();
-
-                                        try {
-                                            bool seedValid = createTripletSeed(
-                                                hitInfo1.hit, hitInfo2.hit, hitInfo3.hit, 
-                                                &candidateTracks, outputHits, propagateLink, usedHits,
-                                                hitInfo1.index, hitInfo2.index, hitInfo3.index);
-
-                                            if (seedValid && candidateTracks.size() > prevSize) {
-                                                validTriplets++;
-
-                                                if (!usedHits[hitInfo1.index] || !usedHits[hitInfo2.index] || !usedHits[hitInfo3.index]) {
-                                                    warning() << "createTripletSeed didn't mark hits as used - fixing" << endmsg;
-                                                    usedHits[hitInfo1.index] = true;
-                                                    usedHits[hitInfo2.index] = true;
-                                                    usedHits[hitInfo3.index] = true;
-                                                }
-
-                                                auto newTrack = candidateTracks[candidateTracks.size() - 1];
-                                                double pT = extractPTFromTrack(newTrack);
-
-                                                std::vector<size_t> hitIndices = {hitInfo1.index, hitInfo2.index, hitInfo3.index};
-                                                std::vector<int> usedComposites = {composite1, composite2, composite3};
-
-                                                trackCandidates.emplace_back(newTrack, pT, hitIndices, usedComposites);
-
-                                                if (msgLevel(MSG::DEBUG)) {
-                                                    int layer1 = std::abs(composite1) % 1000;
-                                                    int layer2 = std::abs(composite2) % 1000;
-                                                    int layer3 = std::abs(composite3) % 1000;
-
-                                                    debug() << "✓ Valid triplet #" << validTriplets << " found (Phase 2) for iteration " << trackNumber << ":" << endmsg;
-                                                    debug() << "  Layers: " << layer1 << " -> " << layer2 << " -> " << layer3 
-                                                           << " (composites: " << composite1 << "," << composite2 << "," << composite3 << ")" << endmsg;
-                                                    debug() << "  Track pT: " << pT << " GeV/c" << endmsg;
-                                                }
-                                            }
-                                        } catch (...) {
-                                            continue;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            } else if (foundInnerLayerTriplets) {
-                debug() << "Phase 2: SKIPPED - Found good triplets in inner layers (0,1,2) for iteration " << trackNumber << endmsg;
-            }
-        } // end fallback seeding
-
-        debug() << "Seed generation complete for iteration " << trackNumber << ": " << trackCandidates.size()
-            << " triplet candidates from " << tripletCandidates
-            << " combinations (" << validTriplets << " valid)" << endmsg;
-
-        m_statTotalTripletCombos += tripletCandidates;
-        m_statValidTriplets      += validTriplets;
-        if (!innerSeedChosen && !trackCandidates.empty()) {
-            m_statFallbackSeedUsed++;
-            if (trackCandidates.size() > 1) evtUsedPtFallback = true;
-        }
-
-        // If no track candidates found in this iteration, break
+        // N-hit strategy: candidateTracks always has exactly one entry (the best combination)
         if (trackCandidates.empty()) {
             info() << "No track candidates found in iteration " << trackNumber << " - stopping track search" << endmsg;
             break;
@@ -1430,59 +1619,10 @@ void DisplacedTracking::findTracks(
 
         debug() << "Successfully built trackHits vector with " << trackHits.size() << " hits for track " << trackNumber << endmsg;
 
-        // Extend the track by searching for extra hits in subsequent layers.
-        // The seed direction is derived from the 3-hit seed (hit2 - hit0) in 3D.
-        // The cone half-angle (35°) gates candidates; the loop continues until
-        // no further compatible hit is found.
-        bool foundExtraHit = false;
-        if (trackHits.size() >= 3) {
-            try {
-                // Compute seed direction from first and last seed hit (mm -> cm, then normalize)
-                const auto& p0 = trackHits.front().getPosition();
-                const auto& p2 = trackHits.back().getPosition();
-                Eigen::Vector3d seedDir(
-                    (p2[0] - p0[0]) / 10.0,
-                    (p2[1] - p0[1]) / 10.0,
-                    (p2[2] - p0[2]) / 10.0);
-                if (seedDir.norm() < 1e-6) {
-                    warning() << "Degenerate seed direction for track " << trackNumber << " — skipping extension" << endmsg;
-                } else {
-                    seedDir.normalize();
-
-                    // Count available unused hits per composite layer for diagnostics
-                    int unusedHitCount = 0;
-                    std::map<int, int> hitsPerComposite;
-                    for (size_t i = 0; i < globalUsedHits.size(); ++i) {
-                        if (!globalUsedHits[i]) {
-                            unusedHitCount++;
-                            hitsPerComposite[getCompositeID((*hits)[i].getCellID())]++;
-                        }
-                    }
-                    info() << "Searching for extra hits for track " << trackNumber
-                           << " - last compositeID=" << getCompositeID(trackHits.back().getCellID())
-                           << " | unused hits: " << unusedHitCount << endmsg;
-                    for (const auto& [composite, count] : hitsPerComposite) {
-                        info() << "  CompositeID " << composite << ": " << count << " unused hits" << endmsg;
-                    }
-
-                    size_t hitsBefore = trackHits.size();
-                    foundExtraHit = findCompatibleExtraHit(trackHits, hits, globalUsedHits, seedDir);
-
-                    if (foundExtraHit) {
-                        info() << "Extended track " << trackNumber
-                               << " from " << hitsBefore << " to " << trackHits.size() << " hits" << endmsg;
-                    }
-                }
-            } catch (const std::exception& ex) {
-                warning() << "Exception in findCompatibleExtraHit for track " << trackNumber << ": " << ex.what() << endmsg;
-            } catch (...) {
-                warning() << "Unknown exception in findCompatibleExtraHit for track " << trackNumber << endmsg;
-            }
-        }
-
-        if (!foundExtraHit) {
-            debug() << "Keeping track " << trackNumber << " with " << trackHits.size() << " hits (no extra hits found)" << endmsg;
-        }
+        // N-hit strategy: all hits already selected by combinatorial search — no extension needed.
+        // trackHits already contains all bestCombo hits (set above from candidate.hitIndices).
+        info() << "N-hit track " << trackNumber << " has " << trackHits.size()
+               << " hits after combinatorial selection and outlier rejection" << endmsg;
 
         // Create a new track
         auto finalTrack = finalTracks.create();
@@ -1506,7 +1646,7 @@ void DisplacedTracking::findTracks(
         }
 
         // ── Copy AtCalorimeter (direct-formula) state from seed track ────────────
-        // The state was built inside createTripletSeed and attached to the seed
+        // The track state is built from the N-hit circle fit parameters.
         // track object. Transfer it now to finalTrack so the per-track counter
         // and the ROOT output both see it.
         for (int j = 0; j < seedTrack.trackStates_size(); ++j) {
@@ -1517,41 +1657,28 @@ void DisplacedTracking::findTracks(
             }
         }
 
-        // Test 4-hit circle fitting if we have at least 4 hits.
-        // Always uses the first 4 hits for the analytical circle fit — a quality
-        // gate on the seed extension. If the 4th hit produces a poor chi2 it is
-        // removed and any further hits that were appended by the extension loop
-        // are also discarded (they were built on top of a bad 4th hit).
-        if (trackHits.size() >= 4) {
-            // Slice first 4 hits for the circle fitter
-            std::vector<edm4hep::TrackerHitPlane> first4(trackHits.begin(), trackHits.begin() + 4);
-            double x0, y0, radius, chi2;
-            Eigen::Matrix3d fitCov3x3 = Eigen::Matrix3d::Zero();
-            bool fit4Hits = false;
-            try {
-                fit4Hits = fitCircleToFourHits(first4, x0, y0, radius, chi2, fitCov3x3);
-            } catch (const std::exception& ex) {
-                warning() << "Exception in fitCircleToFourHits for track " << trackNumber << ": " << ex.what() << endmsg;
-            } catch (...) {
-                warning() << "Unknown exception in fitCircleToFourHits for track " << trackNumber << endmsg;
-            }
+        // N-hit circle fit: use the precomputed bestCombo result (already outlier-rejected).
+        if (trackHits.size() >= 3) {
+            {
+                double x0     = bestCombo.x0;
+                double y0     = bestCombo.y0;
+                double radius = bestCombo.radius;
+                double chi2   = bestCombo.chi2ndf;
+                Eigen::Matrix3d fitCov3x3 = bestCombo.fitCov;
+                bool fit4Hits = (radius > 0);  // always true if bestCombo was set
 
-            if (fit4Hits) {
-                info() << "4-hit circle fit successful for track " << trackNumber
-                       << " (total hits: " << trackHits.size() << ")" << endmsg;
+                if (fit4Hits) {
+                info() << "N-hit circle fit for track " << trackNumber
+                       << " (" << trackHits.size() << " hits): chi2/ndf=" << chi2 << endmsg;
                 info() << "  Center: (" << x0 << ", " << y0 << ") cm" << endmsg;
                 info() << "  Radius: " << radius << " cm" << endmsg;
-                info() << "  Chi2/DOF: " << chi2 << endmsg;
 
-                if (chi2 > 10.0) {
-                    warning() << "Poor circle fit (chi2=" << chi2 << ") for track " << trackNumber
-                              << " — removing 4th hit and all subsequent extension hits" << endmsg;
-                    // Truncate back to 3 hits: the 4th hit (and anything built on top of it) is rejected
-                    trackHits.resize(3);
+                if (false) {  // chi2 already passed NHitMaxChi2NDF in combinatorial search
+                    // (placeholder — outlier rejection already done above)
                 } else {
                     // Query B field at the centroid of the 4 hits.
                     // EDM4hep hit positions are in mm; DD4hep magneticField() expects cm
-                    // (same convention as createTripletSeed which uses p.x() in cm).
+                    // (p.x() in cm).
                     // Dividing by 10 converts mm → cm.
                     double sumX = 0, sumY = 0, sumZ = 0;
                     for (const auto& h : trackHits) {
@@ -1567,41 +1694,36 @@ void DisplacedTracking::findTracks(
                     double pT = 0.3 * std::abs(bField4) * radius / 100.0; // GeV/c
                     double bSign4 = (bField4 >= 0.0) ? 1.0 : -1.0;
 
-                    // Determine charge sign independently from the 4 hit positions.
-                    // Two consecutive triplet cross products (0-1-2 and 1-2-3) are each
-                    // normalised by their chord-length product to obtain sin(bend_angle).
-                    // Summing the two normalised values gives equal weight to both triplets
-                    // regardless of hit spacing — fully independent of the 3-hit seed charge.
-                    // Hit positions from EDM4hep are in mm.
-                    const auto& h0p = trackHits[0].getPosition();
-                    const auto& h1p = trackHits[1].getPosition();
-                    const auto& h2p = trackHits[2].getPosition();
-                    const auto& h3p = trackHits[3].getPosition();
-                    double v12x = h1p[0]-h0p[0], v12y = h1p[1]-h0p[1];
-                    double v23x = h2p[0]-h1p[0], v23y = h2p[1]-h1p[1];
-                    double v34x = h3p[0]-h2p[0], v34y = h3p[1]-h2p[1];
-                    double crossZ_012 = v12x*v23y - v12y*v23x;
-                    double crossZ_123 = v23x*v34y - v23y*v34x;
+                    // N-hit charge sign: sum normalised cross-product sin(bend) over all
+                    // consecutive triplets (i, i+1, i+2) for i = 0..N-3.
+                    // Each triplet contributes sin_i = crossZ / (|chord_a| * |chord_b|).
+                    // Averaging over N-2 triplets gives equal weight to all hits.
+                    const int Nh = static_cast<int>(trackHits.size());
+                    double sinBendSum4 = 0.0;
+                    double avgChord4   = 0.0;
+                    int nTriplets = 0;
+                    for (int ti = 0; ti <= Nh - 3; ++ti) {
+                        const auto& pa = trackHits[ti  ].getPosition();
+                        const auto& pb = trackHits[ti+1].getPosition();
+                        const auto& pc = trackHits[ti+2].getPosition();
+                        double vabx = pb[0]-pa[0], vaby = pb[1]-pa[1];
+                        double vbcx = pc[0]-pb[0], vbcy = pc[1]-pb[1];
+                        double crossZ = vabx*vbcy - vaby*vbcx;
+                        double lenAB  = std::sqrt(vabx*vabx + vaby*vaby);
+                        double lenBC  = std::sqrt(vbcx*vbcx + vbcy*vbcy);
+                        double sinBend = (lenAB*lenBC > 1e-6) ? crossZ/(lenAB*lenBC) : 0.0;
+                        sinBendSum4 += sinBend;
+                        avgChord4   += (lenAB + lenBC) / 2.0;
+                        ++nTriplets;
+                    }
+                    if (nTriplets > 0) { sinBendSum4 /= nTriplets; avgChord4 /= nTriplets; }
 
-                    // Chord lengths (mm) — needed for normalisation and threshold
-                    double len12 = std::sqrt(v12x*v12x + v12y*v12y);
-                    double len23 = std::sqrt(v23x*v23x + v23y*v23y);
-                    double len34 = std::sqrt(v34x*v34x + v34y*v34y);
-                    // Normalise: sin(bend) ∈ [-1,+1] for each triplet
-                    double sin_012 = (len12*len23 > 1e-6) ? crossZ_012 / (len12*len23) : 0.0;
-                    double sin_123 = (len23*len34 > 1e-6) ? crossZ_123 / (len23*len34) : 0.0;
-                    double sinBendSum4 = sin_012 + sin_123;  // range [-2, +2]
-
-                    // Reliability threshold: bend must exceed 0.5 mm over the lever arm
-                    // (same criterion as the 3-hit seed, but positions here are in mm)
-                    double avgChord4 = (len12 + len23 + len34) / 3.0;  // mm
                     double sinThreshold4 = (avgChord4 > 1e-6) ? 0.5 / avgChord4 : 1.0;
                     bool chargeReliable4 = (std::abs(sinBendSum4) >= sinThreshold4);
-
                     double charge4 = bSign4 * (sinBendSum4 < 0.0 ? 1.0 : -1.0);
 
                     if (!chargeReliable4) {
-                        debug() << "4-hit charge UNRELIABLE (near-straight track):"
+                        debug() << "N-hit charge UNRELIABLE (near-straight track):"
                                 << "  sinBendSum4=" << sinBendSum4
                                 << "  threshold=" << sinThreshold4
                                 << "  avgChord=" << avgChord4 << " mm" << endmsg;
@@ -1610,13 +1732,11 @@ void DisplacedTracking::findTracks(
                     // Compare against 3-hit seed charge for the match/mismatch diagnostic
                     double chargeSeed = (seedState.omega >= 0.0) ? 1.0 : -1.0;
                     if (charge4 != chargeSeed) {
-                        debug() << "4-hit charge DIFFERS from 3-hit seed:"
+                        debug() << "N-hit charge DIFFERS from 3-hit seed:"
                                 << "  charge4=" << charge4
                                 << (chargeReliable4 ? "" : " [UNRELIABLE]")
                                 << "  chargeSeed=" << chargeSeed
-                                << "  sinBendSum4=" << sinBendSum4
-                                << "  sin_012=" << sin_012
-                                << "  sin_123=" << sin_123 << endmsg;
+                                << "  sinBendSum4=" << sinBendSum4 << endmsg;
                     }
 
                     // MC truth debug: extract charge and momentum from the MCParticle
@@ -1634,7 +1754,7 @@ void DisplacedTracking::findTracks(
                                         << "  py=" << mom.y << " GeV/c"
                                         << "  pz=" << mom.z << " GeV/c"
                                         << "  pT=" << mcPt << " GeV/c"
-                                        << "  reco_charge4=" << charge4
+                                        << "  reco_chargeN=" << charge4
                                         << (chargeReliable4 ? "" : " [UNRELIABLE]")
                                         << endmsg;
                             } else {
@@ -1653,10 +1773,10 @@ void DisplacedTracking::findTracks(
                     if (phi >  M_PI) phi -= 2*M_PI;
                     if (phi < -M_PI) phi += 2*M_PI;
 
-                    // omega = charge / R  (R in mm), same convention as createTripletSeed
+                    // omega = charge / R  (R in mm)
                     double omega = charge4 / (radius * 10.0);
 
-                    debug() << "4-hit AtLastHit: charge=" << charge4
+                    debug() << "N-hit AtLastHit: charge=" << charge4
                             << (chargeReliable4 ? "" : " [UNRELIABLE]")
                             << "  pT=" << pT << " GeV/c"
                             << "  sinBendSum4=" << sinBendSum4
@@ -1794,6 +1914,7 @@ void DisplacedTracking::findTracks(
             } else {
                 warning() << "4-hit circle fit failed for track " << trackNumber << endmsg;
             }
+            } // end inner scope for N-hit fit
         }
 
         // Fit the track with GenFit (if enabled)
@@ -2031,7 +2152,108 @@ void DisplacedTracking::findTracks(
         if (hasCalorimeter) m_statStateAtCalorimeter++;
         if (hasOther)       m_statStateAtOther++;
         if (hasVertex)      m_statStateAtVertex++;
-        if (hasLastHit) m_statFourHitTracks++; else m_statThreeHitTracks++;
+        if (hasLastHit) m_statFourHitTracks++; else m_statThreeHitTracks++;  // legacy
+
+        // N-hit multiplicity distribution
+        {
+            int nFinalHits = static_cast<int>(trackHits.size());
+            if      (nFinalHits <= 3) m_statNhit3++;
+            else if (nFinalHits == 4) m_statNhit4++;
+            else if (nFinalHits == 5) m_statNhit5++;
+            else if (nFinalHits == 6) m_statNhit6++;
+            else                      m_statNhit7plus++;
+        }
+        m_statValidTriplets++;
+
+        // ── Reco vs MC truth comparison (DEBUG level) ─────────────────────────────
+        // Find the majority MCParticle from the track hits, then compare reco
+        // parameters (AtLastHit or AtFirstHit) with truth.
+        if (msgLevel(MSG::DEBUG)) {
+            // Tally MCParticle associations across all track hits
+            std::unordered_map<int, std::pair<edm4hep::MCParticle, int>> mcCount;
+            for (const auto& th : trackHits) {
+                auto it = recoToSimMap.find(th.id().index);
+                if (it == recoToSimMap.end()) continue;
+                auto mcPart = it->second.getParticle();
+                if (!mcPart.isAvailable()) continue;
+                int mcIdx = mcPart.id().index;
+                mcCount[mcIdx].first  = mcPart;
+                mcCount[mcIdx].second++;
+            }
+            // Find majority MCParticle
+            int bestCount = 0;
+            edm4hep::MCParticle bestMC;
+            bool hasMC = false;
+            for (const auto& [idx, pair] : mcCount) {
+                if (pair.second > bestCount) {
+                    bestCount = pair.second;
+                    bestMC    = pair.first;
+                    hasMC     = true;
+                }
+            }
+            if (hasMC) {
+                const auto& mom = bestMC.getMomentum();
+                double mcPt  = std::sqrt(mom.x*mom.x + mom.y*mom.y);
+                double mcP   = std::sqrt(mcPt*mcPt + mom.z*mom.z);
+                double mcEta = (mcPt > 0.0) ? std::asinh(mom.z / mcPt) : 0.0;
+                double mcPhi = std::atan2(mom.y, mom.x);
+
+                // Extract best reco parameters (prefer AtLastHit)
+                double recoPt = 0.0, recoPhi = 0.0, recoD0mm = 0.0, recoZ0mm = 0.0, recoEta = 0.0;
+                bool hasRecoState = false;
+                for (int sIdx = 0; sIdx < finalTrack.trackStates_size(); ++sIdx) {
+                    auto ts = finalTrack.getTrackStates(sIdx);
+                    if (ts.location == edm4hep::TrackState::AtLastHit ||
+                        (!hasRecoState && ts.location == edm4hep::TrackState::AtFirstHit)) {
+                        double omegaMm = ts.omega;           // 1/mm
+                        if (std::abs(omegaMm) > 1e-12) {
+                            // pT from circle: pT[GeV] = 0.3 * B[T] * R[m]
+                            // omega[1/mm] = q/R[mm] => R[m] = 1e-3/|omega|
+                            // Use B from the seed region (roughly 2 T for muon spec)
+                            // AtLastHit was computed with the actual B so we just invert:
+                            // pT = 0.3 * B * (1e-3 / |omega[1/mm]|)
+                            // The B value is already baked into omega via the fit, so:
+                            // omega[1/mm] = 0.3*B / pT[GeV] * 1e-3
+                            // => pT = 0.3*B*1e-3 / |omega|
+                            // We stored omega = chargeN / (cr_cm * 10.0) with B baked in
+                            // via chargeN*0.3*B/pT * sign, so just use getPT helper:
+                            recoPt = getPT(ts);
+                        }
+                        recoPhi      = ts.phi;
+                        recoD0mm     = ts.D0;
+                        recoZ0mm     = ts.Z0;
+                        recoEta      = (std::abs(ts.tanLambda) > 0.0)
+                                       ? std::asinh(ts.tanLambda) : 0.0;
+                        hasRecoState = true;
+                        if (ts.location == edm4hep::TrackState::AtLastHit) break; // prefer this
+                    }
+                }
+
+                double dPt  = (mcPt  > 0) ? (recoPt  - mcPt)  / mcPt  * 100.0 : 0.0;
+                double dPhi = recoPhi - mcPhi;
+                // wrap dPhi to [-pi,pi]
+                while (dPhi >  M_PI) dPhi -= 2*M_PI;
+                while (dPhi < -M_PI) dPhi += 2*M_PI;
+
+                debug() << "[RECO vs TRUTH trk " << trackNumber << "]"
+                        << "  PDG=" << bestMC.getPDG()
+                        << "  q_truth=" << bestMC.getCharge()
+                        << "  hits_matched=" << bestCount << "/" << trackHits.size()
+                        << endmsg;
+                debug() << "  Truth: pT=" << std::fixed << std::setprecision(3) << mcPt
+                        << " GeV/c  phi=" << mcPhi << " rad  eta=" << mcEta
+                        << "  |p|=" << mcP << " GeV/c" << endmsg;
+                debug() << "  Reco : pT=" << recoPt
+                        << " GeV/c  phi=" << recoPhi << " rad  eta=" << recoEta
+                        << "  d0=" << recoD0mm << " mm  z0=" << recoZ0mm << " mm" << endmsg;
+                debug() << "  Delta: dpT/pT=" << std::setprecision(1) << dPt << "%"
+                        << "  dphi=" << std::setprecision(4) << dPhi << " rad"
+                        << "  deta=" << recoEta - mcEta << endmsg;
+            } else {
+                debug() << "[RECO vs TRUTH trk " << trackNumber << "] no MC link found for track hits" << endmsg;
+            }
+        }
+
         // Count charge from the best available analytical state:
         //   priority 0 → AtLastHit  (4-hit WLS circle fit, most reliable)
         //   priority 1 → AtFirstHit (3-hit seed, always present)
@@ -2209,546 +2431,6 @@ bool DisplacedTracking::calculateCircleCenterSagitta(
     x0 = midpoint.x() + directionFactor * height * perpDir.x();
     y0 = midpoint.y() + directionFactor * height * perpDir.y();
     
-    return true;
-}
-
-bool DisplacedTracking::createTripletSeed(
-    const edm4hep::TrackerHitPlane& hit1,
-    const edm4hep::TrackerHitPlane& hit2,
-    const edm4hep::TrackerHitPlane& hit3,
-    edm4hep::TrackCollection* tracks,
-    edm4hep::TrackerHitPlaneCollection& outputHits,
-    const LinkPropagator& propagateLink,
-    std::vector<bool>& usedHits,
-    size_t idx1, size_t idx2, size_t idx3) const {
-    
-    // Get hit positions
-    const auto& pos1 = hit1.getPosition();
-    const auto& pos2 = hit2.getPosition();
-    const auto& pos3 = hit3.getPosition();
-    
-    // Get surfaces for each hit
-    const dd4hep::rec::Surface* surf1 = findSurface(hit1);
-    const dd4hep::rec::Surface* surf2 = findSurface(hit2);
-    const dd4hep::rec::Surface* surf3 = findSurface(hit3);
-    
-    if (!surf1 || !surf2 || !surf3) {
-        debug() << "Could not find surfaces for triplet hits" << endmsg;
-        return false; // Couldn't find surfaces
-    }
-    
-    // Convert to Eigen vectors in cm
-    Eigen::Vector3d p1(pos1[0] / 10.0, pos1[1] / 10.0, pos1[2] / 10.0);
-    Eigen::Vector3d p2(pos2[0] / 10.0, pos2[1] / 10.0, pos2[2] / 10.0);
-    Eigen::Vector3d p3(pos3[0] / 10.0, pos3[1] / 10.0, pos3[2] / 10.0);
-    
-    // Check if hits are spatially compatible
-    double maxDist = m_maxDist; // cm
-    if ((p2 - p1).norm() > maxDist || (p3 - p2).norm() > maxDist) {
-        debug() << "Hits too far apart spatially, more than 1 m." << endmsg;
-        return false;
-    }
-    
-    // Check angle consistency in the transverse (xy) plane.
-    // A real displaced muon track bends gently between adjacent layers; a wild kink
-    // in the transverse direction signals a noise triplet.
-    // Threshold is steered by MinCosAngle2d (default 0.5, ~60 deg). Set to -1 to disable.
-    {
-        Eigen::Vector3d v1 = p2 - p1;
-        Eigen::Vector3d v2 = p3 - p2;
-        if (m_minCosAngle2d.value() > -1.0) {
-            Eigen::Vector2d v1_2d(v1.x(), v1.y());
-            Eigen::Vector2d v2_2d(v2.x(), v2.y());
-            double norm1 = v1_2d.norm();
-            double norm2 = v2_2d.norm();
-            if (norm1 > 1e-9 && norm2 > 1e-9) {
-                double cosAngle2d = v1_2d.dot(v2_2d) / (norm1 * norm2);
-                if (cosAngle2d < m_minCosAngle2d.value()) {
-                    debug() << "Triplet rejected: transverse angle too large (cosAngle2d="
-                            << cosAngle2d << " < " << m_minCosAngle2d.value() << ")" << endmsg;
-                    m_statAngleGuardRejected++;
-                    return false;
-                }
-            }
-        }
-    }
-    debug() << "Fitting circle through points (cm): " 
-            << "(" << p1.x() << "," << p1.y() << "), "
-            << "(" << p2.x() << "," << p2.y() << "), "
-            << "(" << p3.x() << "," << p3.y() << ")" << endmsg;
-    
-    // Calculate using Direct Formula Method
-    double x0_direct, y0_direct, radius_direct;
-    bool directValid = calculateCircleCenterDirect(
-        p1.x(), p1.y(), p2.x(), p2.y(), p3.x(), p3.y(),
-        x0_direct, y0_direct, radius_direct);
-    
-    if (!directValid) {
-        debug() << "Direct formula method failed" << endmsg;
-        return false;
-    }
-    
-    debug() << "Direct formula method: center=(" << x0_direct << "," << y0_direct 
-            << "), radius=" << radius_direct << " cm" << endmsg;
-
-    // ── Direct-formula diagnostic state (AtCalorimeter) ────────────────────────
-    // directValid is true here (early return above if not). The direct-formula
-    // parameters are saved unconditionally — AtCalorimeter is always produced
-    // regardless of whether the sagitta method succeeds or fails below.
-    
-    // Calculate using sagitta method
-    double sagitta = calculateSagitta(p1, p2, p3);
-    
-    // Calculate chord length
-    Eigen::Vector2d p1_2d(p1.x(), p1.y());
-    Eigen::Vector2d p3_2d(p3.x(), p3.y());
-    double chordLength = (p3_2d - p1_2d).norm();
-    
-    // Simplified sagitta radius (used for debug print and geometry sanity check only)
-    double sagittaRadius = (std::abs(sagitta) > 1e-6)
-        ? (chordLength * chordLength) / (8 * sagitta)
-        : radius_direct;  // fallback when sagitta ≈ 0
-    
-    debug() << "Sagitta method: sagitta = " << sagitta << " cm, chord = " 
-            << chordLength << " cm, radius = " << sagittaRadius << " cm" << endmsg;
-    
-    // Calculate full sagitta center and radius
-    double x0_sagitta, y0_sagitta, radius_sagitta;
-    bool sagittaValid = calculateCircleCenterSagitta(
-        p1, p2, p3, x0_sagitta, y0_sagitta, radius_sagitta);
-    
-    if (!sagittaValid) {
-        // Sagitta fails for nearly-straight high-pT tracks (sagitta ≈ 0).
-        // Fall back to the direct formula for the main track parameters.
-        // directStateReady is guaranteed true here (direct formula succeeded above).
-        debug() << "Sagitta center calculation failed — using direct formula as main fit" << endmsg;
-        x0_sagitta     = x0_direct;
-        y0_sagitta     = y0_direct;
-        radius_sagitta = radius_direct;
-    }
-    
-    debug() << "Sagitta full method: center=(" << x0_sagitta << "," << y0_sagitta 
-            << "), radius=" << radius_sagitta << " cm" << endmsg;
-    
-    // Calculate magnetic field
-    dd4hep::Position fieldPos((p1.x() + p2.x() + p3.x())/3.0, 
-                            (p1.y() + p2.y() + p3.y())/3.0, 
-                            (p1.z() + p2.z() + p3.z())/3.0);
-    double actualBz = m_field.magneticField(fieldPos).z() / dd4hep::tesla;
-    
-    debug() << "Magnetic field: actual=" << actualBz << " Tesla" << endmsg;
-    
-    // Calculate pT using all methods for comparison
-    double pT_direct = 0.3 * std::abs(actualBz) * radius_direct / 100.0;
-    double pT_sagitta = 0.3 * std::abs(actualBz) * sagittaRadius / 100.0;
-    double pT_sagitta_full = 0.3 * std::abs(actualBz) * radius_sagitta / 100.0;
-    
-    debug() << "Comparison of pT estimates:" << endmsg;
-    debug() << "  Direct formula pT: " << pT_direct << " GeV/c" << endmsg;
-    debug() << "  Sagitta simple pT: " << pT_sagitta << " GeV/c" << endmsg;
-    debug() << "  Sagitta full pT: " << pT_sagitta_full << " GeV/c" << endmsg;
-
-    // --- Geometry sanity check: direct vs sagitta radius should agree within a factor of 2 ---
-    // If they disagree wildly, the triplet is nearly collinear / numerically unstable.
-    // We log a warning but do NOT reject — the sagitta method is more robust for high-pT tracks.
-    {
-        double rRatio = (radius_direct > 1e-3) ? radius_sagitta / radius_direct : 0.0;
-        if (rRatio < 0.3 || rRatio > 3.0) {
-            m_statTripletBadGeom++;
-            debug() << "WARNING: radius disagreement — direct=" << radius_direct
-                    << " cm  sagitta=" << radius_sagitta << " cm  ratio=" << rRatio
-                    << "  (numerically marginal triplet — proceeding with sagitta)" << endmsg;
-        }
-    }
-    /*
-    // Use sagitta method for track parameters
-    double radius = radius_direct;
-    double x0 = x0_direct;
-    double y0 = y0_direct;
-    double pT = pT_direct;
-    */
-    // Use sagitta method for track parameters
-    double radius = radius_sagitta;
-    double x0 = x0_sagitta;
-    double y0 = y0_sagitta;
-    double pT = pT_sagitta_full;
-    
-    // Determine helix direction and charge.
-    //
-    // The phi-angle method (phi3 < phi1) is numerically unstable for high-pT
-    // tracks where radius >> arc length: the angular sweep is tiny and floating-
-    // point noise in atan2 can flip the sign.
-    //
-    // The cross-product method is purely hit-position arithmetic:
-    //   v12 = p2 - p1,  v23 = p3 - p2
-    //   crossZ = v12.x * v23.y - v12.y * v23.x  =  |v12||v23| sin(bend_angle)
-    //   crossZ > 0  → left turn  → counter-clockwise
-    //   crossZ < 0  → right turn → clockwise
-    //
-    // For very high-pT tracks (near-straight), |sin(bend_angle)| → 0 and crossZ
-    // itself becomes noise-dominated.  We normalise by the chord product to get
-    // sin(bend_angle) directly, then apply a minimum threshold.
-    // sin_threshold = 0.5 mm / (avg_chord_cm * 10)  ≈ reliable down to ~pT where
-    // the bend over the available lever arm exceeds 0.5 mm (≈ one hit resolution).
-    double phi1 = std::atan2(p1.y() - y0, p1.x() - x0);
-    double phi2 = std::atan2(p2.y() - y0, p2.x() - x0);
-    double phi3 = std::atan2(p3.y() - y0, p3.x() - x0);
-
-    // Unwrap for arc-length use only
-    if (phi2 - phi1 > M_PI)  phi2 -= 2*M_PI;
-    if (phi2 - phi1 < -M_PI) phi2 += 2*M_PI;
-    if (phi3 - phi2 > M_PI)  phi3 -= 2*M_PI;
-    if (phi3 - phi2 < -M_PI) phi3 += 2*M_PI;
-
-    // Cross product of consecutive chord vectors in the xy plane
-    double v12x = p2.x() - p1.x(),  v12y = p2.y() - p1.y();
-    double v23x = p3.x() - p2.x(),  v23y = p3.y() - p2.y();
-    double crossZ = v12x * v23y - v12y * v23x;   // cm²
-
-    double len12 = std::sqrt(v12x*v12x + v12y*v12y);
-    double len23 = std::sqrt(v23x*v23x + v23y*v23y);
-    double chordProduct = len12 * len23;   // cm²
-
-    // Normalised bend: sin(angle between chords) = crossZ / (|v12| |v23|)
-    // Threshold: bend must exceed 0.5 mm over the available lever arm.
-    // 0.5 mm = 0.05 cm  →  sin_threshold = 0.05 / avg_chord
-    double avgChord = 0.5 * (len12 + len23);
-    double sinBend  = (chordProduct > 1e-6) ? std::abs(crossZ) / chordProduct : 0.0;
-    double sinThreshold = (avgChord > 1e-6) ? 0.05 / avgChord : 1.0;  // 0.5 mm / chord
-
-    bool chargeReliable = (sinBend >= sinThreshold);
-
-    bool clockwise;
-    if (chargeReliable) {
-        clockwise = (crossZ < 0.0);
-    } else {
-        // Track is too straight to determine charge sign from geometry alone.
-        // Use crossZ sign as best guess but mark as unreliable.
-        clockwise = (crossZ < 0.0);
-        debug() << "WARNING: near-straight track — crossZ=" << crossZ
-                << " sinBend=" << sinBend << " threshold=" << sinThreshold
-                << " — charge sign unreliable" << endmsg;
-    }
-
-    // Geometric rotation direction gives charge sign only when B > 0.
-    // For B < 0 the Lorentz force reverses, so the rotation sense flips:
-    //   q_geometric = clockwise ? +1 : -1   (assumes B > 0)
-    //   true charge = q_geometric * sign(Bz)
-    // We read actualBz directly from the detector so this is field-agnostic.
-    double bSign  = (actualBz >= 0.0) ? 1.0 : -1.0;
-    double charge = bSign * (clockwise ? 1.0 : -1.0);
-
-    debug() << "Track direction: " << (clockwise ? "clockwise" : "counter-clockwise")
-            << "  crossZ=" << crossZ << "  sinBend=" << sinBend
-            << (chargeReliable ? "" : "  [UNRELIABLE]")
-            << ", Bz=" << actualBz << " T, charge: " << charge << endmsg;
-    
-    // Fit z-component
-    double s1 = 0;
-    double s2 = radius * std::abs(phi2 - phi1);
-    double s3 = radius * std::abs(phi3 - phi1);
-    
-    double a, b;
-    fitLine(s1, p1.z(), s2, p2.z(), s3, p3.z(), a, b);
-    
-    debug() << "Z-fit: z = " << a << " * s + " << b << endmsg;
-    
-    double theta = std::atan2(1.0, a);
-    double eta = -std::log(std::tan(theta/2.0));
-    
-    debug() << "Track angles: theta=" << theta << ", eta=" << eta << endmsg;
-    
-    // Calculate impact parameters using two-segment model
-    // Query inner and outer field strengths from DD4hep at representative positions
-    // Inner: a point well inside the solenoid boundary (R=230 cm)
-    double innerFieldStrength = m_field.magneticField(dd4hep::Position(0.0, 0.0, 0.0)).z() / dd4hep::tesla;
-    // Outer: a point well outside the solenoid boundary, near the muon system
-    double outerFieldStrength = m_field.magneticField(dd4hep::Position(350.0, 0.0, 0.0)).z() / dd4hep::tesla;
-
-    double d0 = std::sqrt(std::pow(x0, 2) + std::pow(y0, 2)) - radius;
-    /*
-    // Use the two-segment model for d0 calculation
-    double d0 = calculateImpactParameter(x0, y0, radius, clockwise, 
-                                   innerFieldStrength, outerFieldStrength,
-                                   p1, p2, p3);
-    */
-    double z0 = b; // z0 calculation remains the same
-    
-    debug() << "Impact parameters: d0=" << d0 << " cm, z0=" << z0 << " cm" << endmsg;
-
-    // Track parameters
-    double qOverPt = charge / pT;
-    double phi = std::atan2(y0, x0) + (clockwise ? -M_PI/2 : M_PI/2);
-    
-    // Normalize phi
-    if (phi > M_PI) phi -= 2*M_PI;
-    if (phi < -M_PI) phi += 2*M_PI;
-    
-    // Convert to EDM4hep parameters
-    double d0_mm = d0 * 10.0;  // Convert from cm to mm
-    double z0_mm = z0 * 10.0;  // Convert from cm to mm
-    
-    // omega = 1/R with correct sign (R in mm)
-    double omega = charge / (radius * 10.0);  // 1/mm
-    
-    // tanLambda = tan of dip angle
-    double tanLambda = std::sinh(eta);
-    
-    debug() << "Track parameters: (" 
-            << qOverPt << ", " << phi << ", " << eta << ", " << d0 << ", " << z0 << ")" << endmsg;
-    
-    debug() << "EDM4hep parameters: d0=" << d0_mm << " mm, phi=" << phi 
-            << ", omega=" << std::scientific << std::setprecision(4) << omega 
-            << std::defaultfloat << " 1/mm, z0=" << z0_mm 
-            << " mm, tanLambda=" << tanLambda << endmsg;
-
-    // Create EDM4hep track
-    auto edm_track = tracks->create();
-    
-    // Create track state at IP
-    edm4hep::TrackState state = createTrackState(
-        d0_mm, phi, omega, z0_mm, tanLambda, edm4hep::TrackState::AtFirstHit);
-
-    // Set reference point to the first hit position
-    const auto& firstHitPos = hit1.getPosition();
-    state.referencePoint = edm4hep::Vector3f(firstHitPos[0], firstHitPos[1], firstHitPos[2]);
-
-    // ── Propagate hit uncertainties to track-parameter covariance ──────────────
-    // All EDM4hep cov units:
-    //   D0, Z0  in mm²;  phi, tanLambda in rad²;  omega in (1/mm)².
-    {
-        // Hit position uncertainties in cm
-        auto getSigmaXY = [](const edm4hep::TrackerHitPlane& h) -> double {
-            double su = h.getDu(); 
-            double sv = h.getDv();
-            if (su <= 0) su = 0.4; // mm
-            if (sv <= 0) sv = 0.4;
-            return std::sqrt(su*su + sv*sv) / 10.0; // cm
-        };
-
-        auto getSigmaZ = [](const edm4hep::TrackerHitPlane& h) -> double {
-            double sv = h.getDv();
-            if (sv <= 0) sv = 0.4;
-            return sv / 10.0; // cm
-        };
-
-        double sigma_xy1 = getSigmaXY(hit1);
-        double sigma_xy2 = getSigmaXY(hit2);
-        double sigma_xy3 = getSigmaXY(hit3);
-
-        double sigma_z1  = getSigmaZ(hit1);
-        double sigma_z3  = getSigmaZ(hit3);
-
-        // lever arm
-        double chordL = std::sqrt(std::pow(p3.x()-p1.x(),2) +
-                                std::pow(p3.y()-p1.y(),2));
-
-        // --- omega ---
-        double sigma_R_cm = (chordL > 1e-3)
-            ? 2.0 * sigma_xy2 * radius / chordL
-            : 0.5 * radius;
-
-        double dOmega_dR = -charge / (radius * radius * 10.0);
-        double var_omega  = dOmega_dR * dOmega_dR *
-                            sigma_R_cm * sigma_R_cm;
-
-        double omega_abs_floor = std::pow(0.2 * std::abs(omega), 2);
-
-        debug() << "Omega covariance values AtFirstHit:"
-                << "  σ_ω="  << std::sqrt(var_omega)  << " 1/mm"
-                << "  omega_abs_floor="   << std::sqrt(omega_abs_floor)<< " 1/mm"
-                << endmsg;
-
-        var_omega = std::max({var_omega,
-                            omega_abs_floor});
-
-        // --- phi ---
-        double var_phi = (chordL > 1e-6)
-            ? (sigma_xy1 * sigma_xy1) / (chordL * chordL)
-            : 0.01;
-
-         debug() << "Phi covariance values AtFirstHit:"
-                << "  σ_phi=" << std::sqrt(var_phi)  << " rad"
-                << "  phi_floor= 0.1 rad"
-                << endmsg;
-
-        var_phi = std::max(var_phi, 0.01);  // floor for sigma = 0.1 
-
-        // --- d0 ---
-        double avg_sigma_xy_mm =
-            (sigma_xy1 + sigma_xy2 + sigma_xy3) / 3.0 * 10.0;
-
-        double var_d0 = avg_sigma_xy_mm * avg_sigma_xy_mm;
-
-        // --- z0 / tanLambda ---
-        double avg_sigma_z_mm =
-            (sigma_z1 + sigma_z3) / 2.0 * 10.0;
-
-        double chordL_mm = chordL * 10.0;
-
-        double var_tanL = (chordL_mm > 1e-6)
-            ? (avg_sigma_z_mm * avg_sigma_z_mm) /
-            (chordL_mm * chordL_mm)
-            : 0.01;
-
-        debug() << "Tan lamda covariance values AtFirstHit:"
-                << "  σ_tanL="<< std::sqrt(var_tanL) 
-                << "  tanL_floor= 0.1"
-                << endmsg;
-
-        var_tanL = std::max(var_tanL, 0.01); // floor for sigma = 0.1 
-
-        double var_z0 = avg_sigma_z_mm * avg_sigma_z_mm;
-
-        // reset covariance
-        for (int i = 0; i < 6; ++i)
-            for (int j = 0; j <= i; ++j)
-                state.setCovMatrix(0.0,
-                    static_cast<edm4hep::TrackParams>(i),
-                    static_cast<edm4hep::TrackParams>(j));
-
-        state.setCovMatrix(var_d0,
-            edm4hep::TrackParams::d0,
-            edm4hep::TrackParams::d0);
-
-        state.setCovMatrix(var_phi,
-            edm4hep::TrackParams::phi,
-            edm4hep::TrackParams::phi);
-
-        state.setCovMatrix(var_omega,
-            edm4hep::TrackParams::omega,
-            edm4hep::TrackParams::omega);
-
-        state.setCovMatrix(var_z0,
-            edm4hep::TrackParams::z0,
-            edm4hep::TrackParams::z0);
-
-        state.setCovMatrix(var_tanL,
-            edm4hep::TrackParams::tanLambda,
-            edm4hep::TrackParams::tanLambda);
-
-        debug() << "AtFirstHit covariance from hit uncertainties:"
-                << "  σ_d0="  << std::sqrt(var_d0)  << " mm"
-                << "  σ_phi=" << std::sqrt(var_phi)  << " rad"
-                << "  σ_ω="   << std::sqrt(var_omega)<< " 1/mm"
-                << "  σ_z0="  << std::sqrt(var_z0)   << " mm"
-                << "  σ_tanL="<< std::sqrt(var_tanL) << endmsg;
-    }
-
-    // Add track state to track
-    edm_track.addToTrackStates(state);
-
-    // ── Direct-formula diagnostic state (AtCalorimeter) ────────────────────────
-    // directValid is guaranteed true (early return above). Always saved.
-    {
-        // phi angles from the direct-formula center
-        double phi1_d = std::atan2(p1.y() - y0_direct, p1.x() - x0_direct);
-        double phi2_d = std::atan2(p2.y() - y0_direct, p2.x() - x0_direct);
-        double phi3_d = std::atan2(p3.y() - y0_direct, p3.x() - x0_direct);
-        // unwrap
-        if (phi2_d - phi1_d >  M_PI) phi2_d -= 2*M_PI;
-        if (phi2_d - phi1_d < -M_PI) phi2_d += 2*M_PI;
-        if (phi3_d - phi2_d >  M_PI) phi3_d -= 2*M_PI;
-        if (phi3_d - phi2_d < -M_PI) phi3_d += 2*M_PI;
-
-        // z-fit with direct-formula arc-lengths
-        double s2_d = radius_direct * std::abs(phi2_d - phi1_d);
-        double s3_d = radius_direct * std::abs(phi3_d - phi1_d);
-        double a_d, b_d;
-        fitLine(0.0, p1.z(), s2_d, p2.z(), s3_d, p3.z(), a_d, b_d);
-
-        double theta_d     = std::atan2(1.0, a_d);
-        double eta_d       = -std::log(std::tan(theta_d / 2.0));
-        double tanLambda_d = std::sinh(eta_d);
-
-        double pT_direct_val = 0.3 * std::abs(actualBz) * radius_direct / 100.0;
-        double phi_d = std::atan2(y0_direct, x0_direct) + (clockwise ? -M_PI/2 : M_PI/2);
-        if (phi_d >  M_PI) phi_d -= 2*M_PI;
-        if (phi_d < -M_PI) phi_d += 2*M_PI;
-
-        double d0_d    = std::sqrt(x0_direct*x0_direct + y0_direct*y0_direct) - radius_direct;
-        double omega_d = charge / (radius_direct * 10.0);   // 1/mm
-        double d0_d_mm = d0_d * 10.0;
-        double z0_d_mm = b_d  * 10.0;
-
-        edm4hep::TrackState stateD = createTrackState(
-            d0_d_mm, phi_d, omega_d, z0_d_mm, tanLambda_d,
-            edm4hep::TrackState::AtCalorimeter);
-        stateD.referencePoint = edm4hep::Vector3f(firstHitPos[0], firstHitPos[1], firstHitPos[2]);
-
-        // Propagate omega variance with same Jacobian used for AtFirstHit
-        {
-            auto getSigmaXY_d = [](const edm4hep::TrackerHitPlane& h) -> double {
-                double su = h.getDu(), sv = h.getDv();
-                if (su <= 0) su = 0.4;
-                if (sv <= 0) sv = 0.4;
-                return std::sqrt(su*su + sv*sv) / 10.0; // cm
-            };
-            double sigma_xy2_d = getSigmaXY_d(hit2);
-            double chordL_d    = std::sqrt(std::pow(p3.x()-p1.x(),2) + std::pow(p3.y()-p1.y(),2));
-            double sigma_R_d   = (chordL_d > 1e-3)
-                                 ? 2.0 * sigma_xy2_d * radius_direct / chordL_d
-                                 : 0.5 * radius_direct;
-            double dOmega_dR_d = -charge / (radius_direct * radius_direct * 10.0);
-            double var_omega_d = dOmega_dR_d * dOmega_dR_d * sigma_R_d * sigma_R_d;
-            var_omega_d = std::max(var_omega_d, std::pow(0.2 * std::abs(omega_d), 2));
-            stateD.setCovMatrix(var_omega_d,
-                edm4hep::TrackParams::omega, edm4hep::TrackParams::omega);
-        }
-
-        edm_track.addToTrackStates(stateD);
-        debug() << "AtCalorimeter (direct-formula): pT=" << pT_direct_val
-                << " GeV/c, d0=" << d0_d_mm << " mm, phi=" << phi_d
-                << " rad, omega=" << omega_d << " 1/mm" << endmsg;
-    }
-    
-    // Copy input hits into the output collection so PODIO can resolve the relation
-    auto outHit1 = outputHits.create();
-    outHit1.setCellID(hit1.getCellID()); outHit1.setTime(hit1.getTime());
-    outHit1.setEDep(hit1.getEDep()); outHit1.setEDepError(hit1.getEDepError());
-    outHit1.setPosition(hit1.getPosition()); outHit1.setCovMatrix(hit1.getCovMatrix());
-    outHit1.setDu(hit1.getDu()); outHit1.setDv(hit1.getDv());
-    outHit1.setU(hit1.getU()); outHit1.setV(hit1.getV());  // measurement direction vectors
-    auto outHit2 = outputHits.create();
-    outHit2.setCellID(hit2.getCellID()); outHit2.setTime(hit2.getTime());
-    outHit2.setEDep(hit2.getEDep()); outHit2.setEDepError(hit2.getEDepError());
-    outHit2.setPosition(hit2.getPosition()); outHit2.setCovMatrix(hit2.getCovMatrix());
-    outHit2.setDu(hit2.getDu()); outHit2.setDv(hit2.getDv());
-    outHit2.setU(hit2.getU()); outHit2.setV(hit2.getV());  // measurement direction vectors
-    auto outHit3 = outputHits.create();
-    outHit3.setCellID(hit3.getCellID()); outHit3.setTime(hit3.getTime());
-    outHit3.setEDep(hit3.getEDep()); outHit3.setEDepError(hit3.getEDepError());
-    outHit3.setPosition(hit3.getPosition()); outHit3.setCovMatrix(hit3.getCovMatrix());
-    outHit3.setDu(hit3.getDu()); outHit3.setDv(hit3.getDv());
-    outHit3.setU(hit3.getU()); outHit3.setV(hit3.getV());  // measurement direction vectors
-    debug() << "[UV-DEBUG] createTripletSeed output hits:"
-            << "  hit1 u=(" << outHit1.getU().a << "," << outHit1.getU().b << ")"
-            << "  v=(" << outHit1.getV().a << "," << outHit1.getV().b << ")"
-            << "  hit2 u=(" << outHit2.getU().a << "," << outHit2.getU().b << ")"
-            << "  v=(" << outHit2.getV().a << "," << outHit2.getV().b << ")"
-            << "  hit3 u=(" << outHit3.getU().a << "," << outHit3.getU().b << ")"
-            << "  v=(" << outHit3.getV().a << "," << outHit3.getV().b << ")"
-            << endmsg;
-    propagateLink(outHit1, hit1);
-    propagateLink(outHit2, hit2);
-    propagateLink(outHit3, hit3);
-    edm_track.addToTrackerHits(outHit1);
-    edm_track.addToTrackerHits(outHit2);
-    edm_track.addToTrackerHits(outHit3);
-    
-    // Set chi2 and ndf
-    edm_track.setChi2(-1.0);  // Initial seed has no chi2 yet
-   // edm_track.setNdf(-1);  // 
-    
-    // Mark hits as used
-    usedHits[idx1] = true;
-    usedHits[idx2] = true;
-    usedHits[idx3] = true;
-
-    // Count unreliable charge seeds for diagnostics
-    if (!chargeReliable) m_statChargeUndetermined++;
-
-    debug() << "Created valid EDM4hep track with 3 hits" << endmsg;
     return true;
 }
 /*
@@ -3718,346 +3400,122 @@ bool DisplacedTracking::fitTrackWithGenFit(
     }
 }
 
-// Extend a track by searching for compatible extra hits in subsequent layers.
-// Starts from the current last hit and loops until no more hits are found.
-// 
-// Layer acceptance: uses compositeID (barrel=layerID, +endcap=1000+layerID,
-//   -endcap=-1000-layerID) so barrel and endcap layers are never conflated.
-//   Same-composite-layer hits are NOT accepted (disabled — needs tighter spatial
-//   cut to avoid fake combinatorics; TODO: to fix ..re-enable with ~1 cm threshold).
-//   Cross-region transitions (e.g. barrel seed -> endcap continuation) are handled
-//   naturally by the cone cut — no compositeID arithmetic needed across regions.
-//
-// Hit acceptance uses a forward cone from the seed direction:
-//   - the delta vector from the last hit to the candidate must point within
-//     coneHalfAngleDeg of seedDirection (rejects hits behind or off-axis)
-//   - distance must be within m_maxDist
-bool DisplacedTracking::findCompatibleExtraHit(
-    std::vector<edm4hep::TrackerHitPlane>& trackHits,
-    const edm4hep::TrackerHitPlaneCollection* allHits,
-    std::vector<bool>& usedHits,
-    const Eigen::Vector3d& seedDirection,
-    double coneHalfAngleDeg) const {
-
-    if (trackHits.size() < 3) {
-        debug() << "Need at least 3 hits for extension, got " << trackHits.size() << endmsg;
-        return false;
-    }
-
-    const double cosHalfAngle = std::cos(coneHalfAngleDeg * M_PI / 180.0);
-    // Normalize seed direction once
-    const Eigen::Vector3d dir = seedDirection.normalized();
-
-    bool anyFound = false;
-
-    // Loop: each iteration tries to add one more hit beyond the current last hit.
-    // Stops when no compatible hit is found for the current last layer.
-    while (true) {
-        const auto& lastHit      = trackHits.back();
-        const auto& lastPos      = lastHit.getPosition();
-        Eigen::Vector3d lastHitPos(lastPos[0] / 10.0, lastPos[1] / 10.0, lastPos[2] / 10.0); // mm->cm
-
-        int lastCompositeID = getCompositeID(lastHit.getCellID());
-
-        debug() << "Extra-hit search loop: current last hit compositeID=" << lastCompositeID
-                << " at (" << lastHitPos.x() << "," << lastHitPos.y() << "," << lastHitPos.z() << ") cm"
-                << " | track now has " << trackHits.size() << " hits" << endmsg;
-
-        double bestDistance  = 1e6;
-        int    bestHitIndex  = -1;
-        edm4hep::TrackerHitPlane bestHit;
-
-        for (size_t i = 0; i < allHits->size(); ++i) {
-            if (usedHits[i]) continue;
-
-            const auto& candHit      = (*allHits)[i];
-            int candCompositeID      = getCompositeID(candHit.getCellID());
-
-            // --- Layer gate ---
-            // Reject hits in the same composite layer (see comment above).
-            if (candCompositeID == lastCompositeID) continue;
-
-            // For same-region (barrel->barrel or endcap->endcap) we require the
-            // composite layer number to be strictly greater (outward direction).
-            // For cross-region transitions we rely purely on the cone cut below,
-            // so we only hard-reject hits that are clearly inward in the same region.
-            int lastType    = getTypeID(lastHit.getCellID());
-            int candType    = getTypeID(candHit.getCellID());
-            int lastLayerN  = getLayerID(lastHit.getCellID());
-            int candLayerN  = getLayerID(candHit.getCellID());
-            if (lastType == candType) {
-                // Same region: require outward step in physical layer number.
-                // For barrel and +endcap, layerID increases outward.
-                // For -endcap, layerID also increases outward (layer 0 is closest to IP),
-                // so comparing raw layerIDs is correct for all three regions.
-                if (candLayerN <= lastLayerN) continue;
-                // Allow at most a skip of 2 physical layers (no wild jumps)
-                if (candLayerN > lastLayerN + 2) continue;
-            }
-            // Cross-region: no compositeID arithmetic constraint — cone decides
-
-            // --- Cone gate ---
-            const auto& candPos = candHit.getPosition();
-            Eigen::Vector3d candHitPos(candPos[0] / 10.0, candPos[1] / 10.0, candPos[2] / 10.0);
-
-            Eigen::Vector3d delta = candHitPos - lastHitPos;
-            double distance = delta.norm();
-            if (distance < 1e-6) continue; // degenerate
-
-            double cosTheta = delta.dot(dir) / distance;
-
-            // Must be within the forward cone and within max distance
-            if (cosTheta < cosHalfAngle) {
-                debug() << "Candidate hit " << i << " compositeID=" << candCompositeID
-                        << " rejected by cone (cosTheta=" << cosTheta
-                        << " < " << cosHalfAngle << ")" << endmsg;
-                continue;
-            }
-            if (distance > m_maxDist.value()) continue;
-
-            debug() << "Candidate hit " << i << " compositeID=" << candCompositeID
-                    << " distance=" << distance << " cm cosTheta=" << cosTheta << endmsg;
-
-            if (distance < bestDistance) {
-                bestDistance = distance;
-                bestHitIndex = static_cast<int>(i);
-                bestHit      = candHit;
-            }
-        }
-
-        if (bestHitIndex < 0) {
-            debug() << "No compatible extra hit found beyond compositeID=" << lastCompositeID
-                    << " — stopping extension loop" << endmsg;
-            break;
-        }
-
-        int bestCompositeID = getCompositeID(bestHit.getCellID());
-        info() << "Found extra hit: compositeID=" << bestCompositeID
-               << " distance=" << bestDistance << " cm"
-               << " (track now has " << trackHits.size() + 1 << " hits)" << endmsg;
-
-        trackHits.push_back(bestHit);
-        usedHits[bestHitIndex] = true;
-        anyFound = true;
-    }
-
-    return anyFound;
-}
-
-bool DisplacedTracking::fitCircleToFourHits(
+bool DisplacedTracking::fitCircleNHits(
     const std::vector<edm4hep::TrackerHitPlane>& hits,
-    double& x0, double& y0, double& radius, double& chi2,
-    Eigen::Matrix3d& fitCov3x3) const {
-    
-    if (hits.size() != 4) {
-        warning() << "fitCircleToFourHits expects exactly 4 hits, got " << hits.size() << endmsg;
+    double& x0, double& y0, double& radius, double& chi2ndf,
+    Eigen::Matrix3d& fitCov3x3,
+    std::vector<double>& residualsCm) const {
+
+    const int N = static_cast<int>(hits.size());
+    if (N < 3) {
+        warning() << "fitCircleNHits: need at least 3 hits, got " << N << endmsg;
         return false;
     }
-    
-    // Extract hit positions in cm
-    std::vector<Eigen::Vector2d> points;
-    std::vector<double> uncertainties;
-    
-    for (const auto& hit : hits) {
-        const auto& pos = hit.getPosition();
-        points.emplace_back(pos[0] / 10.0, pos[1] / 10.0); // Convert mm to cm
-        
-        // Get measurement uncertainties
-        double sigma_u = hit.getDu(); // mm
-        double sigma_v = hit.getDv(); // mm
-        
-        // Use defaults if not set
-        if (sigma_u <= 0) sigma_u = 0.4; // 400 microns
-        if (sigma_v <= 0) sigma_v = 0.4; // 400 microns
-        
-        // Use average uncertainty (could be improved with proper error propagation)
-        double avgSigma = std::sqrt(sigma_u * sigma_u + sigma_v * sigma_v) / 10.0; // Convert to cm
-        uncertainties.push_back(avgSigma);
+
+    // Extract positions (mm → cm) and uncertainties
+    std::vector<Eigen::Vector2d> pts(N);
+    std::vector<double> sigma(N), w(N);
+    for (int i = 0; i < N; ++i) {
+        const auto& pos = hits[i].getPosition();
+        pts[i] = { pos[0] / 10.0, pos[1] / 10.0 };
+        double su = hits[i].getDu();
+        double sv = hits[i].getDv();
+        if (su <= 0) su = m_sigmaHitDefault.value() * 10.0;  // property is in cm, du is in mm
+        if (sv <= 0) sv = m_sigmaHitDefault.value() * 10.0;
+        sigma[i] = std::sqrt(su*su + sv*sv) / 10.0;  // convert mm → cm
+        w[i]     = 1.0 / (sigma[i] * sigma[i]);
     }
-    
-    debug() << "Fitting circle to 4 points:" << endmsg;
-    for (size_t i = 0; i < points.size(); ++i) {
-        debug() << "  Point " << i << ": (" << points[i].x() << ", " << points[i].y() 
-                << ") cm, σ = " << uncertainties[i] << " cm" << endmsg;
+
+    // ── Step 1: Algebraic WLS circle fit ──────────────────────────────────
+    // Circle equation: x² + y² + D·x + E·y + F = 0
+    Eigen::MatrixXd A(N, 3);
+    Eigen::VectorXd b(N);
+    for (int i = 0; i < N; ++i) {
+        double x = pts[i].x(), y = pts[i].y();
+        A(i,0) = w[i] * x;
+        A(i,1) = w[i] * y;
+        A(i,2) = w[i] * 1.0;
+        b(i)   = -w[i] * (x*x + y*y);
     }
-    
-    // Method 1: Algebraic circle fit using least squares
-    // Circle equation: x² + y² + Dx + Ey + F = 0
-    // Where D = -2x0, E = -2y0, F = x0² + y0² - R²
-    
-    Eigen::MatrixXd A(4, 3);
-    Eigen::VectorXd b(4);
-    Eigen::VectorXd weights(4);
-    
-    // Setup the linear system
-    for (int i = 0; i < 4; ++i) {
-        double x = points[i].x();
-        double y = points[i].y();
-        double w = 1.0 / (uncertainties[i] * uncertainties[i]); // Weight = 1/σ²
-        
-        A(i, 0) = w * x;           // D coefficient
-        A(i, 1) = w * y;           // E coefficient  
-        A(i, 2) = w * 1.0;         // F coefficient
-        b(i) = -w * (x*x + y*y);   // RHS
-        weights(i) = w;
-    }
-    
-    // Solve the weighted least squares system: A^T W A x = A^T W b
-    Eigen::Vector3d solution = (A.transpose() * A).ldlt().solve(A.transpose() * b);
-    
-    double D = solution(0);
-    double E = solution(1); 
-    double F = solution(2);
-    
-    // Convert back to center and radius
+    Eigen::Vector3d sol = (A.transpose() * A).ldlt().solve(A.transpose() * b);
+    double D = sol(0), E = sol(1), F = sol(2);
     x0 = -D / 2.0;
     y0 = -E / 2.0;
-    
-    double discriminant = D*D + E*E - 4*F;
-    if (discriminant <= 0) {
-        debug() << "Invalid circle fit: discriminant = " << discriminant << endmsg;
+    double disc = D*D + E*E - 4*F;
+    if (disc <= 0) {
+        debug() << "fitCircleNHits: degenerate algebraic fit (disc=" << disc << ")" << endmsg;
         return false;
     }
-    
-    radius = std::sqrt(discriminant) / 2.0;
-    
-    debug() << "Algebraic fit result: center=(" << x0 << ", " << y0 
-            << "), radius=" << radius << " cm" << endmsg;
-    
-    // Method 2: Geometric refinement using Gauss-Newton
-    // This improves the fit by minimizing geometric distance rather than algebraic distance
-    
-    // Initial guess from algebraic fit
+    radius = std::sqrt(disc) / 2.0;
+
+    // ── Step 2: Gauss-Newton geometric refinement ─────────────────────────
     Eigen::Vector3d params(x0, y0, radius);
-    
-    // Gauss-Newton iterations
-    const int maxIterations = 10;
-    const double tolerance = 1e-6;
-    
-    for (int iter = 0; iter < maxIterations; ++iter) {
-        Eigen::MatrixXd J(4, 3); // Jacobian matrix
-        Eigen::VectorXd residuals(4);
-        
-        double currentX0 = params(0);
-        double currentY0 = params(1);
-        double currentR = params(2);
-        
-        // Calculate residuals and Jacobian
-        for (int i = 0; i < 4; ++i) {
-            double x = points[i].x();
-            double y = points[i].y();
-            double w = std::sqrt(weights(i));
-            
-            // Distance from point to circle center
-            double dx = x - currentX0;
-            double dy = y - currentY0;
+    const int maxIter = 10;
+    const double tol  = 1e-6;
+    for (int iter = 0; iter < maxIter; ++iter) {
+        double cx = params(0), cy = params(1), r = params(2);
+        Eigen::MatrixXd J(N, 3);
+        Eigen::VectorXd res(N);
+        for (int i = 0; i < N; ++i) {
+            double dx = pts[i].x() - cx, dy = pts[i].y() - cy;
             double dist = std::sqrt(dx*dx + dy*dy);
-            
-            // Residual: weighted geometric distance from point to circle
-            residuals(i) = w * (dist - currentR);
-            
-            // Jacobian elements (derivatives of residual w.r.t. parameters)
-            if (dist > 1e-12) { // Avoid division by zero
-                J(i, 0) = -w * dx / dist;  // ∂r/∂x0
-                J(i, 1) = -w * dy / dist;  // ∂r/∂y0
-                J(i, 2) = -w;              // ∂r/∂R
-            } else {
-                J(i, 0) = J(i, 1) = J(i, 2) = 0;
-            }
-        }
-        
-        // Gauss-Newton update: Δp = -(J^T J)^(-1) J^T r
-        Eigen::Vector3d delta = -(J.transpose() * J).ldlt().solve(J.transpose() * residuals);
-        params += delta;
-        
-        // Check convergence
-        if (delta.norm() < tolerance) {
-            debug() << "Geometric refinement converged after " << iter + 1 << " iterations" << endmsg;
-            break;
-        }
-    }
-    
-    // Update final parameters
-    x0 = params(0);
-    y0 = params(1);
-    radius = params(2);
-
-    // ── Compute fit covariance on [x0, y0, R] from the final Gauss-Newton Jacobian ──
-    // Cov(params) = (J^T W J)^{-1}  where W=diag(w_i) from the WLS weights.
-    // Build the final J at the converged parameters.
-    {
-        Eigen::MatrixXd Jf(4, 3);
-        for (int i = 0; i < 4; ++i) {
-            double xi = points[i].x(), yi = points[i].y();
-            double dx = xi - x0, dy = yi - y0;
-            double dist = std::sqrt(dx*dx + dy*dy);
-            double w = std::sqrt(weights(i));
+            double sqw  = std::sqrt(w[i]);
+            res(i) = sqw * (dist - r);
             if (dist > 1e-12) {
-                Jf(i,0) = -w * dx / dist;
-                Jf(i,1) = -w * dy / dist;
-                Jf(i,2) = -w;
+                J(i,0) = -sqw * dx / dist;
+                J(i,1) = -sqw * dy / dist;
+                J(i,2) = -sqw;
             } else {
-                Jf(i,0) = Jf(i,1) = Jf(i,2) = 0;
+                J(i,0) = J(i,1) = J(i,2) = 0.0;
             }
         }
-        Eigen::Matrix3d JtJ = Jf.transpose() * Jf;
-        // Use pseudo-inverse via LDLT (should be full-rank for a good fit)
-        fitCov3x3 = JtJ.ldlt().solve(Eigen::Matrix3d::Identity());
+        Eigen::Vector3d delta = -(J.transpose() * J).ldlt().solve(J.transpose() * res);
+        params += delta;
+        if (delta.norm() < tol) break;
     }
-
-    dd4hep::Position fieldPos(0, 0, 0);  // Default center position      
-    // Use average position of hits for better field estimate
-    double sumX = 0, sumY = 0, sumZ = 0;
-    for (const auto& hit : hits) {
-        sumX += hit.getPosition()[0] / 10.0;  // mm to cm
-        sumY += hit.getPosition()[1] / 10.0;
-        sumZ += hit.getPosition()[2] / 10.0;
-    }
-    fieldPos = dd4hep::Position(
-                    sumX / hits.size(),
-                    sumY / hits.size(),
-                    sumZ / hits.size());
-
-    double actualBz = m_field.magneticField(fieldPos).z() / dd4hep::tesla;
-    double pT = 0.3 * std::abs(actualBz) * radius / 100.0;
-
-    debug() << "Refined fit result: center=(" << x0 << ", " << y0 
-            << "), radius=" << radius << " cm, B field=" << actualBz << " ,pT=" << pT << " GeV" << endmsg;
-    
-    // Calculate chi2
-    chi2 = 0.0;
-    for (int i = 0; i < 4; ++i) {
-        double x = points[i].x();
-        double y = points[i].y();
-        double sigma = uncertainties[i];
-        
-        // Calculate distance from point to circle
-        double dx = x - x0;
-        double dy = y - y0;
-        double distToCenter = std::sqrt(dx*dx + dy*dy);
-        double residual = std::abs(distToCenter - radius);
-        
-        // Add to chi2
-        chi2 += (residual * residual) / (sigma * sigma);
-        
-        debug() << "  Point " << i << ": residual = " << residual 
-                << " cm, σ = " << sigma << " cm, contribution = " 
-                << (residual * residual) / (sigma * sigma) << endmsg;
-    }
-    
-    // Degrees of freedom = number of points - number of parameters
-    int ndf = 3; // 3 degree of freedom for 4 hits (4 hits * 2 D measurements - 5 track parameters)
-    chi2 = chi2/ndf;
-    
-    if (chi2 / ndf > 100) { // Very poor fit
-        debug() << "Poor circle fit: chi2/ndf = " << chi2 / ndf << endmsg;
+    x0     = params(0);
+    y0     = params(1);
+    radius = params(2);
+    if (radius <= 0) {
+        debug() << "fitCircleNHits: non-positive radius after refinement" << endmsg;
         return false;
     }
-    
-    debug() << "Circle fit successful!" << endmsg;
+
+    // ── Step 3: Covariance on [x0, y0, R] from final Jacobian ────────────
+    {
+        Eigen::MatrixXd Jf(N, 3);
+        for (int i = 0; i < N; ++i) {
+            double dx = pts[i].x() - x0, dy = pts[i].y() - y0;
+            double dist = std::sqrt(dx*dx + dy*dy);
+            double sqw  = std::sqrt(w[i]);
+            if (dist > 1e-12) {
+                Jf(i,0) = -sqw * dx / dist;
+                Jf(i,1) = -sqw * dy / dist;
+                Jf(i,2) = -sqw;
+            } else {
+                Jf(i,0) = Jf(i,1) = Jf(i,2) = 0.0;
+            }
+        }
+        fitCov3x3 = (Jf.transpose() * Jf).ldlt().solve(Eigen::Matrix3d::Identity());
+    }
+
+    // ── Step 4: Per-hit residuals and chi2/NDF ────────────────────────────
+    residualsCm.resize(N);
+    double chi2 = 0.0;
+    for (int i = 0; i < N; ++i) {
+        double dx   = pts[i].x() - x0, dy = pts[i].y() - y0;
+        double res  = std::abs(std::sqrt(dx*dx + dy*dy) - radius);
+        residualsCm[i] = res;
+        chi2 += (res / sigma[i]) * (res / sigma[i]);
+    }
+    int ndf = N - 3;
+    if (ndf < 1) ndf = 1;
+    chi2ndf = chi2 / ndf;
+
+    debug() << "fitCircleNHits (" << N << " hits): center=(" << x0 << "," << y0
+            << ") cm  R=" << radius << " cm  chi2/ndf=" << chi2ndf << endmsg;
     return true;
 }
-
 // Helper to get PDG code
 int DisplacedTracking::getPDGCode() const {
     // Map particle type to PDG code
