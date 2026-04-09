@@ -349,10 +349,33 @@ private:
         "Maximum 3D distance in cm between consecutive (inner→outer ordered) hits in a combination. "
         "Rejects combos where adjacent-layer hits are implausibly far apart (e.g. hits from "
         "different physical tracks combined across a large gap). Set to -1 to disable."};
-    Gaudi::Property<double> m_maxPairHitDist{this, "MaxPairHitDistance", 200.0,
+    Gaudi::Property<double> m_maxPairHitDist{this, "MaxPairHitDistance", 300.0,
         "Maximum 3D distance in cm between any pair of hits in a combination. "
         "Catches ghost combos that span widely separated detector regions. "
-        "Must be >= MaxConsecutiveHitDistance. Set to -1 to disable."};
+        "Set to -1 to disable. 300 cm accommodates barrel→endcap transition tracks."};
+    Gaudi::Property<double> m_maxHitEdepKeV{this, "MaxHitEdepKeV", 10.0,
+        "Maximum energy deposit in keV for a hit to be used in tracking. "
+        "Hits above this threshold are excluded before combo enumeration. "
+        "Rejects high-edep delta-rays and hadronic secondaries. Set to -1 to disable."};
+    Gaudi::Property<double> m_proxScoreWeight{this, "ProximityScoreWeight", 1.0,
+        "Weight for edep-homogeneity scoring when ranking same-k combos. "
+        "avgEdepDev = mean |edep(hit) - meanEdepSingle| across combo hits, where "
+        "meanEdepSingle is the event-level muon edep baseline from single-hit layers. "
+        "For k=3: tiebreaker on equal radius. "
+        "For k>=4: combined score = chi2/ndf + weight * avgEdepDev / EdepNormKeV "
+        "(active criterion — not just tiebreaker). Lower combined score wins. "
+        "Set to 0 to disable edep scoring."};
+    Gaudi::Property<double> m_edepNormKeV{this, "EdepNormKeV", 2.0,
+        "Normalisation scale (keV) for converting avgEdepDev into chi2-equivalent units "
+        "when computing the combined combo score for k>=4. "
+        "combined_score = chi2/ndf + ProximityScoreWeight * avgEdepDev / EdepNormKeV. "
+        "A value of 2.0 means a 2 keV average edep deviation adds 1.0 to the effective chi2. "
+        "Tune this to balance geometry (chi2) vs. edep-homogeneity discrimination."};
+    Gaudi::Property<int> m_maxHitsPerComposite{this, "MaxHitsPerCompositeID", 0,
+        "If > 0, at most this many hits per compositeID are kept before combo enumeration, "
+        "ranked by |edep - mean_single_layer_edep| (lowest deviation first). "
+        "Reduces combinatorial explosion in high-occupancy layers. "
+        "Set to 0 to use all hits (default)."};
     // ────────────────────────────────────────────────────────────────────────
 
     // Services
@@ -395,6 +418,7 @@ private:
     mutable std::atomic<int> m_statPhiSpreadRejected{0};    // rejected by MaxComboPhiSpread
     mutable std::atomic<int> m_statConsecDistRejected{0};   // rejected by MaxConsecutiveHitDistance
     mutable std::atomic<int> m_statPairDistRejected{0};     // rejected by MaxPairHitDistance
+    mutable std::atomic<int> m_statEdepRejected{0};         // hits removed by MaxHitEdepKeV pre-filter
     mutable std::atomic<int> m_statOutlierHitsRemoved{0};   // total hits removed by outlier rejection
 
     // Hit multiplicity distribution

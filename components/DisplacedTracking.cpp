@@ -31,7 +31,7 @@ DisplacedTracking::DisplacedTracking(const std::string& name, ISvcLocator* pSvcL
             KeyValues{"InputRecoSimLinkCollection", {"TrackerHitSimTrackerHitLink"}}
         },
         {
-            KeyValues{"OutputTrackCollection",    {"KalmanTracks"}},
+            KeyValues{"OutputTrackCollection",    {"DisplacedTracks"}},
             KeyValues{"OutputHitCollection",      {"TrackHits"}},
             KeyValues{"OutputRecoSimLinkCollection", {"DisplacedTrackHitSimLinks"}}
         }) {
@@ -363,6 +363,7 @@ StatusCode DisplacedTracking::finalize() {
     int nPhiSpreadRej  = m_statPhiSpreadRejected.load();
     int nConsecDistRej = m_statConsecDistRejected.load();
     int nPairDistRej   = m_statPairDistRejected.load();
+    int nEdepRej       = m_statEdepRejected.load();
     int nOutlier       = m_statOutlierHitsRemoved.load();
     int nH3       = m_statNhit3.load();
     int nH4       = m_statNhit4.load();
@@ -414,6 +415,7 @@ StatusCode DisplacedTracking::finalize() {
         << "║    Rejected by consec dist    : " << std::setw(7) << nConsecDistRej << "                   ║\n"
         << "║    Rejected by pair dist      : " << std::setw(7) << nPairDistRej   << "                   ║\n"
         << "║    Rejected by Isolation cut  : " << std::setw(7) << nIsoRej        << "                   ║\n"
+        << "║    Hits removed by edep cut   : " << std::setw(7) << nEdepRej       << "                   ║\n"
         << "║    Outlier hits removed       : " << std::setw(7) << nOutlier<< "  (" << std::setw(5) << std::fixed << std::setprecision(2) << avgOutlier << " / track)      ║\n"
         << "╠══════════════════════════════════════════════════════════╣\n"
         << "║  HIT MULTIPLICITY PER TRACK                              ║\n"
@@ -830,10 +832,26 @@ void DisplacedTracking::findTracks(
         allHitInfo.reserve(remainingHits);
 
         // Build hit info for ONLY unused hits
+        // MaxHitEdepKeV pre-filter: skip hits whose energy deposit is above threshold.
+        // getEDep() returns GeV in EDM4hep; threshold is stored in keV → divide by 1e6.
+        const double edepThreshGeV = (m_maxHitEdepKeV.value() > 0.0)
+                                     ? m_maxHitEdepKeV.value() * 1e-6   // keV → GeV
+                                     : -1.0;                              // disabled
+        int evtEdepRej = 0;
         for (size_t i = 0; i < hits->size(); ++i) {
             if (globalUsedHits[i]) continue;  // Skip already used hits
-            
+
             const auto& hit = (*hits)[i];
+
+            // ── edep pre-filter ──────────────────────────────────────────────
+            if (edepThreshGeV > 0.0 && hit.getEDep() > edepThreshGeV) {
+                debug() << "  Hit " << i << " excluded by edep cut: "
+                        << hit.getEDep()*1e6 << " keV > " << m_maxHitEdepKeV.value()
+                        << " keV" << endmsg;
+                ++evtEdepRej;
+                continue;
+            }
+
             const dd4hep::rec::Surface* surface = findSurface(hit);
 
             if (surface) {
@@ -844,13 +862,16 @@ void DisplacedTracking::findTracks(
                 allHitInfo.emplace_back(i, hit, layerID, typeID, compositeID);
                 hitIndicesByCompositeLayer[compositeID].push_back(allHitInfo.size() - 1);
 
-                debug() << "Available hit " << i << ": CellID=" << hit.getCellID() 
-                        << ", Layer=" << layerID << ", Type=" << typeID 
+                debug() << "Available hit " << i << ": CellID=" << hit.getCellID()
+                        << ", Layer=" << layerID << ", Type=" << typeID
                         << ", Composite=" << compositeID << endmsg;
             } else {
                 debug() << "Could not find surface for unused hit with cellID " << hit.getCellID() << endmsg;
             }
         }
+        m_statEdepRejected += evtEdepRej;
+        if (evtEdepRej > 0)
+            debug() << "  edep pre-filter removed " << evtEdepRej << " hits this iteration" << endmsg;
 
         if (allHitInfo.size() < 3) {
             info() << "Not enough unused hits with valid surfaces (" << allHitInfo.size() << ") for iteration " << trackNumber << endmsg;
@@ -882,6 +903,118 @@ void DisplacedTracking::findTracks(
             info() << "Not enough detector regions with unused hits for triplet seeding" << endmsg;
             break;
         }
+
+        // ── Reference B-field for k=3 radius normalisation ───────────────────────
+        // Compute once per track-finding iteration at the centroid of available hits.
+        // Used to convert MaxSeedPT → R_cap (cm), so the k=3 combined score can cap
+        // the radius reward without needing an extra configurable property.
+        //   R_cap [cm] = MaxSeedPT [GeV] * 100 / (0.3 * |B| [T])
+        double bRefForK3 = 1.7;  // fallback: IDEA nominal [T]
+        {
+            double sx = 0.0, sy = 0.0, sz = 0.0;
+            for (const auto& hi : allHitInfo) {
+                const auto& p = hi.hit.getPosition();  // mm
+                sx += p.x; sy += p.y; sz += p.z;
+            }
+            const double n = static_cast<double>(allHitInfo.size());
+            if (n > 0) {
+                dd4hep::Position centroid(sx / n / 10.0, sy / n / 10.0, sz / n / 10.0);  // cm
+                try {
+                    bRefForK3 = m_field.magneticField(centroid).z() / dd4hep::tesla;
+                } catch (...) {}
+            }
+        }
+        const double absBRefForK3 = std::max(std::abs(bRefForK3), 1e-6);
+        // R_cap: radius at which pT = MaxSeedPT (the upper physical pT limit).
+        // Combos with radius >> R_cap are almost certainly noise; the term saturates.
+        const double rCapK3 = m_maxSeedPT.value() * 100.0 / (0.3 * absBRefForK3);
+
+        // ── Edep-similarity score ─────────────────────────────────────────────────
+        // Strategy: for a crowded compositeID (>1 hit), the "right" hit is the one
+        // whose energy deposit is most similar to the muon hits in other layers.
+        // A delta-ray will have an abnormal edep — either very high (energetic electron)
+        // or very low (soft secondary) — compared to the ~MIP muon signal.
+        //
+        // Pre-computation (event-level baseline):
+        //   meanEdepSingle = average edep (in keV) of compositeIDs that have EXACTLY
+        //   one hit — these are the unambiguous, trusted muon hits in this event.
+        //   This is the baseline against which crowded-layer hits are judged.
+        //
+        // Per-hit score (used for MaxHitsPerCompositeID pre-filter):
+        //   hitEdepScore[idx] = |edep(hit) - meanEdepSingle|  (keV, lower = better)
+        //
+        // Per-combo score (active criterion for k>=4, tiebreaker for k=3):
+        //   avgEdepDev = mean of hitEdepScore[idx] over the combo hits.
+        //   hitEdepScore[idx] = |edep(hit) - meanEdepSingle| measures deviation from the
+        //   event-level muon baseline (single-hit compositeID average = unambiguous muon).
+        //   Using the baseline rather than within-combo mean ensures that uniform e- tracks
+        //   (all hits far from muon baseline) are penalised, not rewarded.
+        //   For k=3: combined_score = w*avgEdepDev/edepNorm - min(r,R_cap)/R_cap.
+        //     Both radius (capped at MaxSeedPT) and edepDev contribute simultaneously.
+        //   For k>=4: combined_score = chi2/ndf + w * avgEdepDev / EdepNormKeV.
+
+        // Build per-hit edep map (keV) — needed by both pre-filter and combo scorer.
+        std::unordered_map<size_t, double> hitEdepKeV;   // allHitInfo index → edep (keV)
+        hitEdepKeV.reserve(allHitInfo.size());
+        for (size_t idx = 0; idx < allHitInfo.size(); ++idx)
+            hitEdepKeV[idx] = allHitInfo[idx].hit.getEDep() * 1e6;   // GeV → keV
+
+        // Compute baseline edep from single-hit compositeIDs.
+        double meanEdepSingle = 0.0;
+        int    nSingle        = 0;
+        for (const auto& [cid, cidIndices] : hitIndicesByCompositeLayer) {
+            if (cidIndices.size() == 1) {
+                meanEdepSingle += hitEdepKeV.at(cidIndices[0]);
+                ++nSingle;
+            }
+        }
+        if (nSingle > 0) meanEdepSingle /= static_cast<double>(nSingle);
+
+        // Per-hit edep-similarity score (deviation from baseline, keV; lower = better).
+        // If meanEdepSingle == 0 (all compositeIDs crowded, no unambiguous muon reference),
+        // fall back to the median edep across all event hits as the baseline.  Using 0 as
+        // baseline would make raw edep the score — favouring low-edep e- hits over MIP muons.
+        if (nSingle == 0 && !hitEdepKeV.empty()) {
+            std::vector<double> allEdeps;
+            allEdeps.reserve(hitEdepKeV.size());
+            for (const auto& [idx, e] : hitEdepKeV) allEdeps.push_back(e);
+            std::sort(allEdeps.begin(), allEdeps.end());
+            const size_t mid = allEdeps.size() / 2;
+            meanEdepSingle = (allEdeps.size() % 2 == 0)
+                           ? 0.5 * (allEdeps[mid-1] + allEdeps[mid])
+                           : allEdeps[mid];
+            debug() << "  No single-hit compositeIDs — using median edep as baseline: "
+                    << meanEdepSingle << " keV" << endmsg;
+        }
+
+        std::unordered_map<size_t, double> hitEdepScore;
+        hitEdepScore.reserve(allHitInfo.size());
+        if (m_proxScoreWeight.value() > 0.0) {
+            for (size_t idx = 0; idx < allHitInfo.size(); ++idx) {
+                hitEdepScore[idx] = std::abs(hitEdepKeV.at(idx) - meanEdepSingle);
+                debug() << "  EdepScore hit[" << idx << "] compositeID="
+                        << allHitInfo[idx].compositeID
+                        << " edep=" << hitEdepKeV.at(idx) << " keV"
+                        << " |Δ|=" << hitEdepScore[idx] << " keV" << endmsg;
+            }
+
+            // If MaxHitsPerCompositeID > 0, trim crowded compositeIDs to the top-N
+            // hits with edep closest to the single-hit baseline.
+            const int maxHPC = m_maxHitsPerComposite.value();
+            if (maxHPC > 0) {
+                for (auto& [cid, cidIndices] : hitIndicesByCompositeLayer) {
+                    if (static_cast<int>(cidIndices.size()) <= maxHPC) continue;
+                    std::sort(cidIndices.begin(), cidIndices.end(),
+                              [&](size_t a, size_t b) {
+                                  return hitEdepScore[a] < hitEdepScore[b];
+                              });
+                    cidIndices.resize(maxHPC);
+                    debug() << "  compositeID=" << cid << " trimmed to top "
+                            << maxHPC << " hits by edep similarity" << endmsg;
+                }
+            }
+        }
+        // ─────────────────────────────────────────────────────────────────────────
 
         // Build mapping layerNumber -> vector of HitInfo indices (aggregating across composite types)
         std::map<int, std::vector<size_t>> hitsByLayerNumber;
@@ -951,7 +1084,8 @@ void DisplacedTracking::findTracks(
         struct CombResult {
             std::vector<size_t> hiiVec;       // indices into allHitInfo
             std::vector<size_t> gIdxVec;      // indices into the full hit collection
-            double chi2ndf  = std::numeric_limits<double>::max();
+            double chi2ndf      = std::numeric_limits<double>::max();
+            double avgProxCm    = std::numeric_limits<double>::max();  // avg edep-deviation score (keV)
             double x0 = 0, y0 = 0, radius = 0;
             Eigen::Matrix3d fitCov = Eigen::Matrix3d::Zero();
             std::vector<double> residuals;
@@ -1005,7 +1139,8 @@ void DisplacedTracking::findTracks(
                     // those are same-region secondaries, not cross-region contamination.
                     int jComposite = -999;
                     auto cjit = gIdxToComposite.find(j);
-                    if (cjit != gIdxToComposite.end()) jComposite = cjit->second;
+                    if (cjit == gIdxToComposite.end()) continue; // skip hits not in the active candidate pool (edep-excluded or no surface)
+                    jComposite = cjit->second;
                     if (jComposite == giComposite) continue;
                     const auto& p = (*hits)[j].getPosition();
                     Eigen::Vector3d cand(p[0]/10.0, p[1]/10.0, p[2]/10.0);
@@ -1289,17 +1424,89 @@ void DisplacedTracking::findTracks(
                                     //     most "straight" (least curved = most energetic)
                                     //     combination, which is more likely to be the signal muon
                                     //     rather than a low-pT secondary spiral.
+                                    // ── Edep-homogeneity score for this combo ────────────────
+                                    // For each hit in the combo, take its pre-computed baseline
+                                    // deviation: hitEdepScore[idx] = |edep(hit) - meanEdepSingle|.
+                                    // The combo score is the average deviation across all k hits.
+                                    //
+                                    // Using the EVENT-LEVEL baseline (meanEdepSingle, average edep
+                                    // of single-hit compositeIDs = unambiguous muon hits) rather
+                                    // than within-combo mean is critical:
+                                    //  • A 4-muon combo scores near 0 (all hits ≈ muon baseline).
+                                    //  • A 3-muon + 1-secondary combo scores the secondary deviation.
+                                    //  • A 4-electron combo at uniform low edep scores large deviation
+                                    //    relative to muon baseline — correctly penalised.
+                                    //
+                                    // Without this, within-combo deviation would give a uniform 4-e-
+                                    // track a near-zero score, letting it beat a muon track that has
+                                    // one hit with a slightly different edep.
+                                    double cEdepDev = 0.0;
+                                    const double w = m_proxScoreWeight.value();
+                                    if (w > 0.0 && !hitEdepScore.empty()) {
+                                        for (size_t hii_i : hiiVec)
+                                            cEdepDev += hitEdepScore.at(hii_i);
+                                        cEdepDev /= static_cast<double>(k);
+                                    }
+                                    // ─────────────────────────────────────────────────────────
+                                    // Combo selection (lower score = better, more hits always wins).
+                                    //
+                                    // k=3: chi2=0 for any 3 points, so radius is the natural physics
+                                    //   discriminator (larger radius = higher pT = more physical).
+                                    //   edepDev is used as a tiebreaker on exactly equal radius.
+                                    //
+                                    // k>=4: use a COMBINED score so edep homogeneity is an active
+                                    //   criterion, not just a tiebreaker on exact chi2 equality:
+                                    //     combined = chi2/ndf + w * avgEdepDev / edepNorm
+                                    //   A 1 keV deviation contributes w/edepNorm to the score.
+                                    //   With w=1, edepNorm=2 keV: a 2 keV deviation ≈ +1 chi2 unit.
+                                    //   This lets a slightly worse-chi2 but more uniform combo beat
+                                    //   a slightly better-chi2 combo with an edep outlier hit.
+                                    const double edepNorm = std::max(m_edepNormKeV.value(), 1e-9);
                                     bool isBetter;
-                                    if (k == 3 && bestCombo.nHits == 3) {
-                                        isBetter = (cr > bestCombo.radius);
+                                    if (k != bestCombo.nHits) {
+                                        isBetter = (k > bestCombo.nHits);
+                                    } else if (k == 3) {
+                                        // For k=3: chi2/ndf = 0 always (3 points define a circle
+                                        // exactly), so chi2 gives zero information.
+                                        //
+                                        // Combined score using BOTH radius and edepDev:
+                                        //
+                                        //   score = w * avgEdepDev / edepNorm
+                                        //           - min(radius, R_cap) / R_cap
+                                        //
+                                        // Lower score = better.
+                                        //  • The radius term rewards higher pT (larger radius),
+                                        //    but is capped at R_cap (= MaxSeedPT in GeV converted
+                                        //    to cm). Once a combo is at or above MaxSeedPT its
+                                        //    radius reward saturates at 1.0, so an absurdly straight
+                                        //    fake e-/secondary track cannot win on radius alone.
+                                        //  • The edepDev term penalises combos whose hits deviate
+                                        //    from the event-level muon baseline.
+                                        //  Both criteria contribute simultaneously — neither can
+                                        //  override the other unconditionally.
+                                        //  If edep scoring is disabled (w=0) fall back to radius.
+                                        if (w > 0.0) {
+                                            const double cRadNorm = std::min(cr, rCapK3) / rCapK3;
+                                            const double bRadNorm = std::min(bestCombo.radius, rCapK3) / rCapK3;
+                                            const double cScore3  = w * cEdepDev / edepNorm - cRadNorm;
+                                            const double bScore3  = w * bestCombo.avgProxCm / edepNorm - bRadNorm;
+                                            isBetter = (cScore3 < bScore3);
+                                        } else {
+                                            isBetter = (cr > bestCombo.radius);
+                                        }
                                     } else {
-                                        isBetter = (k > bestCombo.nHits) ||
-                                                   (k == bestCombo.nHits && cchi2ndf < bestCombo.chi2ndf);
+                                        // k>=4: combined score (chi2 + edep penalty).
+                                        const double cScore = cchi2ndf
+                                            + (w > 0.0 ? w * cEdepDev / edepNorm : 0.0);
+                                        const double bScore = bestCombo.chi2ndf
+                                            + (w > 0.0 ? w * bestCombo.avgProxCm / edepNorm : 0.0);
+                                        isBetter = (cScore < bScore);
                                     }
                                     if (isBetter) {
                                         bestCombo.hiiVec    = hiiVec;
                                         bestCombo.gIdxVec   = gIdxVec;
                                         bestCombo.chi2ndf   = cchi2ndf;
+                                        bestCombo.avgProxCm = cEdepDev;
                                         bestCombo.x0        = cx0;
                                         bestCombo.y0        = cy0;
                                         bestCombo.radius    = cr;
@@ -1353,9 +1560,11 @@ void DisplacedTracking::findTracks(
                << " isoRej=" << evtIsoRej
                << " chi2Rej=" << evtChi2Rej
                << " fitFail=" << evtFitFail
+               << " edepRej=" << evtEdepRej
                << (foundCombination
                    ? (" | BEST k=" + std::to_string(bestCombo.nHits)
-                      + " chi2/ndf=" + std::to_string(bestCombo.chi2ndf))
+                      + " chi2/ndf=" + std::to_string(bestCombo.chi2ndf)
+                      + " edepDev=" + std::to_string(bestCombo.avgProxCm) + " keV")
                    : " | NO COMBINATION FOUND")
                << endmsg;
 
@@ -1991,7 +2200,12 @@ void DisplacedTracking::findTracks(
                         << endmsg;
                 }
                     finalTrack.addToTrackStates(circleFitState);
-                    finalTrack.setChi2(chi2);
+                    // NDF = 2*n_hits - 5
+                    // Each hit gives 2 measurements (2D detector: x, y).
+                    // Helix has 5 free parameters: d0, phi0, omega, z0, tanLambda.
+                    const int fitNdf = std::max(0, 2 * static_cast<int>(trackHits.size()) - 5);
+                    finalTrack.setChi2(static_cast<float>(chi2 * fitNdf));   // store raw chi2
+                    finalTrack.setNdf(fitNdf);
 
                     // Promote to GenFit seed: 4-hit fit is a better starting point
                     seedState = circleFitState;
