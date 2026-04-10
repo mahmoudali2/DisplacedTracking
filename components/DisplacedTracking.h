@@ -376,6 +376,21 @@ private:
         "ranked by |edep - mean_single_layer_edep| (lowest deviation first). "
         "Reduces combinatorial explosion in high-occupancy layers. "
         "Set to 0 to use all hits (default)."};
+    // ── Neighbour-track quality gate ──────────────────────────────────────
+    Gaudi::Property<double> m_neighbourTrackMaxDist{this, "NeighbourTrackMaxDist", 5.0,
+        "If the best-combo candidate has any hit within this distance (cm) of a hit from "
+        "an already-accepted track, apply stricter quality requirements defined by "
+        "NeighbourTrackMinHits and NeighbourTrackMaxChi2NDF. "
+        "Rejects delta-ray shadow tracks that form near a parent muon track. "
+        "Default 5.0 cm = 50 mm. Set to 0 to disable."};
+    Gaudi::Property<int> m_neighbourTrackMinHits{this, "NeighbourTrackMinHits", 4,
+        "Minimum hit count required for a combo flagged as a neighbour track "
+        "(any hit lies within NeighbourTrackMaxDist of an accepted track hit). "
+        "Stronger than MinTrackHits — forces ≥4 hits to reject 3-hit shadow fakes."};
+    Gaudi::Property<double> m_neighbourTrackMaxChi2NDF{this, "NeighbourTrackMaxChi2NDF", 3.0,
+        "Maximum chi2/NDF accepted for a neighbour-track combo. "
+        "Applied together with NeighbourTrackMinHits when a combo is spatially near "
+        "an already-accepted track."};
     // ────────────────────────────────────────────────────────────────────────
 
     // Services
@@ -420,6 +435,7 @@ private:
     mutable std::atomic<int> m_statPairDistRejected{0};     // rejected by MaxPairHitDistance
     mutable std::atomic<int> m_statEdepRejected{0};         // hits removed by MaxHitEdepKeV pre-filter
     mutable std::atomic<int> m_statOutlierHitsRemoved{0};   // total hits removed by outlier rejection
+    mutable std::atomic<int> m_statNeighbourRejected{0};    // combos rejected by neighbour-track gate
 
     // Hit multiplicity distribution
     mutable std::atomic<int> m_statNhit3{0};

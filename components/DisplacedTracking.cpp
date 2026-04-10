@@ -365,6 +365,7 @@ StatusCode DisplacedTracking::finalize() {
     int nPairDistRej   = m_statPairDistRejected.load();
     int nEdepRej       = m_statEdepRejected.load();
     int nOutlier       = m_statOutlierHitsRemoved.load();
+    int nNeighbRej     = m_statNeighbourRejected.load();
     int nH3       = m_statNhit3.load();
     int nH4       = m_statNhit4.load();
     int nH5       = m_statNhit5.load();
@@ -417,6 +418,7 @@ StatusCode DisplacedTracking::finalize() {
         << "║    Rejected by Isolation cut  : " << std::setw(7) << nIsoRej        << "                   ║\n"
         << "║    Hits removed by edep cut   : " << std::setw(7) << nEdepRej       << "                   ║\n"
         << "║    Outlier hits removed       : " << std::setw(7) << nOutlier<< "  (" << std::setw(5) << std::fixed << std::setprecision(2) << avgOutlier << " / track)      ║\n"
+        << "║    Rejected by neighbour gate : " << std::setw(7) << nNeighbRej     << "                   ║\n"
         << "╠══════════════════════════════════════════════════════════╣\n"
         << "║  HIT MULTIPLICITY PER TRACK                              ║\n"
         << "║    3 hits                     : " << std::setw(7) << nH3     << "                   ║\n"
@@ -783,6 +785,8 @@ void DisplacedTracking::findTracks(
 
     // Global hit usage tracking across all track-finding iterations
     std::vector<bool> globalUsedHits(hits->size(), false);
+    // 3D hit positions (mm) from every accepted track — used by the neighbour-gate check.
+    std::vector<std::array<double, 3>> acceptedTrackHitPositions;
     int trackNumber = 0;
     
     // MAIN LOOP: Continue finding tracks until no more can be formed
@@ -1573,6 +1577,223 @@ void DisplacedTracking::findTracks(
             break;
         }
 
+        // ── Guided crowded-layer hit selection ────────────────────────────────────
+        // Applies when ≥4 distinct compositeIDs are available and ≥3 of them are
+        // clean (exactly 1 hit each). Any number of crowded CIDs (>1 hit each) is
+        // handled: the clean-hit circle is used to guide the selection of ONE hit
+        // from each crowded CID (the one with the smallest radial residual).
+        // Strategy:
+        //   1. Fit a circle using ONLY the ≥3 clean-layer hits (unbiased estimate).
+        //   2. For EACH crowded CID independently, pick the hit with the smallest
+        //      radial residual to that circle.
+        //   3. Refit all hits (all clean + one chosen per crowded CID); require
+        //      chi2/NDF ≤ NHitMaxChi2NDF.
+        //   4. If the guided result differs from or improves on the general combo,
+        //      replace bestCombo so the correct hit propagates to all downstream steps.
+        // Prevents collinear secondary hits from being accidentally preferred over
+        // the real muon hit in any crowded layer.
+        {
+            int nCleanCIDs   = 0;
+            int nCrowdedCIDs = 0;
+            for (const auto& [cid, cidHIIs] : hitIndicesByCompositeLayer) {
+                if (static_cast<int>(cidHIIs.size()) == 1) ++nCleanCIDs;
+                else if (static_cast<int>(cidHIIs.size()) > 1) ++nCrowdedCIDs;
+            }
+            const int totalCIDs = nCleanCIDs + nCrowdedCIDs;
+
+            if (nCleanCIDs >= 3 && nCrowdedCIDs >= 1 && totalCIDs >= 4) {
+                debug() << "Guided crowded-layer: " << nCleanCIDs
+                        << " clean CIDs + " << nCrowdedCIDs << " crowded CID(s)" << endmsg;
+
+                // Step 1: collect clean-layer hits (exactly 1 per CID, not globally used)
+                std::vector<edm4hep::TrackerHitPlane> cleanHits;
+                std::vector<size_t> cleanHIIs, cleanGIdxs;
+                for (const auto& [cid, cidHIIs] : hitIndicesByCompositeLayer) {
+                    if (static_cast<int>(cidHIIs.size()) != 1) continue;
+                    size_t hii = cidHIIs[0];
+                    if (globalUsedHits[allHitInfo[hii].index]) continue;
+                    cleanHIIs.push_back(hii);
+                    cleanGIdxs.push_back(allHitInfo[hii].index);
+                    cleanHits.push_back(allHitInfo[hii].hit);
+                }
+
+                if (static_cast<int>(cleanHits.size()) >= 3) {
+                    // Step 2: fit circle to clean hits only
+                    double cx0 = 0, cy0 = 0, cr = 0, cchi2 = 0;
+                    Eigen::Matrix3d cCov;
+                    std::vector<double> cRes;
+                    bool cleanOK = false;
+                    try { cleanOK = fitCircleNHits(cleanHits, cx0, cy0, cr, cchi2, cCov, cRes); }
+                    catch (...) {}
+
+                    if (cleanOK && cr > 0) {
+                        // Step 3: for each crowded CID pick the hit with the best combined score:
+                        //   combined = 0.5 * (dr / sigmaHit) + 0.5 * (edepDev / edepNorm)
+                        // where dr   = radial residual to clean-fit circle (cm),
+                        //       edepDev = |edep_hit - event MIP baseline| (keV).
+                        // Equal weight between geometry and edep gives the MIP-like hit
+                        // priority even when it is slightly farther from the circle than a
+                        // stopping secondary (which has anomalous edep).
+                        const double drNorm   = std::max(m_sigmaHitDefault.value(), 1e-9); // cm
+                        const double edepNorm = std::max(m_edepNormKeV.value(),     1e-9); // keV
+
+                        std::vector<edm4hep::TrackerHitPlane> guidedHits = cleanHits;
+                        std::vector<size_t> guidedHIIs  = cleanHIIs;
+                        std::vector<size_t> guidedGIdxs = cleanGIdxs;
+                        bool allCrowdedResolved = true;
+
+                        for (const auto& [cid, cidHIIs] : hitIndicesByCompositeLayer) {
+                            if (static_cast<int>(cidHIIs.size()) <= 1) continue; // skip clean
+                            size_t bestHII   = SIZE_MAX;
+                            double bestScore = std::numeric_limits<double>::max();
+                            for (size_t hii : cidHIIs) {
+                                if (globalUsedHits[allHitInfo[hii].index]) continue;
+                                const auto& hp = allHitInfo[hii].hit.getPosition(); // mm
+                                double px = hp.x * 0.1, py = hp.y * 0.1;           // → cm
+                                // Geometric term: radial residual to clean circle
+                                double dr      = std::abs(
+                                    std::sqrt((px-cx0)*(px-cx0) + (py-cy0)*(py-cy0)) - cr);
+                                // Edep term: deviation from event MIP baseline
+                                double edepDev = hitEdepScore.count(hii)
+                                                 ? hitEdepScore.at(hii) : 0.0;  // keV
+                                // Combined score: equal 0.5 / 0.5 weight
+                                double score   = 0.5 * (dr / drNorm) + 0.5 * (edepDev / edepNorm);
+                                debug() << "    guided CID=" << cid
+                                        << " hit hii=" << hii
+                                        << " dr=" << dr << " cm"
+                                        << " edepDev=" << edepDev << " keV"
+                                        << " score=" << score << endmsg;
+                                if (score < bestScore) { bestScore = score; bestHII = hii; }
+                            }
+                            if (bestHII == SIZE_MAX) { allCrowdedResolved = false; break; }
+                            guidedHIIs.push_back(bestHII);
+                            guidedGIdxs.push_back(allHitInfo[bestHII].index);
+                            guidedHits.push_back(allHitInfo[bestHII].hit);
+                        }
+
+                        if (allCrowdedResolved) {
+                            // Step 4: refit all guided hits together
+                            double gx0 = 0, gy0 = 0, gr = 0, gchi2 = 0;
+                            Eigen::Matrix3d gCov;
+                            std::vector<double> gRes;
+                            bool guidedOK = false;
+                            try { guidedOK = fitCircleNHits(guidedHits, gx0, gy0, gr, gchi2, gCov, gRes); }
+                            catch (...) {}
+
+                            if (guidedOK && gchi2 <= m_nHitMaxChi2NDF.value()) {
+                                // Check if guided chose differently for ANY crowded CID
+                                bool differentChoice = false;
+                                for (size_t gHII : guidedHIIs) {
+                                    bool inGeneral = false;
+                                    for (size_t bHII : bestCombo.hiiVec)
+                                        if (bHII == gHII) { inGeneral = true; break; }
+                                    if (!inGeneral) { differentChoice = true; break; }
+                                }
+
+                                if (differentChoice || gchi2 < bestCombo.chi2ndf) {
+                                    info() << "Guided crowded-layer: "
+                                           << (differentChoice ? "OVERRIDING" : "CONFIRMING")
+                                           << " (" << nCrowdedCIDs << " crowded CID(s))"
+                                           << " | guided chi2/ndf=" << gchi2
+                                           << " | general chi2/ndf=" << bestCombo.chi2ndf
+                                           << endmsg;
+                                    bestCombo.hiiVec    = guidedHIIs;
+                                    bestCombo.gIdxVec   = guidedGIdxs;
+                                    bestCombo.chi2ndf   = gchi2;
+                                    bestCombo.x0        = gx0;
+                                    bestCombo.y0        = gy0;
+                                    bestCombo.radius    = gr;
+                                    bestCombo.fitCov    = gCov;
+                                    bestCombo.residuals = gRes;
+                                    bestCombo.nHits     = static_cast<int>(guidedHIIs.size());
+                                } else {
+                                    debug() << "Guided crowded-layer: confirms general combo"
+                                            << " (all same hits, guided chi2/ndf=" << gchi2 << ")" << endmsg;
+                                }
+                            } else if (guidedOK) {
+                                debug() << "Guided fit chi2/ndf=" << gchi2
+                                        << " > threshold — keeping general combo" << endmsg;
+                            } else {
+                                debug() << "Guided fit failed — keeping general combo" << endmsg;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // ─────────────────────────────────────────────────────────────────────────
+
+        // ── Neighbour-track quality gate ──────────────────────────────────────────
+        // When a combo has any hit within NeighbourTrackMaxDist (cm) of a hit from an
+        // already-accepted track it is flagged as a potential shadow/delta-ray fake.
+        // Shadow combos must satisfy BOTH stricter cuts to be kept:
+        //   ≥ NeighbourTrackMinHits hits   AND   chi2/NDF ≤ NeighbourTrackMaxChi2NDF
+        // On rejection the combo hits are consumed (marked global-used) so the next
+        // iteration can search for a legitimate track from a different detector region.
+        if (m_neighbourTrackMaxDist.value() > 0.0 && !acceptedTrackHitPositions.empty()) {
+            const double distThreshMm  = m_neighbourTrackMaxDist.value() * 10.0; // cm → mm
+            const double distThreshSq  = distThreshMm * distThreshMm;
+            bool isNeighbour = false;
+            for (size_t hii : bestCombo.hiiVec) {
+                const auto& hp = allHitInfo[hii].hit.getPosition();  // mm
+                for (const auto& ap : acceptedTrackHitPositions) {
+                    double dx = hp.x - ap[0], dy = hp.y - ap[1], dz = hp.z - ap[2];
+                    if (dx*dx + dy*dy + dz*dz < distThreshSq) {
+                        isNeighbour = true;
+                        break;
+                    }
+                }
+                if (isNeighbour) break;
+            }
+
+            if (isNeighbour) {
+                const int  nHits    = static_cast<int>(bestCombo.hiiVec.size());
+                const bool passHits = (nHits    >= m_neighbourTrackMinHits.value());
+                const bool passChi2 = (bestCombo.chi2ndf <= m_neighbourTrackMaxChi2NDF.value());
+                if (!passHits || !passChi2) {
+                    info() << "Neighbour-gate: iter " << trackNumber
+                           << " REJECTED shadow combo"
+                           << " hits=" << nHits
+                           << " chi2/ndf=" << bestCombo.chi2ndf
+                           << "  (required >=" << m_neighbourTrackMinHits.value()
+                           << " hits AND <=" << m_neighbourTrackMaxChi2NDF.value()
+                           << " chi2/ndf)" << endmsg;
+                    ++m_statNeighbourRejected;
+                    // Only consume the hits that ARE within the neighbour distance
+                    // (those that triggered the gate). Hits farther than the threshold
+                    // remain free so subsequent iterations can use them to find a
+                    // legitimate track from a different detector region.
+                    int nConsumed = 0;
+                    for (size_t hii : bestCombo.hiiVec) {
+                        const auto& hp = allHitInfo[hii].hit.getPosition();  // mm
+                        bool hitIsNeighbour = false;
+                        for (const auto& ap : acceptedTrackHitPositions) {
+                            double dx = hp.x - ap[0], dy = hp.y - ap[1], dz = hp.z - ap[2];
+                            if (dx*dx + dy*dy + dz*dz < distThreshSq) {
+                                hitIsNeighbour = true;
+                                break;
+                            }
+                        }
+                        if (hitIsNeighbour) {
+                            globalUsedHits[allHitInfo[hii].index] = true;
+                            ++nConsumed;
+                        }
+                    }
+                    info() << "  Neighbour-gate: consumed " << nConsumed << " of "
+                           << bestCombo.hiiVec.size() << " combo hits (within "
+                           << m_neighbourTrackMaxDist.value() * 10.0 << " mm of accepted track)"
+                           << endmsg;
+                    continue;
+                } else {
+                    info() << "Neighbour-gate: iter " << trackNumber
+                           << " passes stricter cuts"
+                           << " (hits=" << nHits
+                           << ", chi2/ndf=" << bestCombo.chi2ndf << ")" << endmsg;
+                }
+            }
+        }
+        // ─────────────────────────────────────────────────────────────────────────
+
         // ── Print best combination hit details ────────────────────────────────────
         {
             info() << "  Best combo: " << bestCombo.nHits << " hits, chi2/ndf="
@@ -1921,6 +2142,14 @@ void DisplacedTracking::findTracks(
         // trackHits already contains all bestCombo hits (set above from candidate.hitIndices).
         info() << "N-hit track " << trackNumber << " has " << trackHits.size()
                << " hits after combinatorial selection and outlier rejection" << endmsg;
+
+        // Record hit positions for the neighbour-gate in subsequent iterations.
+        if (m_neighbourTrackMaxDist.value() > 0.0) {
+            for (const auto& th : trackHits) {
+                const auto& p = th.getPosition();  // mm
+                acceptedTrackHitPositions.push_back({p.x, p.y, p.z});
+            }
+        }
 
         // Create a new track
         auto finalTrack = finalTracks.create();
