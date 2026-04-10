@@ -592,37 +592,6 @@ std::map<int, std::vector<const dd4hep::rec::Surface*>> DisplacedTracking::getSu
     return result;
 }
 
-
-double DisplacedTracking::getRadiationLength(const dd4hep::rec::Vector3D& start, 
-                                        const dd4hep::rec::Vector3D& end) const {
-    if (!m_materialManager) {
-        warning() << "Material manager not initialized for radiation length calculation" << endmsg;
-        return 0.0;
-    }
-    
-    // Get materials along the path
-    const dd4hep::rec::MaterialVec& materials = 
-        m_materialManager->materialsBetween(start, end);
-    
-    double totalRadiationLength = 0.0;
-    
-    // Process all materials along the path
-    for (const auto& material_pair : materials) {
-        // Each entry is a pair of (Material, thickness)
-        double thickness = material_pair.second;
-        const dd4hep::Material& material = material_pair.first;
-        
-        // Get radiation length from the Material object
-        double radLength = material.radLength(); // Or use material.radiationLength()
-        
-        if (radLength > 0) {
-            totalRadiationLength += thickness / radLength;
-        }
-    }
-    
-    return totalRadiationLength;
-}
-
 // Get Transverse Momentum
 double DisplacedTracking::getPT(const edm4hep::TrackState& state) const {
     // Get parameters

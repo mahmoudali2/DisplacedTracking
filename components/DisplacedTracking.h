@@ -178,9 +178,6 @@ public:
     void fitLine(double x1, double y1, double x2, double y2, double x3, double y3,
                 double& slope, double& intercept) const;
 
-    // Calculate radiation length between two points
-    double getRadiationLength(const dd4hep::rec::Vector3D& start, const dd4hep::rec::Vector3D& end) const;
-    
     // Find surface for a hit
     const dd4hep::rec::Surface* findSurface(const edm4hep::TrackerHitPlane& hit) const;
     
