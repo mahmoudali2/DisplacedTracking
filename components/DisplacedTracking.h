@@ -152,31 +152,11 @@ public:
                             bool& evtUsedPtInner2,
                             bool& evtUsedPtFallback) const;
 
-    // Calculate circle center and radius using the Direct Formula Method
-    bool calculateCircleCenterDirect(
-        double x1, double y1, double x2, double y2, double x3, double y3,
-        double& x0, double& y0, double& radius) const;
-    // calculate sagitta    
-    double calculateSagitta(const Eigen::Vector3d& p1, 
-                            const Eigen::Vector3d& p2, 
-                            const Eigen::Vector3d& p3) const; 
-    // Calculate circle center and radius using the Sagitta Method
-    bool calculateCircleCenterSagitta(
-        const Eigen::Vector3d& p1, const Eigen::Vector3d& p2, const Eigen::Vector3d& p3,
-        double& x0, double& y0, double& radius) const;
     // Calculate impact parameter
     double calculateImpactParameter(
         double x0, double y0, double radius, bool clockwise,
         double innerFieldStrength, double outerFieldStrength,
         const Eigen::Vector3d& p1, const Eigen::Vector3d& p2, const Eigen::Vector3d& p3) const;    
-
-    // Helper functions for circle fitting
-    bool fitCircle(double x1, double y1, double x2, double y2, double x3, double y3,
-                double& x0, double& y0, double& radius) const;
-
-    // Helper function for line fitting
-    void fitLine(double x1, double y1, double x2, double y2, double x3, double y3,
-                double& slope, double& intercept) const;
 
     // Find surface for a hit
     const dd4hep::rec::Surface* findSurface(const edm4hep::TrackerHitPlane& hit) const;
@@ -192,9 +172,7 @@ private:
     int getCompositeID(uint64_t cellID) const;
     // Get PT
     double getPT(const edm4hep::TrackState& state) const;
-    // Get position vector from track state
-    Eigen::Vector3d getPosition(const edm4hep::TrackState& state) const;
-    
+
     // Create a track state with the given parameters
     edm4hep::TrackState createTrackState(
                     double d0, double phi, double omega, double z0, double tanLambda,
@@ -310,8 +288,8 @@ private:
         "Propagate outer track inward through the solenoid boundary using RK4 (saves state at AtVertex)"};
     Gaudi::Property<double> m_innerPropTargetRadius{this, "InnerPropTargetRadius", 100.0,
         "Target radius in cm for inner RK4 propagation"};
-    Gaudi::Property<double> m_maxSeedPT{this, "MaxSeedPT", 200.0,
-        "Maximum allowed seed pT in GeV/c. Triplets above this threshold are rejected unless they are the only option, in which case the lowest-pT candidate is kept."};
+    Gaudi::Property<double> m_maxComboPT{this, "MaxComboPT", 200.0,
+        "Maximum allowed combo pT in GeV/c. Combinations whose circle-fit radius implies pT above this threshold are excluded during the combinatorial search."};
 
 
     // ── N-hit combinatorial strategy properties ─────────────────────────────
@@ -373,6 +351,8 @@ private:
         "ranked by |edep - mean_single_layer_edep| (lowest deviation first). "
         "Reduces combinatorial explosion in high-occupancy layers. "
         "Set to 0 to use all hits (default)."};
+    Gaudi::Property<bool> m_doCrowdedLayerHitSelection{this, "doCrowdedLayerHitSelection", false,
+        "Guided crowded-layer hit selection"};    
     // ── Neighbour-track quality gate ──────────────────────────────────────
     Gaudi::Property<double> m_neighbourTrackMaxDist{this, "NeighbourTrackMaxDist", 5.0,
         "If the best-combo candidate has any hit within this distance (cm) of a hit from "
@@ -417,8 +397,6 @@ private:
     mutable std::atomic<int> m_statPositiveCharge{0};
     mutable std::atomic<int> m_statNegativeCharge{0};
     mutable std::atomic<int> m_statChargeUndetermined{0};  // |sinBend| below reliability threshold
-    mutable std::atomic<int> m_statChargeMatch{0};         // AtLastHit vs AtFirstHit agree
-    mutable std::atomic<int> m_statChargeMismatch{0};      // AtLastHit vs AtFirstHit disagree
 
     // N-hit combinatorial search
     mutable std::atomic<int> m_statTotalTripletCombos{0};  // total C(N,k) combinations evaluated
@@ -433,6 +411,7 @@ private:
     mutable std::atomic<int> m_statEdepRejected{0};         // hits removed by MaxHitEdepKeV pre-filter
     mutable std::atomic<int> m_statOutlierHitsRemoved{0};   // total hits removed by outlier rejection
     mutable std::atomic<int> m_statNeighbourRejected{0};    // combos rejected by neighbour-track gate
+    mutable std::atomic<int> m_statComboPTRejected{0};      // combos rejected by MaxComboPT threshold
 
     // Hit multiplicity distribution
     mutable std::atomic<int> m_statNhit3{0};
@@ -442,9 +421,7 @@ private:
     mutable std::atomic<int> m_statNhit7plus{0};
 
     // Track states
-    mutable std::atomic<int> m_statStateAtFirstHit{0};
     mutable std::atomic<int> m_statStateAtLastHit{0};
-    mutable std::atomic<int> m_statStateAtCalorimeter{0};
     mutable std::atomic<int> m_statStateAtOther{0};
     mutable std::atomic<int> m_statStateAtVertex{0};
     mutable std::atomic<int> m_statInnerPropSuccess{0};
@@ -460,10 +437,7 @@ private:
 
     // Legacy counters (kept to avoid reference errors; no longer incremented)
     mutable std::atomic<int> m_statTripletBadGeom{0};
-    mutable std::atomic<int> m_statTripletsCutByPT{0};
     mutable std::atomic<int> m_statAngleGuardRejected{0};
-    mutable std::atomic<int> m_statInnerSeedUsed{0};
-    mutable std::atomic<int> m_statFallbackSeedUsed{0};
     mutable std::atomic<int> m_statHighestPtInner{0};
     mutable std::atomic<int> m_statHighestPtInner2{0};
     mutable std::atomic<int> m_statHighestPtFallback{0};

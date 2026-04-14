@@ -352,8 +352,6 @@ StatusCode DisplacedTracking::finalize() {
     int nPos      = m_statPositiveCharge.load();
     int nNeg      = m_statNegativeCharge.load();
     int nUndet    = m_statChargeUndetermined.load();
-    int nMatch    = m_statChargeMatch.load();
-    int nMis      = m_statChargeMismatch.load();
     int nCombos   = m_statTotalTripletCombos.load();
     int nValid    = m_statValidTriplets.load();
     int nDupComp  = m_statDupCompositeRejected.load();
@@ -366,14 +364,13 @@ StatusCode DisplacedTracking::finalize() {
     int nEdepRej       = m_statEdepRejected.load();
     int nOutlier       = m_statOutlierHitsRemoved.load();
     int nNeighbRej     = m_statNeighbourRejected.load();
+    int nPTRej         = m_statComboPTRejected.load();
     int nH3       = m_statNhit3.load();
     int nH4       = m_statNhit4.load();
     int nH5       = m_statNhit5.load();
     int nH6       = m_statNhit6.load();
     int nH7p      = m_statNhit7plus.load();
-    int nSF       = m_statStateAtFirstHit.load();
     int nSL       = m_statStateAtLastHit.load();
-    int nSC       = m_statStateAtCalorimeter.load();
     int nSO       = m_statStateAtOther.load();
     int nSV       = m_statStateAtVertex.load();
     int nProp     = m_statInnerPropSuccess.load();
@@ -402,9 +399,6 @@ StatusCode DisplacedTracking::finalize() {
         << "║    Positive particles (w > 0) : " << std::setw(7) << nPos    << "                   ║\n"
         << "║    Negative particles (w < 0) : " << std::setw(7) << nNeg    << "                   ║\n"
         << "║    Unreliable sign (near-str) : " << std::setw(7) << nUndet  << "                   ║\n"
-        << "║  N-hit AtLastHit vs AtFirstHit sign check                ║\n"
-        << "║    Charge sign MATCH          : " << std::setw(7) << nMatch  << "                   ║\n"
-        << "║    Charge sign MISMATCH       : " << std::setw(7) << nMis    << "                   ║\n"
         << "╠══════════════════════════════════════════════════════════╣\n"
         << "║  N-HIT COMBINATORIAL SEARCH                              ║\n"
         << "║    C(N,k) combos evaluated    : " << std::setw(7) << nCombos  << "                   ║\n"
@@ -419,6 +413,7 @@ StatusCode DisplacedTracking::finalize() {
         << "║    Hits removed by edep cut   : " << std::setw(7) << nEdepRej       << "                   ║\n"
         << "║    Outlier hits removed       : " << std::setw(7) << nOutlier<< "  (" << std::setw(5) << std::fixed << std::setprecision(2) << avgOutlier << " / track)      ║\n"
         << "║    Rejected by neighbour gate : " << std::setw(7) << nNeighbRej     << "                   ║\n"
+        << "║    Rejected by MaxComboPT     : " << std::setw(7) << nPTRej         << "                   ║\n"
         << "╠══════════════════════════════════════════════════════════╣\n"
         << "║  HIT MULTIPLICITY PER TRACK                              ║\n"
         << "║    3 hits                     : " << std::setw(7) << nH3     << "                   ║\n"
@@ -428,9 +423,7 @@ StatusCode DisplacedTracking::finalize() {
         << "║    7+ hits                    : " << std::setw(7) << nH7p    << "                   ║\n"
         << "╠══════════════════════════════════════════════════════════╣\n"
         << "║  TRACK STATES STORED                                     ║\n"
-        << "║    AtFirstHit  (N-hit seed)   : " << std::setw(7) << nSF     << "                   ║\n"
         << "║    AtLastHit   (N-hit circle) : " << std::setw(7) << nSL     << "                   ║\n"
-        << "║    AtCalorimeter (direct fit) : " << std::setw(7) << nSC     << "                   ║\n"
         << "║    AtOther     (GenFit fit)   : " << std::setw(7) << nSO     << "                   ║\n"
         << "║    AtVertex    (inner prop.)  : " << std::setw(7) << nSV     << "                   ║\n"
         << "╠══════════════════════════════════════════════════════════╣\n"
@@ -592,7 +585,7 @@ std::map<int, std::vector<const dd4hep::rec::Surface*>> DisplacedTracking::getSu
     return result;
 }
 
-// Get Transverse Momentum
+// Get Transverse Momentum .. it uses reference point, in case of non-homogenious field,it need to be moore complex "Fix"
 double DisplacedTracking::getPT(const edm4hep::TrackState& state) const {
     // Get parameters
     double omega = state.omega;  // 1/mm
@@ -611,19 +604,7 @@ double DisplacedTracking::getPT(const edm4hep::TrackState& state) const {
 
     return pT;
 }
-// Get Position
-Eigen::Vector3d DisplacedTracking::getPosition(const edm4hep::TrackState& state) const {
-    // Get parameters
-    double d0 = state.D0;      // mm
-    double phi = state.phi;    // rad
-    double z0 = state.Z0;      // mm
-    
-    // Position at closest approach to origin
-    double x0 = -d0 * std::sin(phi);
-    double y0 = d0 * std::cos(phi);
-    
-    return Eigen::Vector3d(x0, y0, z0);
-}
+
 // EDM4HEP Track state
 edm4hep::TrackState DisplacedTracking::createTrackState(
     double d0, double phi, double omega, double z0, double tanLambda,
@@ -879,10 +860,10 @@ void DisplacedTracking::findTracks(
 
         // ── Reference B-field for k=3 radius normalisation ───────────────────────
         // Compute once per track-finding iteration at the centroid of available hits.
-        // Used to convert MaxSeedPT → R_cap (cm), so the k=3 combined score can cap
+        // Used to convert MaxComboPT → R_cap (cm), so the k=3 combined score can cap
         // the radius reward without needing an extra configurable property.
-        //   R_cap [cm] = MaxSeedPT [GeV] * 100 / (0.3 * |B| [T])
-        double bRefForK3 = 1.7;  // fallback: IDEA nominal [T]
+        //   R_cap [cm] = MaxComboPT [GeV] * 100 / (0.3 * |B| [T])
+        double bRefForK3 = 1.7;  // fallback: IDEA nominal [T] "fix, there should be nor hardcoded values at all"
         {
             double sx = 0.0, sy = 0.0, sz = 0.0;
             for (const auto& hi : allHitInfo) {
@@ -898,9 +879,9 @@ void DisplacedTracking::findTracks(
             }
         }
         const double absBRefForK3 = std::max(std::abs(bRefForK3), 1e-6);
-        // R_cap: radius at which pT = MaxSeedPT (the upper physical pT limit).
+        // R_cap: radius at which pT = MaxComboPT (the upper physical pT limit).
         // Combos with radius >> R_cap are almost certainly noise; the term saturates.
-        const double rCapK3 = m_maxSeedPT.value() * 100.0 / (0.3 * absBRefForK3);
+        const double rCapK3 = m_maxComboPT.value() * 100.0 / (0.3 * absBRefForK3);
 
         // ── Edep-similarity score ─────────────────────────────────────────────────
         // Strategy: for a crowded compositeID (>1 hit), the "right" hit is the one
@@ -1038,7 +1019,7 @@ void DisplacedTracking::findTracks(
         // Strategy: try all C(N,k) hit combinations for k = MaxCombinatorialHits
         // down to MinTrackHits, score each by chi2/NDF from a full N-hit circle fit,
         // apply isolation and layer-span quality cuts, then iteratively remove outlier
-        // hits from the best combination.  Finally seed from its 3 innermost hits.
+        // hits from the best combination.  Finally seed from its 3 innermost hits "fix, remove seed".
         // ─────────────────────────────────────────────────────────────────────────
 
         // Build a flat ordered list of allHitInfo indices, layer-sorted (inner→outer).
@@ -1063,6 +1044,14 @@ void DisplacedTracking::findTracks(
             Eigen::Matrix3d fitCov = Eigen::Matrix3d::Zero();
             std::vector<double> residuals;
             int nHits = 0;
+            // Track parameters stored after N-hit fit (used to build seed state)
+            double charge    = 0.0;
+            double d0_cm     = 0.0;
+            double phi_rad   = 0.0;
+            double omega_mm  = 0.0;
+            double z0_cm     = 0.0;
+            double tanLambda = 0.0;
+            double pT        = 0.0;
         };
         CombResult bestCombo;
         bool foundCombination = false;
@@ -1254,7 +1243,7 @@ void DisplacedTracking::findTracks(
         //   (one hit per selected compositeID).
         // This structurally enforces one-hit-per-region with zero wasted iterations.
         //
-        // TODO (future enhancement): allow ≥2 hits per compositeID by extending
+        // TODO (fix in future enhancement): allow ≥2 hits per compositeID by extending
         // the per-compositeID hit-count to >1 when their spatial separation exceeds
         // a threshold, to recover efficiency in dense environments.
         for (int k = maxKeff; k >= minK; --k) {
@@ -1386,6 +1375,12 @@ void DisplacedTracking::findTracks(
                                             << " chi2/ndf=" << cchi2ndf
                                             << " -> REJECT chi2 threshold="
                                             << m_nHitMaxChi2NDF.value() << endmsg;
+                                } else if ((0.3 * absBRefForK3 * cr / 100.0) > m_maxComboPT.value()) {
+                                    // Combo pT exceeds MaxComboPT — exclude during search
+                                    m_statComboPTRejected++;
+                                    debug() << "  k=" << k << " " << comboLabel()
+                                            << " -> REJECT pT=" << (0.3 * absBRefForK3 * cr / 100.0)
+                                            << " > MaxComboPT=" << m_maxComboPT.value() << endmsg;
                                 } else {
                                     // Selection priority:
                                     //  1. More hits always beats fewer hits.
@@ -1393,7 +1388,7 @@ void DisplacedTracking::findTracks(
                                     //  3. Both combos have k=3 (NDF=0, chi2 always 0): the chi2
                                     //     gives no information.  Instead prefer the combo whose
                                     //     circle has the largest radius (= highest pT), capped
-                                    //     by MaxSeedPT at track-finalisation.  This picks the
+                                    //     by MaxComboPT.  This picks the
                                     //     most "straight" (least curved = most energetic)
                                     //     combination, which is more likely to be the signal muon
                                     //     rather than a low-pT secondary spiral.
@@ -1561,7 +1556,7 @@ void DisplacedTracking::findTracks(
         //      replace bestCombo so the correct hit propagates to all downstream steps.
         // Prevents collinear secondary hits from being accidentally preferred over
         // the real muon hit in any crowded layer.
-        {
+        if (m_doCrowdedLayerHitSelection){
             int nCleanCIDs   = 0;
             int nCrowdedCIDs = 0;
             for (const auto& [cid, cidHIIs] : hitIndicesByCompositeLayer) {
@@ -1918,46 +1913,21 @@ void DisplacedTracking::findTracks(
             double omega  = chargeN / (cr * 10.0);   // 1/mm
             double pTN    = 0.3 * std::abs(bFieldN) * cr / 100.0; // GeV/c
 
-            info() << "N-hit seed: " << Nh << " hits  pT=" << pTN << " GeV/c"
+            info() << "N-hit circle fit: " << Nh << " hits  pT=" << pTN << " GeV/c"
                    << "  charge=" << chargeN
                    << (chargeReliableN ? "" : " [UNRELIABLE]")
                    << "  chi2/ndf=" << bestCombo.chi2ndf << endmsg;
 
-            // ── Build AtFirstHit state ─────────────────────────────────────────────
-            edm4hep::TrackState nHitSeedState = createTrackState(
-                d0_cm * 10.0,   // cm → mm
-                phi,
-                omega,          // already in 1/mm
-                z0_cm * 10.0,   // cm → mm
-                tanLambda,
-                edm4hep::TrackState::AtFirstHit);
-            const auto& firstHitPos = (*hits)[bestCombo.gIdxVec[0]].getPosition();
-            nHitSeedState.referencePoint = edm4hep::Vector3f(
-                firstHitPos[0], firstHitPos[1], firstHitPos[2]);
+            // ── Store N-hit fit parameters in bestCombo for downstream use ──────
+            bestCombo.charge    = chargeN;
+            bestCombo.d0_cm     = d0_cm;
+            bestCombo.phi_rad   = phi;
+            bestCombo.omega_mm  = omega;
+            bestCombo.z0_cm     = z0_cm;
+            bestCombo.tanLambda = tanLambda;
+            bestCombo.pT        = pTN;
 
-            // Propagate N-hit fit covariance to track parameter covariance
-            {
-                double r2 = cx*cx + cy*cy, dist0 = std::sqrt(r2);
-                Eigen::Vector3d grad_d0(
-                    (dist0>1e-9) ? cx/dist0 : 0.0,
-                    (dist0>1e-9) ? cy/dist0 : 0.0, -1.0);
-                Eigen::Vector3d grad_phi(
-                    (r2>1e-12) ? -cy/r2 : 0.0,
-                    (r2>1e-12) ?  cx/r2 : 0.0, 0.0);
-                double cSign = (omega>0) ? 1.0 : -1.0;
-                Eigen::Vector3d grad_omega(0.0, 0.0, -cSign/(cr*cr*10.0));
-                double var_d0_mm2    = grad_d0.dot(bestCombo.fitCov * grad_d0) * 100.0;
-                double var_phi_rad2  = grad_phi.dot(bestCombo.fitCov * grad_phi);
-                double var_omega_mm2 = grad_omega.dot(bestCombo.fitCov * grad_omega);
-                nHitSeedState.covMatrix[0]  = static_cast<float>(var_d0_mm2);
-                nHitSeedState.covMatrix[2]  = static_cast<float>(var_phi_rad2);
-                nHitSeedState.covMatrix[5]  = static_cast<float>(var_omega_mm2);
-            }
-
-            // Pack into a track object so downstream code finds AtFirstHit
-            auto nhSeedTrack = candidateTracks.create();
-            nhSeedTrack.addToTrackStates(nHitSeedState);
-
+            auto nhSeedTrack = candidateTracks.create();  // empty track (no states)
             tripletCandidates = 1; validTriplets = 1;
             m_statTotalTripletCombos++;
             m_statValidTriplets++;
@@ -1967,8 +1937,6 @@ void DisplacedTracking::findTracks(
             trackCandidates.emplace_back(nhSeedTrack, pTN, bestCombo.gIdxVec, usedComps);
         }
 
-        bool innerSeedChosen = true;
-
         debug() << "Phase A: Trying inner-layer seeding (layers 0,1,2) for iteration " << trackNumber << "..." << endmsg;
 
         // N-hit strategy: candidateTracks always has exactly one entry (the best combination)
@@ -1976,42 +1944,6 @@ void DisplacedTracking::findTracks(
             info() << "No track candidates found in iteration " << trackNumber << " - stopping track search" << endmsg;
             break;
         }
-
-        // ── MaxSeedPT threshold filter ──────────────────────────────────────
-        // Reject triplets whose pT exceeds m_maxSeedPT (e.g. numerically
-        // pathological high-curvature seeds).  If ALL candidates are above
-        // the threshold we keep the single lowest-pT one as a fallback so
-        // we never silently drop a track-finding iteration.
-        if (m_maxSeedPT < std::numeric_limits<double>::max()) {
-            std::vector<TrackCandidate> below, above;
-            for (auto& tc : trackCandidates) {
-                if (tc.pT <= m_maxSeedPT) below.push_back(tc);
-                else                       above.push_back(tc);
-            }
-
-            if (!below.empty()) {
-                // Normal case: some candidates pass the cut
-                int nCut = static_cast<int>(above.size());
-                if (nCut > 0) {
-                    info() << "MaxSeedPT filter: rejected " << nCut
-                           << " triplet(s) with pT > " << m_maxSeedPT << " GeV/c for iteration " << trackNumber << endmsg;
-                    m_statTripletsCutByPT += nCut;
-                }
-                trackCandidates.swap(below);
-            } else {
-                // All candidates exceeded threshold — fallback to lowest-pT one
-                auto lowestIt = std::min_element(above.begin(), above.end(),
-                    [](const TrackCandidate& a, const TrackCandidate& b){ return a.pT < b.pT; });
-                warning() << "MaxSeedPT filter: all " << above.size()
-                          << " triplet(s) exceed threshold (" << m_maxSeedPT
-                          << " GeV/c) for iteration " << trackNumber
-                          << ". Keeping lowest-pT fallback with pT=" << lowestIt->pT << " GeV/c" << endmsg;
-                int nCut = static_cast<int>(above.size()) - 1;
-                if (nCut > 0) m_statTripletsCutByPT += nCut;
-                trackCandidates = { *lowestIt };
-            }
-        }
-        // ────────────────────────────────────────────────────────────────────
 
         // Sort candidates by decreasing pT for better track selection
         std::sort(trackCandidates.begin(), trackCandidates.end(),
@@ -2043,48 +1975,23 @@ void DisplacedTracking::findTracks(
             continue;
         }
 
-        info() << "Processing track candidate " << trackNumber << " with pT=" << candidate.pT 
-               << " GeV/c using hits: [" << candidate.hitIndices[0] 
-               << "," << candidate.hitIndices[1] << "," << candidate.hitIndices[2] << "]" << endmsg;
+        info() << "Processing track candidate " << trackNumber << " with pT=" << candidate.pT
+               << " GeV/c  nHits=" << candidate.hitIndices.size() << endmsg;
 
-        // Get the seed track and its state
-        const auto& seedTrack = candidate.track;
-
-        // Find a suitable seed state
-        // Priority 1: 4-hit circle fit (AtLastHit) — most constrained analytical estimate
-        // Priority 2: 3-hit triplet seed (AtFirstHit)
-        edm4hep::TrackState seedState;
-        bool foundState = false;
-
-        for (int j = 0; j < seedTrack.trackStates_size(); ++j) {
-            if (seedTrack.getTrackStates(j).location == edm4hep::TrackState::AtLastHit) {
-                seedState = seedTrack.getTrackStates(j);
-                foundState = true;
-                debug() << "Using AtLastHit (4-hit circle fit) as GenFit seed for track " << trackNumber << endmsg;
-                break;
-            }
+        // Build GenFit seed state directly from N-hit circle fit parameters stored in bestCombo.
+        // This will be overridden by the second circle fit below (AtLastHit) in normal cases.
+        edm4hep::TrackState seedState = createTrackState(
+            bestCombo.d0_cm * 10.0,   // cm → mm
+            bestCombo.phi_rad,
+            bestCombo.omega_mm,        // already in 1/mm
+            bestCombo.z0_cm * 10.0,   // cm → mm
+            bestCombo.tanLambda,
+            edm4hep::TrackState::AtLastHit);
+        {
+            const auto& firstHitPos = (*hits)[bestCombo.gIdxVec[0]].getPosition();
+            seedState.referencePoint = edm4hep::Vector3f(firstHitPos[0], firstHitPos[1], firstHitPos[2]);
         }
-        if (!foundState) {
-            for (int j = 0; j < seedTrack.trackStates_size(); ++j) {
-                if (seedTrack.getTrackStates(j).location == edm4hep::TrackState::AtFirstHit) {
-                    seedState = seedTrack.getTrackStates(j);
-                    foundState = true;
-                    debug() << "Using AtFirstHit (3-hit seed) as GenFit seed for track " << trackNumber << endmsg;
-                    break;
-                }
-            }
-        }
-        if (!foundState && seedTrack.trackStates_size() > 0) {
-            seedState = seedTrack.getTrackStates(0);
-            foundState = true;
-        }
-
-        if (!foundState) {
-            warning() << "No seed state found for track " << trackNumber << ", skipping" << endmsg;
-            continue;
-        }
-
-        debug() << "Found seed state for track candidate " << trackNumber << endmsg;
+        debug() << "Built initial seed state from N-hit circle fit for track " << trackNumber << endmsg;
 
         // Build trackHits vector directly using hit indices (avoid cellID duplicate issues)
         std::vector<edm4hep::TrackerHitPlane> trackHits;
@@ -2125,33 +2032,6 @@ void DisplacedTracking::findTracks(
 
         debug() << "Created new final track object for track " << trackNumber << endmsg;
 
-        // ── Always preserve the analytical 3-hit seed state at AtFirstHit ──────────────
-        // This is the baseline from circle fitting and must always be present for
-        // comparison against the GenFit result and the 4-hit circle fit.
-        // We add it now BEFORE the 4-hit extension and GenFit fitting so it is never lost.
-        {
-            edm4hep::TrackState seedAtFirst = seedState;
-            seedAtFirst.location = edm4hep::TrackState::AtFirstHit;
-            finalTrack.addToTrackStates(seedAtFirst);
-            debug() << "Saved analytical seed state at AtFirstHit:"
-                    << "  d0=" << seedAtFirst.D0 << " mm"
-                    << "  phi=" << seedAtFirst.phi << " rad"
-                    << "  omega=" << seedAtFirst.omega << " 1/mm"
-                    << "  z0=" << seedAtFirst.Z0 << " mm"
-                    << "  tanL=" << seedAtFirst.tanLambda << endmsg;
-        }
-
-        // ── Copy AtCalorimeter (direct-formula) state from seed track ────────────
-        // The track state is built from the N-hit circle fit parameters.
-        // track object. Transfer it now to finalTrack so the per-track counter
-        // and the ROOT output both see it.
-        for (int j = 0; j < seedTrack.trackStates_size(); ++j) {
-            if (seedTrack.getTrackStates(j).location == edm4hep::TrackState::AtCalorimeter) {
-                finalTrack.addToTrackStates(seedTrack.getTrackStates(j));
-                debug() << "Copied AtCalorimeter (direct-formula) state to finalTrack" << endmsg;
-                break;
-            }
-        }
 
         // N-hit circle fit: use the precomputed bestCombo result (already outlier-rejected).
         if (trackHits.size() >= 3) {
@@ -2443,14 +2323,8 @@ void DisplacedTracking::findTracks(
 
             finalTrack.setNdf(std::max(1, static_cast<int>(trackHits.size() * 2 - 5)));
 
-            // Copy seed track states — but skip AtFirstHit since we already saved it above
-            // to avoid duplicating the seed state.
-            for (int j = 0; j < seedTrack.trackStates_size(); ++j) {
-                auto st = seedTrack.getTrackStates(j);
-                if (st.location != edm4hep::TrackState::AtFirstHit) {
-                    finalTrack.addToTrackStates(st);
-                }
-            }
+            // seedTrack carries no states (N-hit params are stored in bestCombo);
+            // AtLastHit is added by the circle fit block above when GenFit is skipped.
 
             // Copy hits into output collection so PODIO can resolve the relation
             for (const auto& hit : trackHits) {
@@ -2482,10 +2356,9 @@ void DisplacedTracking::findTracks(
         bool foundStateForProp = false;
         // ===== EXTRACT BEST STATE FOR INNER PROPAGATION =====
         // Priority 1: GenFit-fitted state (AtOther) — most accurate
-        // Priority 2: 4-hit circle fit (AtLastHit)
-        // Priority 3: 3-hit seed (AtFirstHit)
-        // The reference point in all these states is the first/last hit position
-        // in the outer muon system, which is where RK4 propagation starts.
+        // Priority 2: N-hit circle fit (AtLastHit)
+        // The reference point in all these states is the hit position in the outer
+        // muon system, which is where RK4 propagation starts.
         for (int j = 0; j < finalTrack.trackStates_size(); ++j) {
             auto st = finalTrack.getTrackStates(j);
             if (st.location == edm4hep::TrackState::AtOther) {
@@ -2501,18 +2374,7 @@ void DisplacedTracking::findTracks(
                 if (st.location == edm4hep::TrackState::AtLastHit) {
                     bestState = st;
                     foundStateForProp = true;
-                    debug() << "Using AtLastHit state (4-hit circle) for inner propagation" << endmsg;
-                    break;
-                }
-            }
-        }
-        if (!foundStateForProp) {
-            for (int j = 0; j < finalTrack.trackStates_size(); ++j) {
-                auto st = finalTrack.getTrackStates(j);
-                if (st.location == edm4hep::TrackState::AtFirstHit) {
-                    bestState = st;
-                    foundStateForProp = true;
-                    debug() << "Using AtFirstHit state (3-hit seed) for inner propagation" << endmsg;
+                    debug() << "Using AtLastHit state (N-hit circle) for inner propagation" << endmsg;
                     break;
                 }
             }
@@ -2636,22 +2498,18 @@ void DisplacedTracking::findTracks(
 
         // ---- per-track run statistics ----
         m_statTracksReconstructed++;
-        bool hasFirstHit = false, hasLastHit = false, hasCalorimeter = false, hasOther = false, hasVertex = false;
+        bool hasLastHit = false, hasOther = false, hasVertex = false;
         for (int sIdx = 0; sIdx < finalTrack.trackStates_size(); ++sIdx) {
             auto ts = finalTrack.getTrackStates(sIdx);
             switch (ts.location) {
-                case edm4hep::TrackState::AtFirstHit:    hasFirstHit    = true; break;
-                case edm4hep::TrackState::AtLastHit:     hasLastHit     = true; break;
-                case edm4hep::TrackState::AtCalorimeter: hasCalorimeter = true; break;
-                case edm4hep::TrackState::AtOther:       hasOther       = true; break;
-                case edm4hep::TrackState::AtVertex:      hasVertex      = true; break;
+                case edm4hep::TrackState::AtLastHit:     hasLastHit = true; break;
+                case edm4hep::TrackState::AtOther:       hasOther   = true; break;
+                case edm4hep::TrackState::AtVertex:      hasVertex  = true; break;
                 default: break;
             }
         }
-        if (hasFirstHit)    m_statStateAtFirstHit++;
-        if (hasLastHit)     m_statStateAtLastHit++;
-        if (hasCalorimeter) m_statStateAtCalorimeter++;
-        if (hasOther)       m_statStateAtOther++;
+        if (hasLastHit) m_statStateAtLastHit++;
+        if (hasOther)   m_statStateAtOther++;
         if (hasVertex)      m_statStateAtVertex++;
         if (hasLastHit) m_statFourHitTracks++; else m_statThreeHitTracks++;  // legacy
 
@@ -2755,58 +2613,24 @@ void DisplacedTracking::findTracks(
             }
         }
 
-        // Count charge from the best available analytical state:
-        //   priority 0 → AtLastHit  (4-hit WLS circle fit, most reliable)
-        //   priority 1 → AtFirstHit (3-hit seed, always present)
-        //   AtOther (GenFit) is NOT used for charge classification: with only
-        //   3 hits (~1 NDF) the fitted ω sign is numerically unreliable.
-        //
-        // When both AtLastHit AND AtFirstHit exist (i.e. 4-hit tracks), compare
-        // their charge signs as a self-consistency check of the two analytical methods.
+        // Count charge from AtLastHit (N-hit WLS circle fit).
+        // AtOther (GenFit) is NOT used for charge classification.
         {
-            double omegaLastHit  = 0.0;  bool hasLastHitOmega  = false;
-            double omegaFirstHit = 0.0;  bool hasFirstHitOmega = false;
-
+            double omegaLastHit = 0.0;  bool hasLastHitOmega = false;
             for (int sIdx = 0; sIdx < finalTrack.trackStates_size(); ++sIdx) {
                 auto ts = finalTrack.getTrackStates(sIdx);
                 if (ts.location == edm4hep::TrackState::AtLastHit) {
-                    omegaLastHit     = ts.omega;
-                    hasLastHitOmega  = true;
-                } else if (ts.location == edm4hep::TrackState::AtFirstHit) {
-                    omegaFirstHit    = ts.omega;
-                    hasFirstHitOmega = true;
+                    omegaLastHit    = ts.omega;
+                    hasLastHitOmega = true;
+                    break;
                 }
             }
-
-            // Primary charge counter: prefer 4-hit AtLastHit, fall back to 3-hit AtFirstHit
-            double omegaForCharge = hasLastHitOmega ? omegaLastHit : omegaFirstHit;
-            bool   hasAnyOmega   = hasLastHitOmega || hasFirstHitOmega;
-
-            if (hasAnyOmega) {
+            if (hasLastHitOmega) {
                 // EDM4hep convention: omega = charge / R  →  omega > 0 means positive charge
-                if (omegaForCharge > 0.0) m_statPositiveCharge++;
-                else                      m_statNegativeCharge++;
-
-                debug() << "Charge classification: omega="  << omegaForCharge
-                        << " 1/mm (from " << (hasLastHitOmega ? "AtLastHit/4-hit" : "AtFirstHit/3-hit")
-                        << ")  →  " << (omegaForCharge > 0 ? "positive" : "negative") << endmsg;
-            }
-
-            // Self-consistency check: only fires for 4-hit tracks where both states exist.
-            // Compares the 4-hit WLS circle (AtLastHit) against the 3-hit seed (AtFirstHit).
-            // A mismatch here would indicate a genuine inconsistency between the two fits.
-            if (hasLastHitOmega && hasFirstHitOmega) {
-                bool lastPos  = (omegaLastHit  > 0.0);
-                bool firstPos = (omegaFirstHit > 0.0);
-                if (lastPos == firstPos) {
-                    m_statChargeMatch++;
-                    debug() << "Charge sign MATCH (4-hit vs 3-hit):    AtLastHit=" << omegaLastHit
-                            << "  AtFirstHit=" << omegaFirstHit << endmsg;
-                } else {
-                    m_statChargeMismatch++;
-                    debug() << "Charge sign MISMATCH (4-hit vs 3-hit): AtLastHit=" << omegaLastHit
-                            << "  AtFirstHit=" << omegaFirstHit << endmsg;
-                }
+                if (omegaLastHit > 0.0) m_statPositiveCharge++;
+                else                     m_statNegativeCharge++;
+                debug() << "Charge classification: omega=" << omegaLastHit
+                        << " 1/mm (AtLastHit)  →  " << (omegaLastHit > 0 ? "positive" : "negative") << endmsg;
             }
         }
         // Continue to next iteration to find more tracks
@@ -2816,124 +2640,6 @@ void DisplacedTracking::findTracks(
            << " final tracks across " << (trackNumber-1) << " iterations" << endmsg;
 }
 
-// function to calculate circle center and radius using the Direct Formula Method
-bool DisplacedTracking::calculateCircleCenterDirect(
-    double x1, double y1, double x2, double y2, double x3, double y3,
-    double& x0, double& y0, double& radius) const{
-    
-    // Calculate the determinant
-    double D = 2 * (x1 * (y2 - y3) + x2 * (y3 - y1) + x3 * (y1 - y2));
-    
-    // Check if points are collinear (determinant would be zero)
-    if (std::abs(D) < 1e-10) {
-        return false;
-    }
-    
-    // Calculate center coordinates
-    x0 = ((x1*x1 + y1*y1) * (y2 - y3) + 
-          (x2*x2 + y2*y2) * (y3 - y1) + 
-          (x3*x3 + y3*y3) * (y1 - y2)) / D;
-    
-    y0 = ((x1*x1 + y1*y1) * (x3 - x2) + 
-          (x2*x2 + y2*y2) * (x1 - x3) + 
-          (x3*x3 + y3*y3) * (x2 - x1)) / D;
-    
-    // Calculate radius as distance from center to any of the points
-    radius = std::sqrt((x1 - x0)*(x1 - x0) + (y1 - y0)*(y1 - y0));
-    
-    return true;
-}
-
-// Improved sagitta method with circle center calculation
-double DisplacedTracking::calculateSagitta(const Eigen::Vector3d& p1, 
-                                        const Eigen::Vector3d& p2, 
-                                        const Eigen::Vector3d& p3) const{
-    // Project points onto the xy plane (transverse plane)
-    Eigen::Vector2d p1_2d(p1.x(), p1.y());
-    Eigen::Vector2d p2_2d(p2.x(), p2.y());
-    Eigen::Vector2d p3_2d(p3.x(), p3.y());
-    
-    // Vector from p1 to p3 (chord)
-    Eigen::Vector2d chord = p3_2d - p1_2d;
-    double chordLength = chord.norm();
-    
-    // Unit vector along the chord
-    Eigen::Vector2d chordDir = chord / chordLength;
-    
-    // Vector from p1 to p2
-    Eigen::Vector2d v1to2 = p2_2d - p1_2d;
-    
-    // Project v1to2 onto the chord direction
-    double projection = v1to2.dot(chordDir);
-    
-    // Calculate the perpendicular distance (sagitta)
-    Eigen::Vector2d projectionVec = projection * chordDir;
-    Eigen::Vector2d perpVec = v1to2 - projectionVec;
-    double sagitta = perpVec.norm();
-    
-    return sagitta;
-}
-
-// Function to calculate circle center using sagitta method
-bool DisplacedTracking::calculateCircleCenterSagitta(
-    const Eigen::Vector3d& p1, const Eigen::Vector3d& p2, const Eigen::Vector3d& p3,
-    double& x0, double& y0, double& radius) const{
-    
-    // Project points onto the xy plane (transverse plane)
-    Eigen::Vector2d p1_2d(p1.x(), p1.y());
-    Eigen::Vector2d p2_2d(p2.x(), p2.y());
-    Eigen::Vector2d p3_2d(p3.x(), p3.y());
-    
-    // Vector from p1 to p3 (chord)
-    Eigen::Vector2d chord = p3_2d - p1_2d;
-    double chordLength = chord.norm();
-    
-    // Check if points are too close
-    if (chordLength < 1e-6) {
-        return false;
-    }
-    
-    // Vector from p1 to p2
-    Eigen::Vector2d v1to2 = p2_2d - p1_2d;
-    
-    // Project v1to2 onto the chord direction
-    Eigen::Vector2d chordDir = chord / chordLength;
-    double projection = v1to2.dot(chordDir);
-    
-    // Calculate the perpendicular vector and sagitta
-    Eigen::Vector2d projectionVec = projection * chordDir;
-    Eigen::Vector2d perpVec = v1to2 - projectionVec;
-    double sagitta = perpVec.norm();
-    
-    // If sagitta is too small, points are nearly collinear
-    if (sagitta < 1e-6) {
-        return false;
-    }
-    
-    // Calculate radius using sagitta formula
-    radius = (chordLength * chordLength) / (8 * sagitta) + (sagitta / 2);
-    
-    // Find the midpoint of chord p1-p3
-    Eigen::Vector2d midpoint = (p1_2d + p3_2d) / 2.0;
-    
-    // Perpendicular direction to chord (normalized)
-    Eigen::Vector2d perpDir(-chordDir.y(), chordDir.x());
-    
-    // Determine on which side of the chord the center lies
-    // Cross product to check if p2 is "above" or "below" the chord
-    double crossProduct = chordDir.x() * (p2_2d.y() - p1_2d.y()) - 
-                         chordDir.y() * (p2_2d.x() - p1_2d.x());
-    double directionFactor = (crossProduct > 0) ? 1.0 : -1.0;
-    
-    // Height from chord to center
-    double height = std::sqrt(radius * radius - (chordLength / 2.0) * (chordLength / 2.0));
-    
-    // Calculate center coordinates
-    x0 = midpoint.x() + directionFactor * height * perpDir.x();
-    y0 = midpoint.y() + directionFactor * height * perpDir.y();
-    
-    return true;
-}
 /*
 // This calculates d0 using a two-segment track model for field transitions
 double DisplacedTracking::calculateImpactParameter(
@@ -3199,28 +2905,7 @@ double DisplacedTracking::calculateImpactParameter(
     return d0;
 }
 */
-void DisplacedTracking::fitLine(double x1, double y1, double x2, double y2, double x3, double y3,
-                           double& slope, double& intercept) const{
-    // Fit line using least squares method
-    double sumx = x1 + x2 + x3;
-    double sumy = y1 + y2 + y3;
-    double sumxy = x1*y1 + x2*y2 + x3*y3;
-    double sumx2 = x1*x1 + x2*x2 + x3*x3;
-    
-    // Number of points
-    const int n = 3;
-    
-    // Calculate slope and intercept
-    double denominator = n * sumx2 - sumx * sumx;
-    if (std::abs(denominator) < 1e-6) {
-        // Near-vertical line, use large slope
-        slope = 1e6;
-        intercept = sumy / n;
-    } else {
-        slope = (n * sumxy - sumx * sumy) / denominator;
-        intercept = (sumy - slope * sumx) / n;
-    }
-}
+
 // ------------------------------------ //
 // -------------- GenFit -------------- //
 // ------------------------------------ //
@@ -3829,13 +3514,11 @@ bool DisplacedTracking::fitTrackWithGenFit(
         // ----------------------------------------------------------------
         // Save GenFit fitted states.
         // Convention:
-        //   • AtFirstHit  → fitted state at first measurement (innermost hit in outer muon system)
-        //   • AtLastHit   → fitted state at last  measurement (used only if no 4-hit circle fit)
-        //   • AtOther     → GenFit fitted state at first hit (labelled separately so we can compare
-        //                    with the analytical seed which is also stored at AtFirstHit)
+        //   • AtLastHit   → N-hit WLS circle fit result (always present)
+        //   • AtOther     → GenFit fitted state at first hit
         //
-        // We do NOT overwrite any state that was already added by the seeding / 4-hit circle fit
-        // (those are preserved for comparison).  Instead we use AtOther for the GenFit output.
+        // We do NOT overwrite any state that was already added by the N-hit circle fit
+        // (AtLastHit is preserved).  GenFit output is saved at AtOther.
         // Inner-propagation result will be saved at AtVertex (see propagation section below).
         // ----------------------------------------------------------------
 
@@ -3850,7 +3533,7 @@ bool DisplacedTracking::fitTrackWithGenFit(
         if (finalGFTrack.getNumPoints() > 0) {
             try {
                 genfit::MeasuredStateOnPlane stateFirst = finalGFTrack.getFittedState(0);
-                // Save as AtOther so it does not overwrite the analytical AtFirstHit seed
+                // Save as AtOther so it does not overwrite the analytical AtLastHit state
                 edm4hep::TrackState gfFirst = convertToEDM4hepState(stateFirst,
                                                     edm4hep::TrackState::AtOther);
                 // Only add if AtOther is not yet used (inner propagation uses it later)
