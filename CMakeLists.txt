@@ -15,8 +15,6 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/cmake")
 find_package(GenFit REQUIRED)
 
 # Define sources
-# Note: GenfitField.cpp and GenfitMaterialInterface.cpp are intentionally excluded —
-# DD4hepFieldAdapter and DD4hepMaterialAdapter (GenFitAdapters.h) are the active implementations.
 set(sources
     components/DisplacedTracking.cpp
 )
@@ -24,7 +22,7 @@ set(sources
 # Create the module
 gaudi_add_module(DisplacedTracking
     SOURCES ${sources}
-    LINK
+    LINK 
         podio::podioIO
         Gaudi::GaudiKernel
         k4FWCore::k4FWCore

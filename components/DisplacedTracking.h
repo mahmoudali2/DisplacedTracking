@@ -253,26 +253,79 @@ private:
     InnerTrajectory propagateToInner(
         const Eigen::Vector3d& outerPos,    // Starting position in cm
         const Eigen::Vector3d& outerMom,    // Starting momentum in GeV/c
-        double targetRadius = 100.0         // Stop at this R in cm
+        double targetRadius = 100.0,        // Stop at this R in cm
+        double chargeSign   = 1.0           // +1 or -1 particle charge sign
     ) const;
-    
+
     /**
      * Check if position is inside solenoid boundary
      */
     bool isInsideSolenoid(const Eigen::Vector3d& pos) const;
-    
+
     /**
      * Single RK4 propagation step
      */
     void rk4PropagationStep(
         Eigen::Vector3d& pos,      // Position (modified in place)
         Eigen::Vector3d& mom,      // Momentum (modified in place)
-        double stepSize            // Step size in cm (negative = inward)
+        double stepSize,           // Step size in cm
+        double chargeSign = 1.0    // +1 or -1 particle charge sign
     ) const;
-    
+
+    /**
+     * Analytical two-segment inner propagation.
+     * Uses the outer circle (cx_o, cy_o, R_outer) and the field-reversal geometry
+     * to construct the inner helix and save it as TrackState::AtIP.
+     *
+     * Parameters (all in cm unless noted):
+     *   cx_o, cy_o, R_outer  – outer circle center and radius
+     *   omega_outer_mm       – outer omega (1/mm, sign encodes curvature direction)
+     *   pT_GeV               – transverse momentum (GeV/c, conserved across boundary)
+     *   tanLambda            – dz/d(arc length), conserved
+     *   x_ref, y_ref, z_ref  – innermost muon-system hit (cm); used for intersection
+     *                          selection and z anchor
+     *   finalTrack           – track to which the AtIP state is appended
+     * Returns true on success.
+     */
+    bool analyticalInnerPropagation(
+        double cx_o_cm, double cy_o_cm, double R_outer_cm,
+        double omega_outer_mm,
+        double pT_GeV,
+        double tanLambda,
+        double x_ref_cm, double y_ref_cm, double z_ref_cm,
+        bool   isEndcap,             // true = endcap hit → use z-cap crossing
+        edm4hep::MutableTrack& finalTrack) const;
+
+    /**
+     * Scan B_z radially to locate the exact solenoid boundary (sign-change radius).
+     * Starts from the SolenoidRadius property, walks in 1-mm steps to bracket the
+     * zero, then binary-searches to < 0.01 mm precision.
+     * Returns the boundary radius in mm.
+     */
+    double findSolenoidBoundary() const;
+
+    /**
+     * Scan B_z along the z-axis (x=y=0) to locate the exact solenoid endcap
+     * boundary (sign-change |z|). Starts from SolenoidHalfZ property, same
+     * algorithm as findSolenoidBoundary(). Returns the half-length in mm.
+     */
+    double findSolenoidBoundaryZ() const;
+
+    /**
+     * Print a compact truth-comparison table for all track states
+     * (AtLastHit, AtVertex/RK4, AtIP/analytical) vs. the best-matched MC particle.
+     * For a prompt muon gun AtIP should show d0 ≈ 0, z0 ≈ 0.
+     */
+    void compareStatesWithTruth(
+        const edm4hep::Track& track,
+        const edm4hep::MCParticleCollection& mcParticles,
+        int trackNumber) const;
+
     // Inner propagation constants
-    static constexpr double SOLENOID_RADIUS_CM = 230.0;  // shouldn't be hardcoded fix
-    static constexpr double SOLENOID_Z_HALF_CM = 218.0;  // shouldn't be hardcoded fix
+    static constexpr double SOLENOID_RADIUS_CM = 230.0;  // fallback default
+    static constexpr double SOLENOID_Z_HALF_CM = 218.0;
+    double m_solenoidBoundaryMm{2300.0};  // runtime value set by findSolenoidBoundary()
+    double m_solenoidHalfZmm{2180.0};     // runtime value set by findSolenoidBoundaryZ()
     // =====================================================================
     
     // Properties
@@ -283,6 +336,11 @@ private:
     Gaudi::Property<int> m_maxFitIterations{this, "MaxFitIterations", 4, "Maximum iterations for track fitting"};
     Gaudi::Property<bool> m_useGenFit{this, "UseGenFit", true, "Use GenFit for track fitting"};
     Gaudi::Property<int> m_debugLevel{this, "DebugLevel", 0, "Debug level of GenFit"};
+    // Solenoid geometry
+    Gaudi::Property<double> m_solenoidRadius{this, "SolenoidRadius", 2300.0,
+        "Nominal solenoid inner radius in mm; start for Bz sign-change scan in initialize()"};
+    Gaudi::Property<double> m_solenoidHalfZ{this, "SolenoidHalfZ", 2180.0,
+        "Nominal solenoid half-length in mm; start for Bz sign-change scan along z-axis in initialize()"};
     // Inner propagation steering
     Gaudi::Property<bool> m_doInnerPropagation{this, "DoInnerPropagation", true,
         "Propagate outer track inward through the solenoid boundary using RK4 (saves state at AtVertex)"};
@@ -328,6 +386,12 @@ private:
         "Maximum 3D distance in cm between any pair of hits in a combination. "
         "Catches ghost combos that span widely separated detector regions. "
         "Set to -1 to disable. 300 cm accommodates barrel→endcap transition tracks."};
+    Gaudi::Property<double> m_maxComboTanLambdaDev{this, "MaxComboTanLambdaDev", 0.5,
+        "Maximum deviation of any consecutive-pair tanλ (= Δz / chord_xy) from the "
+        "median tanλ of all pairs in a combination. Rejects combos where hits from "
+        "different tracks or delta-ray loops produce wildly inconsistent dip angles. "
+        "A real track has nearly constant tanλ; cross-particle fakes deviate by O(1). "
+        "Default 0.5 (≈27° dip-angle spread). Set to -1 to disable."};
     Gaudi::Property<double> m_maxHitEdepKeV{this, "MaxHitEdepKeV", 10.0,
         "Maximum energy deposit in keV for a hit to be used in tracking. "
         "Hits above this threshold are excluded before combo enumeration. "
@@ -412,6 +476,7 @@ private:
     mutable std::atomic<int> m_statOutlierHitsRemoved{0};   // total hits removed by outlier rejection
     mutable std::atomic<int> m_statNeighbourRejected{0};    // combos rejected by neighbour-track gate
     mutable std::atomic<int> m_statComboPTRejected{0};      // combos rejected by MaxComboPT threshold
+    mutable std::atomic<int> m_statTanLambdaRejected{0};   // combos rejected by MaxComboTanLambdaDev
 
     // Hit multiplicity distribution
     mutable std::atomic<int> m_statNhit3{0};
@@ -424,7 +489,9 @@ private:
     mutable std::atomic<int> m_statStateAtLastHit{0};
     mutable std::atomic<int> m_statStateAtOther{0};
     mutable std::atomic<int> m_statStateAtVertex{0};
+    mutable std::atomic<int> m_statStateAtIP{0};
     mutable std::atomic<int> m_statInnerPropSuccess{0};
+    mutable std::atomic<int> m_statAnalyticalPropSuccess{0};
     mutable std::atomic<int> m_statGenFitSuccess{0};
 
     // GenFit detailed counters

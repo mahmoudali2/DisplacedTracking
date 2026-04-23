@@ -190,6 +190,15 @@ StatusCode DisplacedTracking::initialize() {
         }
     }
 
+    // ── Locate exact solenoid boundary via B_z field scan ────────────────────
+    m_solenoidBoundaryMm = findSolenoidBoundary();
+    info() << "Solenoid Bz boundary (radial): R = " << m_solenoidBoundaryMm << " mm  ("
+           << m_solenoidBoundaryMm / 10.0 << " cm)" << endmsg;
+
+    m_solenoidHalfZmm = findSolenoidBoundaryZ();
+    info() << "Solenoid Bz boundary (endcap): |Z| = " << m_solenoidHalfZmm << " mm  ("
+           << m_solenoidHalfZmm / 10.0 << " cm)" << endmsg;
+
     return StatusCode::SUCCESS;
 }
 
@@ -261,80 +270,120 @@ std::tuple<edm4hep::TrackCollection,
     if (evtUsedPtFallback) m_statHighestPtFallback++;
 
     info() << "Found " << trackCollection.size() << " tracks" << endmsg;
-    
-    // Print track details
+
+    // Build a sim-link map so we can find the truth particle for each track
+    std::unordered_map<uint32_t, edm4hep::SimTrackerHit> summarySimMap;
+    for (const auto& link : recoSimLinks)
+        summarySimMap[link.getFrom().id().index] = link.getTo();
+
+    // ── Per-track summary ─────────────────────────────────────────────────────
     for (size_t i = 0; i < trackCollection.size(); ++i) {
         const auto& track = trackCollection[i];
-        
-        // Get track state at IP if available
-        edm4hep::TrackState state;
-        bool foundState = false;
-        
+        info() << "─── Track " << (i+1) << "  (" << track.trackerHits_size() << " hits) ───" << endmsg;
+
+        // ── Outer segment (AtLastHit) ─────────────────────────────────────────
+        bool hasOuter = false;
         for (int j = 0; j < track.trackStates_size(); ++j) {
-            if (track.getTrackStates(j).location == edm4hep::TrackState::AtFirstHit) {
-                state = track.getTrackStates(j);
-                foundState = true;
-                break;
-            }
-        }
-        
-        if (!foundState && track.trackStates_size() > 0) {
-            state = track.getTrackStates(0);
-            foundState = true;
-        }
-        
-        if (foundState) {
-            // Get magnetic field at track position
-            dd4hep::Position fieldPos(0, 0, 0);  // Default center position
+            auto ts = track.getTrackStates(j);
+            if (ts.location != edm4hep::TrackState::AtLastHit) continue;
+            double B_outer = m_field.magneticField(dd4hep::Position(0,0,0)).z() / dd4hep::tesla;
+            // Use B at the muon hits (outer field)
             if (track.trackerHits_size() > 0) {
-                // Use average position of hits for better field estimate
-                double sumX = 0, sumY = 0, sumZ = 0;
-                for (int j = 0; j < track.trackerHits_size(); j++) {
-                    auto hit = track.getTrackerHits(j);
-                    sumX += hit.getPosition()[0] / 10.0;  // mm to cm
-                    sumY += hit.getPosition()[1] / 10.0;
-                    sumZ += hit.getPosition()[2] / 10.0;
+                auto h0 = track.getTrackerHits(0);
+                B_outer = m_field.magneticField(dd4hep::Position(
+                    h0.getPosition()[0]/10.0,
+                    h0.getPosition()[1]/10.0,
+                    h0.getPosition()[2]/10.0)).z() / dd4hep::tesla;
+            }
+            double pT_out = (std::abs(ts.omega) > 1e-12)
+                            ? 0.3 * std::abs(B_outer) * 1e-3 / std::abs(ts.omega) : 0.0;
+            double eta_out = std::asinh(ts.tanLambda);
+            info() << "  [Outer/AtLastHit]  pT=" << std::fixed << std::setprecision(2) << pT_out
+                   << " GeV  phi=" << std::setprecision(3) << ts.phi
+                   << " rad  eta=" << std::setprecision(3) << eta_out
+                   << "  d0=" << std::setprecision(2) << ts.D0/10.0 << " cm"
+                   << "  z0=" << ts.Z0/10.0 << " cm  (z at innermost hit)" << endmsg;
+            hasOuter = true;
+            break;
+        }
+
+        // ── Inner segment (AtIP, analytical) ─────────────────────────────────
+        bool hasIP = false;
+        for (int j = 0; j < track.trackStates_size(); ++j) {
+            auto ts = track.getTrackStates(j);
+            if (ts.location != edm4hep::TrackState::AtIP) continue;
+            double B_inner = m_field.magneticField(dd4hep::Position(0,0,0)).z() / dd4hep::tesla;
+            double pT_ip = (std::abs(ts.omega) > 1e-12)
+                           ? 0.3 * std::abs(B_inner) * 1e-3 / std::abs(ts.omega) : 0.0;
+            double eta_ip = std::asinh(ts.tanLambda);
+            info() << "  [Inner/AtIP]       pT=" << std::fixed << std::setprecision(2) << pT_ip
+                   << " GeV  phi=" << std::setprecision(3) << ts.phi
+                   << " rad  eta=" << std::setprecision(3) << eta_ip
+                   << "  d0=" << std::setprecision(2) << ts.D0/10.0 << " cm"
+                   << "  z0=" << ts.Z0/10.0 << " cm" << endmsg;
+            hasIP = true;
+            break;
+        }
+
+        // ── Truth comparison ──────────────────────────────────────────────────
+        // Find majority MCParticle from the track's hits
+        std::unordered_map<int, std::pair<edm4hep::MCParticle,int>> mcCount;
+        for (int j = 0; j < track.trackerHits_size(); ++j) {
+            auto hit = track.getTrackerHits(j);
+            auto it  = summarySimMap.find(hit.id().index);
+            if (it == summarySimMap.end()) continue;
+            auto mc = it->second.getParticle();
+            if (!mc.isAvailable()) continue;
+            mcCount[mc.id().index].first  = mc;
+            mcCount[mc.id().index].second++;
+        }
+        int bestN = 0;  edm4hep::MCParticle bestMC;  bool hasMC = false;
+        for (const auto& [idx, pr] : mcCount)
+            if (pr.second > bestN) { bestN = pr.second; bestMC = pr.first; hasMC = true; }
+
+        if (hasMC) {
+            const auto& mom = bestMC.getMomentum();
+            double mcPT  = std::sqrt(mom.x*mom.x + mom.y*mom.y);
+            double mcEta = (mcPT > 0) ? std::asinh(mom.z / mcPT) : 0.0;
+            double mcPhi = std::atan2(mom.y, mom.x);
+            const auto& vtx = bestMC.getVertex();
+            double mcD0 = (-vtx.x * std::sin(mcPhi) + vtx.y * std::cos(mcPhi)) / 10.0; // mm→cm
+            double mcZ0 = vtx.z / 10.0;  // mm → cm
+
+            info() << "  [Truth PDG=" << bestMC.getPDG() << " q=" << bestMC.getCharge()
+                   << "]        pT=" << std::fixed << std::setprecision(2) << mcPT
+                   << " GeV  phi=" << std::setprecision(3) << mcPhi
+                   << " rad  eta=" << std::setprecision(3) << mcEta
+                   << "  d0=" << std::setprecision(2) << mcD0 << " cm"
+                   << "  z0=" << mcZ0 << " cm" << endmsg;
+
+            // Resolution (AtIP vs truth) if available
+            if (hasIP) {
+                for (int j = 0; j < track.trackStates_size(); ++j) {
+                    auto ts = track.getTrackStates(j);
+                    if (ts.location != edm4hep::TrackState::AtIP) continue;
+                    double B_inner = m_field.magneticField(dd4hep::Position(0,0,0)).z()
+                                     / dd4hep::tesla;
+                    double pT_ip = (std::abs(ts.omega)>1e-12)
+                                   ? 0.3*std::abs(B_inner)*1e-3/std::abs(ts.omega) : 0.0;
+                    double dphi = ts.phi - mcPhi;
+                    while (dphi >  M_PI) dphi -= 2*M_PI;
+                    while (dphi < -M_PI) dphi += 2*M_PI;
+                    info() << "  [Resolution AtIP]  ΔpT/pT="
+                           << std::fixed << std::setprecision(1)
+                           << (mcPT>0 ? (pT_ip-mcPT)/mcPT*100.0 : 0.0) << "%"
+                           << "  Δphi=" << std::setprecision(4) << dphi << " rad"
+                           << "  Δeta=" << std::setprecision(4) << std::asinh(ts.tanLambda)-mcEta
+                           << "  Δd0=" << std::setprecision(2) << ts.D0/10.0-mcD0 << " cm"
+                           << "  Δz0=" << ts.Z0/10.0-mcZ0 << " cm" << endmsg;
+                    break;
                 }
-                fieldPos = dd4hep::Position(
-                    sumX / track.trackerHits_size(),
-                    sumY / track.trackerHits_size(),
-                    sumZ / track.trackerHits_size()
-                );
             }
-            
-            // Extract field value in Tesla
-            double bField = 0.0;
-            try {
-                bField = m_field.magneticField(fieldPos).z() / dd4hep::tesla;
-            } catch (...) {
-                bField = 0.0;  // Handle any field access errors
-            }
-            
-            // Calculate pT from omega and magnetic field
-            double omega = state.omega;
-            double pT = 0.3 * std::abs(bField) / std::abs(omega) * 0.001; // GeV/c
-            
-            // Calculate eta from tanLambda
-            double tanLambda = state.tanLambda;
-            double theta = std::atan2(1.0, tanLambda);
-            double eta = -std::log(std::tan(theta/2.0));
-            
-            // Calculate d0 and z0 in cm for display
-            double d0 = state.D0 / 10.0;  // mm to cm
-            double z0 = state.Z0 / 10.0;  // mm to cm
-            
-            // Display track information
-            info() << "Track " << i << ":" << endmsg;
-            info() << "  pT = " << pT << " GeV/c" << endmsg;
-            info() << "  phi = " << state.phi << " rad" << endmsg;
-            info() << "  eta = " << eta << endmsg;
-            info() << "  d0 = " << d0 << " cm" << endmsg;
-            info() << "  z0 = " << z0 << " cm" << endmsg;
-            info() << "  chi2/ndof = " << track.getChi2() / track.getNdf() << endmsg;
-            info() << "  # hits = " << track.trackerHits_size() << endmsg;
+        } else {
+            info() << "  [Truth] no MC link found" << endmsg;
         }
     }
-    
+
     // Bottom separator
     info() << std::string(80, '=') << "\n" << endmsg;
     
@@ -365,6 +414,7 @@ StatusCode DisplacedTracking::finalize() {
     int nOutlier       = m_statOutlierHitsRemoved.load();
     int nNeighbRej     = m_statNeighbourRejected.load();
     int nPTRej         = m_statComboPTRejected.load();
+    int nTanLRej       = m_statTanLambdaRejected.load();
     int nH3       = m_statNhit3.load();
     int nH4       = m_statNhit4.load();
     int nH5       = m_statNhit5.load();
@@ -373,7 +423,9 @@ StatusCode DisplacedTracking::finalize() {
     int nSL       = m_statStateAtLastHit.load();
     int nSO       = m_statStateAtOther.load();
     int nSV       = m_statStateAtVertex.load();
+    int nSIP      = m_statStateAtIP.load();
     int nProp     = m_statInnerPropSuccess.load();
+    int nAnalyt   = m_statAnalyticalPropSuccess.load();
     int nGF       = m_statGenFitSuccess.load();
     int nGFFail   = m_statGenFitFailed.load();
     int nGFIll    = m_statGenFitIllCond.load();
@@ -384,7 +436,8 @@ StatusCode DisplacedTracking::finalize() {
                         : 0.0;
     double trkPerEvt  = (nEvt > 0)    ? double(nTrk)  / double(nEvt)   : 0.0;
     double comboEff   = (nCombos > 0) ? 100.0*double(nValid)/double(nCombos) : 0.0;
-    double propFrac   = (nTrk > 0)    ? 100.0*double(nProp) / double(nTrk)  : 0.0;
+    double propFrac   = (nTrk > 0)    ? 100.0*double(nProp)   / double(nTrk) : 0.0;
+    double analFrac   = (nTrk > 0)    ? 100.0*double(nAnalyt) / double(nTrk) : 0.0;
     double gfFrac     = (nTrk > 0)    ? 100.0*double(nGF)   / double(nTrk)  : 0.0;
     double avgOutlier = (nValid > 0)  ? double(nOutlier)/double(nValid) : 0.0;
     info() << "\n"
@@ -414,6 +467,7 @@ StatusCode DisplacedTracking::finalize() {
         << "║    Outlier hits removed       : " << std::setw(7) << nOutlier<< "  (" << std::setw(5) << std::fixed << std::setprecision(2) << avgOutlier << " / track)      ║\n"
         << "║    Rejected by neighbour gate : " << std::setw(7) << nNeighbRej     << "                   ║\n"
         << "║    Rejected by MaxComboPT     : " << std::setw(7) << nPTRej         << "                   ║\n"
+        << "║    Rejected by tanλ dev cut   : " << std::setw(7) << nTanLRej       << "                   ║\n"
         << "╠══════════════════════════════════════════════════════════╣\n"
         << "║  HIT MULTIPLICITY PER TRACK                              ║\n"
         << "║    3 hits                     : " << std::setw(7) << nH3     << "                   ║\n"
@@ -425,10 +479,12 @@ StatusCode DisplacedTracking::finalize() {
         << "║  TRACK STATES STORED                                     ║\n"
         << "║    AtLastHit   (N-hit circle) : " << std::setw(7) << nSL     << "                   ║\n"
         << "║    AtOther     (GenFit fit)   : " << std::setw(7) << nSO     << "                   ║\n"
-        << "║    AtVertex    (inner prop.)  : " << std::setw(7) << nSV     << "                   ║\n"
+        << "║    AtVertex    (RK4 inner)    : " << std::setw(7) << nSV     << "                   ║\n"
+        << "║    AtIP        (analytical)   : " << std::setw(7) << nSIP    << "                   ║\n"
         << "╠══════════════════════════════════════════════════════════╣\n"
         << "║  DOWNSTREAM PROCESSING                                   ║\n"
-        << "║    Inner solenoid prop. OK    : " << std::setw(7) << nProp   << "  (" << std::setw(5) << std::fixed << std::setprecision(1) << propFrac << "% of tracks)  ║\n"
+        << "║    RK4 inner prop. OK         : " << std::setw(7) << nProp   << "  (" << std::setw(5) << std::fixed << std::setprecision(1) << propFrac << "% of tracks)  ║\n"
+        << "║    Analytical inner prop. OK  : " << std::setw(7) << nAnalyt << "  (" << std::setw(5) << std::fixed << std::setprecision(1) << analFrac << "% of tracks)  ║\n"
         << "║    GenFit fit succeeded       : " << std::setw(7) << nGF     << "  (" << std::setw(5) << std::fixed << std::setprecision(1) << gfFrac   << "% of tracks)  ║\n"
         << "╠══════════════════════════════════════════════════════════╣\n"
         << "║  GENFIT DETAILS                                          ║\n"
@@ -666,13 +722,8 @@ void DisplacedTracking::findTracks(
     // the missing setU/setV copies below are the root cause.
     if (msgLevel(MSG::DEBUG) && hits->size() > 0) {
         const auto& dbgHit = (*hits)[0];
-        debug() << "[UV-DEBUG] Input hit[0]:"
-                << "  u=(" << dbgHit.getU().a << "," << dbgHit.getU().b << ")"
-                << "  v=(" << dbgHit.getV().a << "," << dbgHit.getV().b << ")"
-                << "  du=" << dbgHit.getDu()
-                << "  dv=" << dbgHit.getDv()
-                << "  cellID=" << dbgHit.getCellID()
-                << endmsg;
+        // [UV-DEBUG] disabled
+        // debug() << "[UV-DEBUG] Input hit[0]: ...";
     }
 
     // Build a map from input TrackerHitPlane objectID -> SimTrackerHit
@@ -1065,6 +1116,7 @@ void DisplacedTracking::findTracks(
         int evtPhiSpreadRej  = 0;  // rejected by MaxComboPhiSpread
         int evtConsecDistRej = 0;  // rejected by MaxConsecutiveHitDistance
         int evtPairDistRej   = 0;  // rejected by MaxPairHitDistance
+        int evtTanLambdaRej  = 0;  // rejected by MaxComboTanLambdaDev
 
         // ── Quality-cut lambdas ───────────────────────────────────────────────────
 
@@ -1214,6 +1266,42 @@ void DisplacedTracking::findTracks(
             return true;
         };
 
+        // tanλ consistency: for a real track tanλ = Δz/chord_xy is nearly constant across
+        // all consecutive hit pairs. Delta-ray loops and cross-particle fakes produce hits
+        // with wildly different dip angles, making the per-pair tanλ values scatter by O(1).
+        auto passesTanLambdaCut = [&](const std::vector<size_t>& gIdxVec) -> bool {
+            const double maxDev = m_maxComboTanLambdaDev.value();
+            if (maxDev <= 0.0) return true;
+            const int nH = static_cast<int>(gIdxVec.size());
+            if (nH < 3) return true;
+
+            std::vector<double> tanLPairs;
+            tanLPairs.reserve(nH - 1);
+            for (int i = 0; i < nH - 1; ++i) {
+                const auto& pa = (*hits)[gIdxVec[i]].getPosition();
+                const auto& pb = (*hits)[gIdxVec[i+1]].getPosition();
+                double dxy = std::sqrt((pb[0]-pa[0])*(pb[0]-pa[0]) + (pb[1]-pa[1])*(pb[1]-pa[1]));
+                if (dxy < 1.0) continue;  // skip degenerate pairs (< 1 mm transverse separation)
+                tanLPairs.push_back((pb[2] - pa[2]) / dxy);
+            }
+            if (static_cast<int>(tanLPairs.size()) < 2) return true;
+
+            std::vector<double> sorted = tanLPairs;
+            std::sort(sorted.begin(), sorted.end());
+            double median = sorted[sorted.size() / 2];
+
+            for (double tl : tanLPairs) {
+                if (std::abs(tl - median) > maxDev) {
+                    debug() << "    tanLambda FAIL: pair tanL=" << tl
+                            << " median=" << median
+                            << " |dev|=" << std::abs(tl - median)
+                            << " cut=" << maxDev << endmsg;
+                    return false;
+                }
+            }
+            return true;
+        };
+
         // ── Build per-compositeID hit lists for the structured combinatorial loop ─
         // Each combination must use exactly ONE hit from each compositeID (detector
         // region).  Iterating over compositeIDs first and picking one hit from each
@@ -1350,6 +1438,11 @@ void DisplacedTracking::findTracks(
                                 evtIsoRej++;
                                 debug() << "  k=" << k << " " << comboLabel()
                                         << " -> REJECT isolation" << endmsg;
+                            } else if (!passesTanLambdaCut(gIdxVec)) {
+                                m_statTanLambdaRejected++;
+                                evtTanLambdaRej++;
+                                debug() << "  k=" << k << " " << comboLabel()
+                                        << " -> REJECT tanLambda dev" << endmsg;
                             } else {
                                 m_statTotalTripletCombos++;
                                 evtCombosEval++;
@@ -1372,6 +1465,8 @@ void DisplacedTracking::findTracks(
                                 } else if (cchi2ndf >= m_nHitMaxChi2NDF.value()) {
                                     evtChi2Rej++;
                                     debug() << "  k=" << k << " " << comboLabel()
+                                            << " pT=" << std::fixed << std::setprecision(1)
+                                            << (0.3 * absBRefForK3 * cr / 100.0) << " GeV"
                                             << " chi2/ndf=" << cchi2ndf
                                             << " -> REJECT chi2 threshold="
                                             << m_nHitMaxChi2NDF.value() << endmsg;
@@ -1470,6 +1565,7 @@ void DisplacedTracking::findTracks(
                                             + (w > 0.0 ? w * bestCombo.avgProxCm / edepNorm : 0.0);
                                         isBetter = (cScore < bScore);
                                     }
+                                    const double comboPT = 0.3 * absBRefForK3 * cr / 100.0;
                                     if (isBetter) {
                                         bestCombo.hiiVec    = hiiVec;
                                         bestCombo.gIdxVec   = gIdxVec;
@@ -1483,10 +1579,14 @@ void DisplacedTracking::findTracks(
                                         bestCombo.nHits     = k;
                                         foundCombination    = true;
                                         debug() << "  k=" << k << " " << comboLabel()
+                                                << " pT=" << std::fixed << std::setprecision(1)
+                                                << comboPT << " GeV"
                                                 << " chi2/ndf=" << cchi2ndf
                                                 << " -> NEW BEST" << endmsg;
                                     } else {
                                         debug() << "  k=" << k << " " << comboLabel()
+                                                << " pT=" << std::fixed << std::setprecision(1)
+                                                << comboPT << " GeV"
                                                 << " chi2/ndf=" << cchi2ndf
                                                 << " -> not better (best k="
                                                 << bestCombo.nHits << " chi2/ndf="
@@ -1526,6 +1626,7 @@ void DisplacedTracking::findTracks(
                << " consecDistRej=" << evtConsecDistRej
                << " pairDistRej=" << evtPairDistRej
                << " isoRej=" << evtIsoRej
+               << " tanLRej=" << evtTanLambdaRej
                << " chi2Rej=" << evtChi2Rej
                << " fitFail=" << evtFitFail
                << " edepRej=" << evtEdepRej
@@ -1937,8 +2038,6 @@ void DisplacedTracking::findTracks(
             trackCandidates.emplace_back(nhSeedTrack, pTN, bestCombo.gIdxVec, usedComps);
         }
 
-        debug() << "Phase A: Trying inner-layer seeding (layers 0,1,2) for iteration " << trackNumber << "..." << endmsg;
-
         // N-hit strategy: candidateTracks always has exactly one entry (the best combination)
         if (trackCandidates.empty()) {
             info() << "No track candidates found in iteration " << trackNumber << " - stopping track search" << endmsg;
@@ -2339,10 +2438,7 @@ void DisplacedTracking::findTracks(
                 outHit.setDv(hit.getDv());
                 outHit.setU(hit.getU());  // measurement direction vectors
                 outHit.setV(hit.getV());
-                debug() << "[UV-DEBUG] findTracks fallback outHit:"
-                        << "  u=(" << outHit.getU().a << "," << outHit.getU().b << ")"
-                        << "  v=(" << outHit.getV().a << "," << outHit.getV().b << ")"
-                        << "  du=" << outHit.getDu() << "  dv=" << outHit.getDv() << endmsg;
+                // [UV-DEBUG] disabled
                 propagateLink(outHit, hit);
                 finalTrack.addToTrackerHits(outHit);
             }
@@ -2424,8 +2520,11 @@ void DisplacedTracking::findTracks(
                 info() << "    Outer R=" << std::sqrt(pos.x()*pos.x() + pos.y()*pos.y())
                     << " cm, |p|=" << mom.norm() << " GeV/c" << endmsg;
                 
+                // Charge sign from omega: omega>0 → positive charge (EDM4hep convention)
+                double chargeSign = (omega > 0.0) ? 1.0 : -1.0;
+
                 // Propagate using RK4 to m_innerPropTargetRadius
-                auto inner = propagateToInner(pos, mom, m_innerPropTargetRadius);
+                auto inner = propagateToInner(pos, mom, m_innerPropTargetRadius, chargeSign);
                 
                 if (inner.success) {
                     m_statInnerPropSuccess++;
@@ -2489,7 +2588,61 @@ void DisplacedTracking::findTracks(
             }
         }
         } // end if (m_doInnerPropagation)
-        // ===== END INNER PROPAGATION =====
+        // ===== END INNER PROPAGATION (RK4) =====
+
+        // ===== ANALYTICAL TWO-SEGMENT INNER PROPAGATION → AtIP ===============
+        // Always runs (independent of DoInnerPropagation).  Reconstructs the
+        // inner segment analytically by reversing the outer helix at the
+        // solenoid boundary and saves the result as TrackState::AtIP.
+        if (foundCombination && std::abs(bestCombo.omega_mm) > 1e-10
+            && finalTrack.trackerHits_size() > 0)
+        {
+            // Reconstruct outer circle center from stored helix parameters
+            double R_outer_anal = 1.0 / (std::abs(bestCombo.omega_mm) * 10.0);  // cm
+            double alpha_c = bestCombo.phi_rad + bestCombo.charge * M_PI / 2.0;
+            double cx_o_anal = (bestCombo.d0_cm + R_outer_anal) * std::cos(alpha_c);
+            double cy_o_anal = (bestCombo.d0_cm + R_outer_anal) * std::sin(alpha_c);
+
+            // Use the innermost muon-system hit as the reference anchor
+            auto refHit = finalTrack.getTrackerHits(0);
+            double xr = refHit.getPosition()[0] / 10.0;  // mm → cm
+            double yr = refHit.getPosition()[1] / 10.0;
+            double zr = refHit.getPosition()[2] / 10.0;
+
+            // Determine barrel vs endcap from the hit's composite cell ID type field:
+            //   typeID == 0 → barrel disk → barrel solenoid crossing
+            //   typeID != 0 → endcap disk → solenoid endcap crossing
+            bool isEndcapHit = (getTypeID(refHit.getCellID()) != 0);
+            debug() << "  [Analytical] Ref hit typeID=" << getTypeID(refHit.getCellID())
+                    << "  -> " << (isEndcapHit ? "endcap" : "barrel") << " crossing" << endmsg;
+
+            bool atIPok = analyticalInnerPropagation(
+                cx_o_anal, cy_o_anal, R_outer_anal,
+                bestCombo.omega_mm, bestCombo.pT, bestCombo.tanLambda,
+                xr, yr, zr,
+                isEndcapHit,
+                finalTrack);
+
+            if (atIPok) {
+                m_statAnalyticalPropSuccess++;
+                // ── Truth comparison (prompt muon gun: expect d0≈0, z0≈0) ──
+                try {
+                    if (m_mcParticles.exist()) {
+                        const auto* mcParts = m_mcParticles.get();
+                        if (mcParts && !mcParts->empty()) {
+                            edm4hep::Track tv = finalTrack;
+                            compareStatesWithTruth(tv, *mcParts, trackNumber);
+                        }
+                    }
+                } catch (const std::exception& e) {
+                    debug() << "[TruthCmp] Exception: " << e.what() << endmsg;
+                }
+            } else {
+                debug() << "  [Analytical] AtIP propagation failed for track "
+                        << trackNumber << endmsg;
+            }
+        }
+        // ===== END ANALYTICAL INNER PROPAGATION ==============================
 
         // ======================= Printing final track=============================
         info() << "Successfully created track " << trackNumber
@@ -2498,19 +2651,21 @@ void DisplacedTracking::findTracks(
 
         // ---- per-track run statistics ----
         m_statTracksReconstructed++;
-        bool hasLastHit = false, hasOther = false, hasVertex = false;
+        bool hasLastHit = false, hasOther = false, hasVertex = false, hasIP = false;
         for (int sIdx = 0; sIdx < finalTrack.trackStates_size(); ++sIdx) {
             auto ts = finalTrack.getTrackStates(sIdx);
             switch (ts.location) {
-                case edm4hep::TrackState::AtLastHit:     hasLastHit = true; break;
-                case edm4hep::TrackState::AtOther:       hasOther   = true; break;
-                case edm4hep::TrackState::AtVertex:      hasVertex  = true; break;
+                case edm4hep::TrackState::AtLastHit:  hasLastHit = true; break;
+                case edm4hep::TrackState::AtOther:    hasOther   = true; break;
+                case edm4hep::TrackState::AtVertex:   hasVertex  = true; break;
+                case edm4hep::TrackState::AtIP:       hasIP      = true; break;
                 default: break;
             }
         }
         if (hasLastHit) m_statStateAtLastHit++;
         if (hasOther)   m_statStateAtOther++;
-        if (hasVertex)      m_statStateAtVertex++;
+        if (hasVertex)  m_statStateAtVertex++;
+        if (hasIP)      m_statStateAtIP++;
         if (hasLastHit) m_statFourHitTracks++; else m_statThreeHitTracks++;  // legacy
 
         // N-hit multiplicity distribution
@@ -2641,8 +2796,8 @@ void DisplacedTracking::findTracks(
 }
 
 /*
-// This calculates d0 using a two-segment track model for field transitions
-double DisplacedTracking::calculateImpactParameter(
+// (old stub kept as reference – superseded by analyticalInnerPropagation below)
+double DisplacedTracking::calculateImpactParameter_OLD(
     double x0, double y0, double radius, bool clockwise,
     double innerFieldStrength, double outerFieldStrength,
     const Eigen::Vector3d& p1, const Eigen::Vector3d& p2, const Eigen::Vector3d& p3) const{
@@ -2905,6 +3060,218 @@ double DisplacedTracking::calculateImpactParameter(
     return d0;
 }
 */
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Analytical two-segment inner propagation  (barrel + endcap)
+//
+// The solenoid boundary is a closed surface: a barrel cylinder at R = R_sol
+// and two endcap disks at |z| = Z_sol.  Tracks entering from the barrel side
+// have their innermost muon-system hit at R_ref > R_sol; endcap tracks have
+// R_ref < R_sol (their hits are on the endcap disks inside the barrel radius).
+// Both cases share the same inner-helix construction once the crossing point
+// (xc_sol, yc_sol, z_sol) on the solenoid surface is known.
+// ─────────────────────────────────────────────────────────────────────────────
+bool DisplacedTracking::analyticalInnerPropagation(
+    double cx_o, double cy_o, double R_outer,
+    double omega_outer_mm,
+    double pT,
+    double tanLambda,
+    double x_ref, double y_ref, double z_ref,
+    bool   isEndcap,
+    edm4hep::MutableTrack& finalTrack) const {
+
+    // ── Helpers ──────────────────────────────────────────────────────────────
+    auto normAngle = [](double a) -> double {   // → (−π, π]
+        while (a >  M_PI) a -= 2.0*M_PI;
+        while (a < -M_PI) a += 2.0*M_PI;
+        return a;
+    };
+    auto normPos = [](double a) -> double {     // → [0, 2π)
+        a = std::fmod(a, 2.0*M_PI);
+        if (a < 0.0) a += 2.0*M_PI;
+        return a;
+    };
+
+    const double R_sol = m_solenoidBoundaryMm / 10.0;   // mm → cm
+    const double Z_sol = m_solenoidHalfZmm    / 10.0;   // mm → cm
+
+    // Sign that encodes the backward direction on the outer circle:
+    //   CW outer (omega<0): backward = increasing θ → +1
+    //   CCW outer (omega>0): backward = decreasing θ → -1
+    // This same sign is the curvature-reversal sign for the inner helix.
+    const double inner_sign = (omega_outer_mm < 0) ? 1.0 : -1.0;
+
+    // isEndcap is passed in from the call site, determined from the hit composite
+    // ID (typeID != 0 means endcap disk hit).  This is more reliable than the
+    // geometric R_ref < R_sol test, which can give the wrong answer when the
+    // solenoid boundary radius is close to the hit transverse position.
+    // (kept as a fallback: if cell-ID type information is unavailable, the caller
+    // passes isEndcapHit = (R_ref < R_sol) using the geometry instead.)
+
+    // ── Solenoid boundary crossing ────────────────────────────────────────────
+    double xc_sol, yc_sol, z_sol;
+
+    if (!isEndcap) {
+        // ── BARREL: intersect outer circle with solenoid cylinder ────────────
+        double d_oc = std::sqrt(cx_o*cx_o + cy_o*cy_o);
+        if (d_oc < 1e-6) {
+            debug() << "  [Analytical] Barrel: outer circle center at IP – degenerate" << endmsg;
+            return false;
+        }
+        if (R_outer <= std::abs(d_oc - R_sol) || R_outer >= d_oc + R_sol) {
+            debug() << "  [Analytical] Barrel: outer circle does not cross solenoid"
+                    << "  d_oc=" << d_oc << " R_outer=" << R_outer
+                    << " R_sol=" << R_sol << endmsg;
+            return false;
+        }
+
+        double h   = (R_sol*R_sol + d_oc*d_oc - R_outer*R_outer) / (2.0 * d_oc);
+        double l   = std::sqrt(std::max(0.0, R_sol*R_sol - h*h));
+        double ex  = cx_o / d_oc,  ey = cy_o / d_oc;
+        double px  = -ey,          py = ex;
+
+        double P1x = h*ex + l*px,  P1y = h*ey + l*py;
+        double P2x = h*ex - l*px,  P2y = h*ey - l*py;
+
+        // Select the crossing first reached going backward from the reference hit
+        double theta_hit = std::atan2(y_ref - cy_o, x_ref - cx_o);
+        auto bwdArc = [&](double Px, double Py) -> double {
+            double tc = std::atan2(Py - cy_o, Px - cx_o);
+            return (omega_outer_mm < 0) ? normPos(tc - theta_hit)
+                                        : normPos(theta_hit - tc);
+        };
+        double arc1 = bwdArc(P1x, P1y);
+        double arc2 = bwdArc(P2x, P2y);
+        double arc_back;
+        if (arc1 <= arc2) { xc_sol = P1x; yc_sol = P1y; arc_back = arc1; }
+        else              { xc_sol = P2x; yc_sol = P2y; arc_back = arc2; }
+
+        double s_bwd = R_outer * arc_back;
+        z_sol = z_ref - tanLambda * s_bwd;
+
+        debug() << "  [Analytical] Barrel crossing: (" << xc_sol << ", " << yc_sol
+                << ") cm  bwd arc=" << s_bwd << " cm  z_sol=" << z_sol << " cm" << endmsg;
+
+    } else {
+        // ── ENDCAP: intersect outer helix with solenoid endcap disk at |z|=Z_sol
+        //
+        // The B-field reverses at |z| = Z_sol just as it does at R = R_sol.
+        // Going backward from the reference hit, the z advances toward 0.
+        // We find the transverse arc s such that z(s) = z_cap = ±Z_sol,
+        // then compute the (x,y) on the outer circle at that arc.
+        if (std::abs(tanLambda) < 1e-6) {
+            debug() << "  [Analytical] Endcap: |tanLambda| too small to extrapolate z" << endmsg;
+            return false;
+        }
+
+        // z_cap carries the same sign as z_ref (negative-z endcap or positive-z endcap)
+        double z_cap = (z_ref < 0.0) ? -Z_sol : +Z_sol;
+
+        // Backward transverse arc to reach z = z_cap:  z_ref - tanLambda*s = z_cap
+        double s_endcap = (z_ref - z_cap) / tanLambda;
+        if (s_endcap < 0.0) {
+            // Reference hit is already closer to IP than the endcap cap — skip
+            debug() << "  [Analytical] Endcap: z_ref=" << z_ref
+                    << " cm already past cap z=" << z_cap
+                    << " cm (s=" << s_endcap << ") – skip" << endmsg;
+            return false;
+        }
+        if (s_endcap > 2.0 * M_PI * R_outer) {
+            debug() << "  [Analytical] Endcap: backward arc would exceed one loop – skip" << endmsg;
+            return false;
+        }
+
+        // Angular step on the outer circle going backward
+        double theta_ref = std::atan2(y_ref - cy_o, x_ref - cx_o);
+        double d_theta   = s_endcap / R_outer;
+        double theta_cap = theta_ref + inner_sign * d_theta;
+
+        xc_sol = cx_o + R_outer * std::cos(theta_cap);
+        yc_sol = cy_o + R_outer * std::sin(theta_cap);
+        z_sol  = z_cap;
+
+        debug() << "  [Analytical] Endcap crossing: (" << xc_sol << ", " << yc_sol
+                << ", " << z_sol << ") cm  bwd arc=" << s_endcap << " cm" << endmsg;
+    }
+
+    // ── Common: tangent and outward radial at the solenoid crossing ───────────
+    double rx = (xc_sol - cx_o) / R_outer;
+    double ry = (yc_sol - cy_o) / R_outer;
+    // Forward momentum direction at the crossing (same convention as convertToGenFitState)
+    double tx = (omega_outer_mm < 0) ? -ry :  ry;
+    double ty = (omega_outer_mm < 0) ?  rx : -rx;
+    debug() << "  [Analytical] Tangent: (" << tx << ", " << ty
+            << ")  outward radial: (" << rx << ", " << ry << ")" << endmsg;
+
+    // ── Inner B field (queried at the beam axis, well inside the solenoid) ────
+    double B_inner = m_field.magneticField(dd4hep::Position(0.0, 0.0, 0.0)).z()
+                     / dd4hep::tesla;
+    if (std::abs(B_inner) < 1e-6) {
+        debug() << "  [Analytical] Inner B field vanishes (" << B_inner << " T)" << endmsg;
+        return false;
+    }
+
+    // ── Inner circle ──────────────────────────────────────────────────────────
+    // pT conserved; B reverses → curvature reverses → circle on opposite side.
+    // Outer centripetal: crossing → outer center  (inward = −radial direction)
+    // Inner centripetal: crossing → inner center  (outward = +radial direction)
+    double R_inner = pT * 100.0 / (0.3 * std::abs(B_inner));   // cm
+    double cx_i    = xc_sol + R_inner * rx;
+    double cy_i    = yc_sol + R_inner * ry;
+
+    double B_outer_approx = pT * 100.0 / (0.3 * R_outer);
+    debug() << "  [Analytical] Inner circle: center=(" << cx_i << ", " << cy_i
+            << ") cm  R_inner=" << R_inner << " cm"
+            << "  B_inner=" << B_inner << " T  |B_outer|≈" << B_outer_approx << " T" << endmsg;
+
+    // ── Inner helix parameters at the 2-D perigee (CCA to z-axis) ────────────
+    double d0_inner_cm    = std::sqrt(cx_i*cx_i + cy_i*cy_i) - R_inner;
+    double phi0_inner     = normAngle(std::atan2(cy_i, cx_i) - inner_sign * M_PI / 2.0);
+    double omega_inner_mm = inner_sign / (R_inner * 10.0);   // 1/mm, signed
+
+    // ── z at inner perigee ────────────────────────────────────────────────────
+    // Trace the inner helix backward from the solenoid crossing to its perigee.
+    //   omega_inner > 0 (CCW inner): bwd arc = normPos(θ_crossing − θ_perigee)
+    //   omega_inner < 0 (CW  inner): bwd arc = normPos(θ_perigee  − θ_crossing)
+    // For prompt tracks the perigee is always reachable within half a revolution;
+    // normPos can wrap a near-zero angle to ≈2π for large R_inner (near-straight
+    // tracks), so we take the shorter of the two arcs (< π).
+    double theta_c  = std::atan2(yc_sol - cy_i, xc_sol - cx_i);
+    double theta_ip = std::atan2(-cy_i,  -cx_i);
+    double bwd_arc_inner = (omega_inner_mm > 0) ? normPos(theta_c  - theta_ip)
+                                                 : normPos(theta_ip - theta_c);
+    if (bwd_arc_inner > M_PI)
+        bwd_arc_inner = 2.0 * M_PI - bwd_arc_inner;
+
+    double s_sol_to_ip  = R_inner * bwd_arc_inner;
+    double z0_inner_cm  = z_sol - tanLambda * s_sol_to_ip;
+
+    debug() << "  [Analytical] Inner perigee:"
+            << "  d0=" << d0_inner_cm << " cm"
+            << "  phi=" << phi0_inner << " rad"
+            << "  omega=" << omega_inner_mm << " /mm"
+            << "  z0=" << z0_inner_cm << " cm"
+            << "  (bwd arc=" << s_sol_to_ip << " cm)" << endmsg;
+
+    // ── Save AtIP state ────────────────────────────────────────────────────────
+    edm4hep::TrackState atIPState = createTrackState(
+        d0_inner_cm  * 10.0,    // cm → mm
+        phi0_inner,
+        omega_inner_mm,
+        z0_inner_cm  * 10.0,    // cm → mm
+        tanLambda,
+        edm4hep::TrackState::AtIP
+    );
+    finalTrack.addToTrackStates(atIPState);
+
+    info() << "  [Analytical] AtIP (" << (isEndcap ? "endcap" : "barrel") << ") saved:"
+           << "  d0=" << d0_inner_cm << " cm"
+           << "  phi=" << phi0_inner << " rad"
+           << "  omega=" << omega_inner_mm << " /mm"
+           << "  z0=" << z0_inner_cm << " cm" << endmsg;
+
+    return true;
+}
 
 // ------------------------------------ //
 // -------------- GenFit -------------- //
@@ -3502,10 +3869,7 @@ bool DisplacedTracking::fitTrackWithGenFit(
                 outHit.setPosition(hit.getPosition()); outHit.setCovMatrix(hit.getCovMatrix());
                 outHit.setDu(hit.getDu()); outHit.setDv(hit.getDv());
                 outHit.setU(hit.getU()); outHit.setV(hit.getV());  // measurement direction vectors
-                debug() << "[UV-DEBUG] fitTrackWithGenFit outHit:"
-                        << "  u=(" << outHit.getU().a << "," << outHit.getU().b << ")"
-                        << "  v=(" << outHit.getV().a << "," << outHit.getV().b << ")"
-                        << "  du=" << outHit.getDu() << "  dv=" << outHit.getDv() << endmsg;
+                // [UV-DEBUG] disabled
                 propagateLink(outHit, hit);
                 finalTrack.addToTrackerHits(outHit);
             }
@@ -3715,21 +4079,290 @@ int DisplacedTracking::getPDGCode() const {
 }
 
 // ============================================================================
+// SOLENOID BOUNDARY SCAN
+// ============================================================================
+double DisplacedTracking::findSolenoidBoundary() const {
+    // Scan B_z along the +x axis (y=z=0) in 1 mm steps around the nominal radius
+    // to bracket the sign change, then binary-search for < 0.01 mm precision.
+
+    const double nominalMm  = m_solenoidRadius.value();
+    const double stepMm     = 1.0;
+    const double scanRangeMm = 600.0;   // look up to ±600 mm from nominal
+
+    // B_z query helper (radius in mm, z=0)
+    auto getBz = [&](double R_mm) -> double {
+        double R_cm = R_mm / 10.0;
+        return m_field.magneticField(dd4hep::Position(R_cm, 0.0, 0.0)).z() / dd4hep::tesla;
+    };
+
+    double Bz0 = getBz(nominalMm);
+    info() << "  [SolScan] B_z at nominal R=" << nominalMm << " mm: " << Bz0 << " T" << endmsg;
+
+    // Find bracket in both directions and pick the one that finds it first
+    double R_lo = -1.0, R_hi = -1.0;
+
+    // Try outward scan
+    {
+        double Bz_prev = Bz0, R_prev = nominalMm;
+        for (double R = nominalMm + stepMm; R <= nominalMm + scanRangeMm; R += stepMm) {
+            double Bz = getBz(R);
+            if (Bz * Bz_prev < 0.0) { R_lo = R_prev; R_hi = R; break; }
+            Bz_prev = Bz; R_prev = R;
+        }
+    }
+    // Try inward scan if outward failed or to compare
+    if (R_lo < 0.0) {
+        double Bz_prev = Bz0, R_prev = nominalMm;
+        for (double R = nominalMm - stepMm;
+             R >= std::max(10.0, nominalMm - scanRangeMm); R -= stepMm) {
+            double Bz = getBz(R);
+            if (Bz * Bz_prev < 0.0) { R_lo = R; R_hi = R_prev; break; }
+            Bz_prev = Bz; R_prev = R;
+        }
+    }
+
+    if (R_lo < 0.0) {
+        warning() << "  [SolScan] No B_z sign change found within ±" << scanRangeMm
+                  << " mm of nominal R=" << nominalMm << " mm — using nominal." << endmsg;
+        return nominalMm;
+    }
+
+    // Log the 1-mm bracket
+    info() << "  [SolScan] Coarse bracket: R_lo=" << R_lo << " mm (Bz=" << getBz(R_lo)
+           << " T)  R_hi=" << R_hi << " mm (Bz=" << getBz(R_hi) << " T)" << endmsg;
+
+    // Print field at every 1 mm within the bracket ± 5 mm for context
+    info() << "  [SolScan] Fine field profile near boundary:" << endmsg;
+    for (double R = std::max(10.0, R_lo - 5.0); R <= R_hi + 5.0; R += 1.0) {
+        info() << "    R=" << std::setw(7) << std::fixed << std::setprecision(1) << R
+               << " mm  Bz=" << std::setw(9) << std::setprecision(4) << getBz(R) << " T" << endmsg;
+    }
+
+    // Binary search for sub-mm precision
+    for (int iter = 0; iter < 40; ++iter) {
+        double R_mid = 0.5 * (R_lo + R_hi);
+        double Bz_mid = getBz(R_mid);
+        double Bz_lo  = getBz(R_lo);
+        if (Bz_mid * Bz_lo < 0.0) R_hi = R_mid; else R_lo = R_mid;
+        if (R_hi - R_lo < 0.01) break;   // converged to 0.01 mm
+    }
+
+    double boundary = 0.5 * (R_lo + R_hi);
+    info() << "  [SolScan] Boundary (Bz=0): R = " << std::fixed << std::setprecision(2)
+           << boundary << " mm  (Bz_lo=" << std::setprecision(4) << getBz(R_lo)
+           << " T, Bz_hi=" << getBz(R_hi) << " T)" << endmsg;
+    return boundary;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Scan B_z along the z-axis (x=y=0) to find the solenoid endcap boundary.
+// Same algorithm as findSolenoidBoundary() but in z instead of R.
+// ─────────────────────────────────────────────────────────────────────────────
+double DisplacedTracking::findSolenoidBoundaryZ() const {
+    const double nominalMm   = m_solenoidHalfZ.value();
+    const double stepMm      = 1.0;
+    const double scanRangeMm = 600.0;
+
+    // B_z query along z-axis (x=y=0)
+    auto getBz = [&](double Z_mm) -> double {
+        double Z_cm = Z_mm / 10.0;
+        return m_field.magneticField(dd4hep::Position(0.0, 0.0, Z_cm)).z() / dd4hep::tesla;
+    };
+
+    double Bz0 = getBz(nominalMm);
+    info() << "  [SolScanZ] B_z at nominal |Z|=" << nominalMm << " mm: " << Bz0 << " T" << endmsg;
+
+    // If B_z is already ≈ 0 at the nominal, we are exactly at the boundary — no scan needed.
+    if (std::abs(Bz0) < 0.01) {
+        info() << "  [SolScanZ] Nominal |Z|=" << nominalMm
+               << " mm is already at Bz=0 — using nominal as endcap boundary." << endmsg;
+        return nominalMm;
+    }
+
+    double Z_lo = -1.0, Z_hi = -1.0;
+
+    // Outward scan (increasing |z|)
+    {
+        double Bz_prev = Bz0, Z_prev = nominalMm;
+        for (double Z = nominalMm + stepMm; Z <= nominalMm + scanRangeMm; Z += stepMm) {
+            double Bz = getBz(Z);
+            if (Bz * Bz_prev < 0.0) { Z_lo = Z_prev; Z_hi = Z; break; }
+            Bz_prev = Bz; Z_prev = Z;
+        }
+    }
+    // Inward scan (decreasing |z|) if outward failed
+    if (Z_lo < 0.0) {
+        double Bz_prev = Bz0, Z_prev = nominalMm;
+        for (double Z = nominalMm - stepMm;
+             Z >= std::max(10.0, nominalMm - scanRangeMm); Z -= stepMm) {
+            double Bz = getBz(Z);
+            if (Bz * Bz_prev < 0.0) { Z_lo = Z; Z_hi = Z_prev; break; }
+            Bz_prev = Bz; Z_prev = Z;
+        }
+    }
+
+    if (Z_lo < 0.0) {
+        warning() << "  [SolScanZ] No B_z sign change found within ±" << scanRangeMm
+                  << " mm of nominal |Z|=" << nominalMm << " mm — using nominal." << endmsg;
+        return nominalMm;
+    }
+
+    info() << "  [SolScanZ] Coarse bracket: Z_lo=" << Z_lo << " mm (Bz=" << getBz(Z_lo)
+           << " T)  Z_hi=" << Z_hi << " mm (Bz=" << getBz(Z_hi) << " T)" << endmsg;
+
+    // Fine profile ±5 mm around bracket
+    info() << "  [SolScanZ] Fine field profile near endcap boundary:" << endmsg;
+    for (double Z = std::max(10.0, Z_lo - 5.0); Z <= Z_hi + 5.0; Z += 1.0) {
+        info() << "    |Z|=" << std::setw(7) << std::fixed << std::setprecision(1) << Z
+               << " mm  Bz=" << std::setw(9) << std::setprecision(4) << getBz(Z) << " T" << endmsg;
+    }
+
+    // Binary search to 0.01 mm
+    for (int iter = 0; iter < 40; ++iter) {
+        double Z_mid  = 0.5 * (Z_lo + Z_hi);
+        double Bz_mid = getBz(Z_mid);
+        double Bz_lo  = getBz(Z_lo);
+        if (Bz_mid * Bz_lo < 0.0) Z_hi = Z_mid; else Z_lo = Z_mid;
+        if (Z_hi - Z_lo < 0.01) break;
+    }
+
+    double boundary = 0.5 * (Z_lo + Z_hi);
+    info() << "  [SolScanZ] Boundary (Bz=0): |Z| = " << std::fixed << std::setprecision(2)
+           << boundary << " mm  (Bz_lo=" << std::setprecision(4) << getBz(Z_lo)
+           << " T, Bz_hi=" << getBz(Z_hi) << " T)" << endmsg;
+    return boundary;
+}
+
+// ============================================================================
+// TRUTH COMPARISON
+// ============================================================================
+void DisplacedTracking::compareStatesWithTruth(
+    const edm4hep::Track& track,
+    const edm4hep::MCParticleCollection& mcParticles,
+    int trackNumber) const {
+
+    // Find best MC particle: the one with highest pT (works for single-particle gun)
+    const edm4hep::MCParticle* mu = nullptr;
+    double bestPT2 = -1.0;
+    for (const auto& p : mcParticles) {
+        const auto& m = p.getMomentum();
+        double pT2 = m.x*m.x + m.y*m.y;
+        if (pT2 > bestPT2) { bestPT2 = pT2; mu = &p; }
+    }
+    if (!mu) {
+        debug() << "[TruthCmp] No MCParticle for track " << trackNumber << endmsg;
+        return;
+    }
+
+    // Truth kinematics
+    const auto& vtx = mu->getVertex();    // mm (EDM4hep convention)
+    const auto& mom = mu->getMomentum(); // GeV/c
+    double pT_true    = std::sqrt(mom.x*mom.x + mom.y*mom.y);
+    double phi0_true  = std::atan2(mom.y, mom.x);
+    double tanL_true  = (pT_true > 1e-9) ? mom.z / pT_true : 0.0;
+    // For a prompt muon gun vertex ≈ (0,0,0): d0_true = 0, z0_true = 0.
+    // More precisely: d0 = signed transverse displacement.
+    // For any vertex (vx, vy) and momentum direction phi:
+    //   d0_true ≈ −vx·sin(phi0) + vy·cos(phi0)  (leading-order, exact for straight tracks)
+    double d0_true_mm = -vtx.x * std::sin(phi0_true) + vtx.y * std::cos(phi0_true);
+    double z0_true_mm = vtx.z;
+
+    // Inner B field at IP for omega comparison
+    double B_ip = m_field.magneticField(dd4hep::Position(0.0, 0.0, 0.0)).z() / dd4hep::tesla;
+    // Outer B field at muon system (query at solenoid boundary outward)
+    double R_outer_cm = (m_solenoidBoundaryMm / 10.0) + 50.0;   // 50 cm beyond boundary
+    double B_outer = m_field.magneticField(dd4hep::Position(R_outer_cm, 0.0, 0.0)).z()
+                     / dd4hep::tesla;
+
+    // ── Print header ─────────────────────────────────────────────────────────
+    info() << "\n"
+           << "╔══════════════════════════════════════════════════════════════════════════╗\n"
+           << "║  TRUTH COMPARISON  Track " << std::setw(3) << trackNumber
+           << "   PDG=" << std::setw(5) << mu->getPDG()
+           << "   pT=" << std::fixed << std::setprecision(2) << std::setw(7) << pT_true << " GeV/c"
+           << "   tanλ=" << std::setw(6) << std::setprecision(3) << tanL_true << "            ║\n"
+           << "║  MC vertex: (" << std::setw(7) << std::setprecision(2) << vtx.x
+           << ", " << std::setw(7) << vtx.y
+           << ", " << std::setw(7) << vtx.z << ") mm"
+           << "   B_ip=" << std::setw(6) << std::setprecision(3) << B_ip
+           << " T   B_outer=" << std::setw(6) << B_outer << " T           ║\n"
+           << "╠═════════════════╦═════════════╦═════════════╦════════════╦═════════════╣\n"
+           << "║  State          ║  D0 (mm)    ║  Z0 (mm)    ║  phi (rad) ║  pT (GeV/c) ║\n"
+           << "╠═════════════════╬═════════════╬═════════════╬════════════╬═════════════╣\n";
+
+    // Truth row
+    info() << "║  Truth (MC IP)  ║"
+           << std::setw(11) << std::setprecision(3) << d0_true_mm << "  ║"
+           << std::setw(11) << z0_true_mm << "  ║"
+           << std::setw(10) << std::setprecision(4) << phi0_true << "  ║"
+           << std::setw(11) << std::setprecision(2) << pT_true << "  ║" << endmsg;
+    info() << "╠═════════════════╬═════════════╬═════════════╬════════════╬═════════════╣\n";
+
+    // Helper: print one state row + residual row
+    struct StateRow { const char* label; int loc; double B_for_pT; };
+    StateRow rows[] = {
+        { "AtLastHit",    edm4hep::TrackState::AtLastHit,  B_outer },
+        { "AtVertex(RK4)",edm4hep::TrackState::AtVertex,   B_ip    },
+        { "AtIP(analyt)", edm4hep::TrackState::AtIP,       B_ip    },
+    };
+    for (auto& row : rows) {
+        bool found = false;
+        for (int i = 0; i < track.trackStates_size(); ++i) {
+            auto ts = track.getTrackStates(i);
+            if (ts.location != row.loc) continue;
+            found = true;
+            double pT_reco = (std::abs(ts.omega) > 1e-12 && std::abs(row.B_for_pT) > 1e-6)
+                ? 0.3 * std::abs(row.B_for_pT) / (std::abs(ts.omega) * 1000.0) : 0.0;
+            double resD0   = ts.D0 - d0_true_mm;
+            double resZ0   = ts.Z0 - z0_true_mm;
+            double resPhi  = ts.phi - phi0_true;
+            double resPT   = pT_reco - pT_true;
+            // phi residual: wrap to (−π, π]
+            while (resPhi >  M_PI) resPhi -= 2*M_PI;
+            while (resPhi < -M_PI) resPhi += 2*M_PI;
+            info() << "║  " << std::left << std::setw(15) << row.label << "║"
+                   << std::right << std::setw(11) << std::setprecision(3) << ts.D0 << "  ║"
+                   << std::setw(11) << ts.Z0 << "  ║"
+                   << std::setw(10) << std::setprecision(4) << ts.phi << "  ║"
+                   << std::setw(11) << std::setprecision(2) << pT_reco << "  ║" << endmsg;
+            info() << "║  " << std::left << std::setw(15) << "  Δ (reco−truth)" << "║"
+                   << std::right << std::setw(9) << std::setprecision(3)
+                   << (resD0 >= 0 ? "+" : "") << resD0 << "   ║"
+                   << std::setw(9) << (resZ0 >= 0 ? "+" : "") << resZ0 << "   ║"
+                   << std::setw(8) << std::setprecision(4)
+                   << (resPhi >= 0 ? "+" : "") << resPhi << "    ║"
+                   << std::setw(9) << std::setprecision(2)
+                   << (resPT >= 0 ? "+" : "") << resPT << "   ║" << endmsg;
+            break;
+        }
+        if (!found)
+            info() << "║  " << std::left << std::setw(15) << row.label
+                   << "║  (not saved)                                              ║" << endmsg;
+    }
+    info() << "╚═════════════════╩═════════════╩═════════════╩════════════╩═════════════╝\n"
+           << endmsg;
+}
+
+// ============================================================================
 // INNER SOLENOID PROPAGATION IMPLEMENTATIONS
 // ============================================================================
 bool DisplacedTracking::isInsideSolenoid(const Eigen::Vector3d& pos) const {
     double r = std::sqrt(pos.x() * pos.x() + pos.y() * pos.y());
     double z = std::abs(pos.z());
-    return (r < SOLENOID_RADIUS_CM) && (z < SOLENOID_Z_HALF_CM);
+    return (r < m_solenoidBoundaryMm / 10.0) && (z < SOLENOID_Z_HALF_CM);
 }
 
 void DisplacedTracking::rk4PropagationStep(
     Eigen::Vector3d& pos,
     Eigen::Vector3d& mom,
-    double stepSize) const {
+    double stepSize,
+    double chargeSign) const {
 
     double pMagInitial = mom.norm();  // Save initial momentum magnitude
-    const double kappa_factor = 0.3 * 1000.0;  // Conversion factor for B*0.3 in cm^-1
+    // kappa = 0.3/100 [GeV/c / (T·cm)] — the correct factor relating curvature to B/pT.
+    // dp/ds [GeV/c per cm] = charge * kappa * (pHat × B [T])
+    // This gives dθ/ds = 0.003*B/p [1/cm] → R = p/(0.3*B) in meters ✓
+    const double kappa_factor = 0.3 / 100.0;
     
     // Lambda for field at position
     auto getFieldAt = [this](const Eigen::Vector3d& r) -> double {
@@ -3754,8 +4387,8 @@ void DisplacedTracking::rk4PropagationStep(
         // dr/ds = p̂
         Eigen::Vector3d drds = pHat;
         
-        // dp/ds = q(p̂ × B) where q absorbed in field
-        Eigen::Vector3d dpds = kappa_factor * pHat.cross(B_vec);
+        // dp/ds = q * kappa * (p̂ × B)  where q = ±1 particle charge
+        Eigen::Vector3d dpds = chargeSign * kappa_factor * pHat.cross(B_vec);
         
         return {drds, dpds};
     };
@@ -3778,67 +4411,65 @@ void DisplacedTracking::rk4PropagationStep(
 InnerTrajectory DisplacedTracking::propagateToInner(
     const Eigen::Vector3d& outerPos,
     const Eigen::Vector3d& outerMom,
-    double targetRadius) const {
-    
+    double targetRadius,
+    double chargeSign) const {
+
     InnerTrajectory result;
-    result.success = false;
-    result.numSteps = 0;
+    result.success   = false;
+    result.numSteps  = 0;
     result.arcLength = 0.0;
-    
-    // Starting position must be outside
+
+    // Starting position must be outside the solenoid
     if (isInsideSolenoid(outerPos)) {
         result.message = "Starting position already inside solenoid";
         return result;
     }
-    
+
+    // Backward propagation: negate the momentum so the track retraces its path
+    // toward the IP.  After convergence the final momentum is negated again to
+    // restore the physical (outward) direction at the endpoint.
     Eigen::Vector3d r = outerPos;
-    Eigen::Vector3d p = outerMom;
-    double arcLength = 0.0;
-    
-    const double RK4_STEP = -10.0;  // Negative = inward
-    const int MAX_STEPS = 10000;
-    
-    info() << "\n=== Starting Inner Propagation ===" << endmsg;
-    info() << "From R=" << std::sqrt(r.x()*r.x() + r.y()*r.y()) 
-           << " cm, z=" << r.z() << " cm" << endmsg;
-    info() << "Target radius: " << targetRadius << " cm" << endmsg;
-    
-    // Propagate
+    Eigen::Vector3d p = -outerMom;          // backward = reversed momentum
+    const double FWD_STEP = 5.0;            // cm; positive forward steps along -p
+    const int    MAX_STEPS = 5000;
+
+    debug() << "[RK4] Starting backward inner propagation"
+            << "  R=" << std::sqrt(r.x()*r.x() + r.y()*r.y()) << " cm"
+            << "  |p|=" << outerMom.norm() << " GeV/c"
+            << "  charge=" << chargeSign << endmsg;
+
     for (int step = 0; step < MAX_STEPS; ++step) {
-        double rxy = std::sqrt(r.x() * r.x() + r.y() * r.y());
-        
-        // Check if reached target
+        double rxy = std::sqrt(r.x()*r.x() + r.y()*r.y());
+
+        // Success: inside solenoid and within target radius
         if (isInsideSolenoid(r) && rxy < targetRadius) {
-            result.success = true;
-            result.message = "Reached target radius";
-            result.finalPosition = r;
-            result.finalMomentum = p;
-            result.arcLength = arcLength;
-            result.numSteps = step;
+            result.success        = true;
+            result.message        = "Reached target radius";
+            result.finalPosition  = r;
+            result.finalMomentum  = -p;     // restore physical direction
+            result.arcLength      = result.arcLength;
+            result.numSteps       = step;
+            debug() << "[RK4] Success at step " << step
+                    << "  R=" << rxy << " cm" << endmsg;
             break;
         }
-        
-        // RK4 step
-        rk4PropagationStep(r, p, RK4_STEP);
-        arcLength += std::abs(RK4_STEP);
-        result.numSteps = step + 1;
-        
-        // Print every 1000 steps
-        if (step % 1000 == 0 && msgLevel(MSG::DEBUG)) {
-            double B = m_field.magneticField(dd4hep::Position(r.x(), r.y(), r.z())).z() / dd4hep::tesla;
-            debug() << "Step " << step << ": R=" << rxy << " cm, B=" << B << " T" << endmsg;
-        }
-        
-        // Safety
-        if (step >= MAX_STEPS - 1) {
-            result.message = "Max steps reached";
-            result.finalPosition = r;
-            result.finalMomentum = p;
-            result.arcLength = arcLength;
-            return result;
+
+        rk4PropagationStep(r, p, FWD_STEP, chargeSign);
+        result.arcLength += FWD_STEP;
+        result.numSteps   = step + 1;
+
+        if (step % 200 == 0 && msgLevel(MSG::DEBUG)) {
+            double B = m_field.magneticField(dd4hep::Position(r.x(), r.y(), r.z())).z()
+                       / dd4hep::tesla;
+            debug() << "[RK4] step " << step << "  R=" << rxy << " cm  B=" << B << " T" << endmsg;
         }
     }
-    
+
+    if (!result.success) {
+        result.message        = "Max steps reached";
+        result.finalPosition  = r;
+        result.finalMomentum  = -p;
+    }
     return result;
 }
 
