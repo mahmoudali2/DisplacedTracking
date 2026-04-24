@@ -416,7 +416,16 @@ private:
         "Reduces combinatorial explosion in high-occupancy layers. "
         "Set to 0 to use all hits (default)."};
     Gaudi::Property<bool> m_doCrowdedLayerHitSelection{this, "doCrowdedLayerHitSelection", false,
-        "Guided crowded-layer hit selection"};    
+        "Guided crowded-layer hit selection"};
+    Gaudi::Property<bool> m_doHitClustering{this, "DoHitClustering", false,
+        "Pre-cluster unused hits into spatially coherent road candidates before the combinatorial "
+        "search. Uses Union-Find on adjacent compositeID layers with the same MaxConsecDeltaPhi and "
+        "MaxConsecutiveHitDistance thresholds. Each cluster becomes an independent hit-pool, "
+        "preventing hits from unrelated track regions from ever entering the same combo. "
+        "Clusters spanning fewer than MinTrackHits distinct layers are skipped. "
+        "Default false (original single-pool behaviour). Enable for high-occupancy events "
+        "where delta-ray or multi-track hit pollution inflates the Cartesian product."};
+
     // ── Neighbour-track quality gate ──────────────────────────────────────
     Gaudi::Property<double> m_neighbourTrackMaxDist{this, "NeighbourTrackMaxDist", 5.0,
         "If the best-combo candidate has any hit within this distance (cm) of a hit from "
@@ -477,6 +486,7 @@ private:
     mutable std::atomic<int> m_statNeighbourRejected{0};    // combos rejected by neighbour-track gate
     mutable std::atomic<int> m_statComboPTRejected{0};      // combos rejected by MaxComboPT threshold
     mutable std::atomic<int> m_statTanLambdaRejected{0};   // combos rejected by MaxComboTanLambdaDev
+    mutable std::atomic<int> m_statClustersBuilt{0};        // total clusters built across all iterations
 
     // Hit multiplicity distribution
     mutable std::atomic<int> m_statNhit3{0};

@@ -415,6 +415,7 @@ StatusCode DisplacedTracking::finalize() {
     int nNeighbRej     = m_statNeighbourRejected.load();
     int nPTRej         = m_statComboPTRejected.load();
     int nTanLRej       = m_statTanLambdaRejected.load();
+    int nClusters      = m_statClustersBuilt.load();
     int nH3       = m_statNhit3.load();
     int nH4       = m_statNhit4.load();
     int nH5       = m_statNhit5.load();
@@ -468,6 +469,7 @@ StatusCode DisplacedTracking::finalize() {
         << "║    Rejected by neighbour gate : " << std::setw(7) << nNeighbRej     << "                   ║\n"
         << "║    Rejected by MaxComboPT     : " << std::setw(7) << nPTRej         << "                   ║\n"
         << "║    Rejected by tanλ dev cut   : " << std::setw(7) << nTanLRej       << "                   ║\n"
+        << "║    Hit clusters built (total) : " << std::setw(7) << nClusters      << "                   ║\n"
         << "╠══════════════════════════════════════════════════════════╣\n"
         << "║  HIT MULTIPLICITY PER TRACK                              ║\n"
         << "║    3 hits                     : " << std::setw(7) << nH3     << "                   ║\n"
@@ -1302,38 +1304,132 @@ void DisplacedTracking::findTracks(
             return true;
         };
 
-        // ── Build per-compositeID hit lists for the structured combinatorial loop ─
-        // Each combination must use exactly ONE hit from each compositeID (detector
-        // region).  Iterating over compositeIDs first and picking one hit from each
-        // avoids generating the enormous number of same-region duplicates that the
-        // flat C(nAvail,k) loop would produce.
-        //
-        // compositeLayerIDs: already sorted inner→outer (computed above)
-        // hitsForComp[i] = vector of orderedHII indices for compositeLayerIDs[i]
-        const int nDistinct = static_cast<int>(compositeLayerIDs.size());
-        std::vector<std::vector<size_t>> hitsForComp(nDistinct);
-        for (int ci = 0; ci < nDistinct; ++ci) {
+        // ── Build per-compositeID hit lists (full event pool) ───────────────────
+        // hitsForCompAll[i] = orderedHII indices for compositeLayerIDs[i], unused only
+        const int nDistinctAll = static_cast<int>(compositeLayerIDs.size());
+        std::vector<std::vector<size_t>> hitsForCompAll(nDistinctAll);
+        for (int ci = 0; ci < nDistinctAll; ++ci) {
             int cid = compositeLayerIDs[ci];
             for (size_t hii : hitIndicesByCompositeLayer.at(cid)) {
-                // only include unused hits
                 if (!usedHits[allHitInfo[hii].index]) {
-                    hitsForComp[ci].push_back(hii);
+                    hitsForCompAll[ci].push_back(hii);
                 }
             }
         }
-        // clamp maxK to number of distinct regions (can't pick more unique compositeIDs than exist)
-        const int maxKeff = std::min(maxK, nDistinct);
 
-        // ── Combinatorial loop: C(nDistinct, k) compositeID selections ───────────
+        // ── Hit clustering: group hits into spatially coherent road candidates ────
+        // Union-Find connects hits in adjacent compositeID layers when they satisfy
+        // the road criteria (MaxConsecDeltaPhi + MaxConsecutiveHitDistance).  Each
+        // resulting cluster becomes an independent hit-pool for the combinatorial
+        // search, preventing hits from unrelated track regions from entering the
+        // same combo without changing any downstream quality cuts.
+        // When DoHitClustering is false, a single cluster = all hits (original behaviour).
+        struct ClusterDef {
+            std::vector<int>                 cids;
+            std::vector<std::vector<size_t>> hitsForComp;
+        };
+        std::vector<ClusterDef> activeClusters;
+
+        if (m_doHitClustering.value() && nDistinctAll >= 2) {
+            // Union-Find with iterative path-halving (no std::function overhead)
+            const size_t nhii = allHitInfo.size();
+            std::vector<size_t> ufParent(nhii);
+            for (size_t i = 0; i < nhii; ++i) ufParent[i] = i;
+
+            auto ufFind = [&](size_t x) -> size_t {
+                while (ufParent[x] != x) {
+                    ufParent[x] = ufParent[ufParent[x]]; // path halving
+                    x = ufParent[x];
+                }
+                return x;
+            };
+            auto ufUnite = [&](size_t a, size_t b) {
+                a = ufFind(a); b = ufFind(b);
+                if (a != b) ufParent[a] = b;
+            };
+
+            const double phiCut  = m_maxConsecDeltaPhi.value();
+            const double distCut = m_maxConsecHitDist.value(); // cm
+
+            // Connect hits in adjacent compositeID layers that satisfy road criteria
+            for (int ci = 0; ci < nDistinctAll - 1; ++ci) {
+                for (size_t hii_a : hitsForCompAll[ci]) {
+                    const auto& pa   = (*hits)[allHitInfo[hii_a].index].getPosition();
+                    const double phiA = std::atan2(pa[1], pa[0]);
+                    for (size_t hii_b : hitsForCompAll[ci + 1]) {
+                        const auto& pb = (*hits)[allHitInfo[hii_b].index].getPosition();
+                        if (phiCut > 0.0) {
+                            double dPhi = std::atan2(pb[1], pb[0]) - phiA;
+                            while (dPhi >  M_PI) dPhi -= 2*M_PI;
+                            while (dPhi < -M_PI) dPhi += 2*M_PI;
+                            if (std::abs(dPhi) > phiCut) continue;
+                        }
+                        if (distCut > 0.0) {
+                            double dx=pb[0]-pa[0], dy=pb[1]-pa[1], dz=pb[2]-pa[2];
+                            if (std::sqrt(dx*dx+dy*dy+dz*dz)*0.1 > distCut) continue;
+                        }
+                        ufUnite(hii_a, hii_b);
+                    }
+                }
+            }
+
+            // Group hii by cluster root
+            std::unordered_map<size_t, std::vector<size_t>> rootToHIIs;
+            for (int ci = 0; ci < nDistinctAll; ++ci) {
+                for (size_t hii : hitsForCompAll[ci]) {
+                    rootToHIIs[ufFind(hii)].push_back(hii);
+                }
+            }
+
+            // Build a ClusterDef for each cluster that spans ≥ minK distinct layers
+            for (auto& [root, hiis] : rootToHIIs) {
+                std::unordered_map<int, std::vector<size_t>> cidMap;
+                for (size_t hii : hiis) cidMap[allHitInfo[hii].compositeID].push_back(hii);
+                if (static_cast<int>(cidMap.size()) < minK) {
+                    debug() << "  cluster root=" << root << " spans only "
+                            << cidMap.size() << " layer(s) — skipped (minK=" << minK << ")" << endmsg;
+                    continue;
+                }
+                // Preserve inner→outer sort order inherited from compositeLayerIDs
+                ClusterDef cd;
+                for (int cid : compositeLayerIDs) {
+                    auto it = cidMap.find(cid);
+                    if (it == cidMap.end()) continue;
+                    cd.cids.push_back(cid);
+                    cd.hitsForComp.push_back(std::move(it->second));
+                }
+                debug() << "  cluster root=" << root
+                        << " layers=" << cd.cids.size()
+                        << " hits=" << hiis.size() << endmsg;
+                activeClusters.push_back(std::move(cd));
+            }
+
+            m_statClustersBuilt += static_cast<int>(activeClusters.size());
+            info() << "  Hit clustering [trk " << trackNumber << "]: "
+                   << nDistinctAll << " layer(s) → "
+                   << activeClusters.size() << " cluster(s)" << endmsg;
+        } else {
+            // Single cluster = full hit pool (original behaviour)
+            ClusterDef cd;
+            cd.cids        = compositeLayerIDs;
+            cd.hitsForComp = hitsForCompAll;
+            activeClusters.push_back(std::move(cd));
+        }
+
+        // ── Combinatorial loop: one pass per cluster ──────────────────────────────
+        // compositeLayerIDs / hitsForComp / nDistinct / maxKeff are re-bound to each
+        // cluster's data via shadowing so the k-loop body below is unchanged.
+        for (const auto& cluster : activeClusters) {
+        const std::vector<int>&                 compositeLayerIDs = cluster.cids;        // NOLINT(shadow)
+        const std::vector<std::vector<size_t>>& hitsForComp       = cluster.hitsForComp; // NOLINT(shadow)
+        const int nDistinct = static_cast<int>(compositeLayerIDs.size());
+        const int maxKeff   = std::min(maxK, nDistinct);
+
         // For each k from maxKeff down to minK:
         //   Enumerate all C(nDistinct, k) subsets of compositeIDs,
         //   then for each subset enumerate the Cartesian product of hit choices
         //   (one hit per selected compositeID).
         // This structurally enforces one-hit-per-region with zero wasted iterations.
-        //
-        // TODO (fix in future enhancement): allow ≥2 hits per compositeID by extending
-        // the per-compositeID hit-count to >1 when their spatial separation exceeds
-        // a threshold, to recover efficiency in dense environments.
         for (int k = maxKeff; k >= minK; --k) {
             // Enumerate C(nDistinct, k) — indices into compositeLayerIDs
             std::vector<int> cidxCombo(k);
@@ -1616,10 +1712,12 @@ void DisplacedTracking::findTracks(
                 for (int j = i+1; j < k; ++j) cidxCombo[j] = cidxCombo[j-1] + 1;
             }
         }
+        } // end cluster loop
 
         // ── Per-event combinatorial summary ──────────────────────────────────────
+        const int maxKeffAll = std::min(maxK, nDistinctAll);
         info() << "  N-hit search [trk " << trackNumber << "]: "
-               << nAvail << " avail hits in " << nDistinct << " regions, k=" << maxKeff << "→" << minK
+               << nAvail << " avail hits in " << nDistinctAll << " regions, k=" << maxKeffAll << "→" << minK
                << " | evaluated=" << evtCombosEval
                << " consecPhiRej=" << evtConsecPhiRej
                << " phiSpreadRej=" << evtPhiSpreadRej
@@ -2562,7 +2660,6 @@ void DisplacedTracking::findTracks(
                     
                     // Add to track
                     finalTrack.addToTrackStates(innerState);
-                    m_statStateAtVertex++;
                     
                     info() << "  ✓ Inner propagation SUCCESS → saved as AtVertex:" << endmsg;
                     info() << "    Final R=" << rxy << " cm, |p|=" << pMagFinal 
