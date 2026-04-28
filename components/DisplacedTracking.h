@@ -152,12 +152,6 @@ public:
                             bool& evtUsedPtInner2,
                             bool& evtUsedPtFallback) const;
 
-    // Calculate impact parameter
-    double calculateImpactParameter(
-        double x0, double y0, double radius, bool clockwise,
-        double innerFieldStrength, double outerFieldStrength,
-        const Eigen::Vector3d& p1, const Eigen::Vector3d& p2, const Eigen::Vector3d& p3) const;    
-
     // Find surface for a hit
     const dd4hep::rec::Surface* findSurface(const edm4hep::TrackerHitPlane& hit) const;
     
