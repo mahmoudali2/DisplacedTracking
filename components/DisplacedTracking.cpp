@@ -998,11 +998,17 @@ void DisplacedTracking::findTracks(
         hitEdepScore.reserve(allHitInfo.size());
         if (m_proxScoreWeight.value() > 0.0) {
             for (size_t idx = 0; idx < allHitInfo.size(); ++idx) {
-                hitEdepScore[idx] = std::abs(hitEdepKeV.at(idx) - meanEdepSingle);
+                // Asymmetric edep score: primary muons tend to deposit more than
+                // secondaries, so reward edep in [baseline, 2×baseline]; penalise
+                // both below-baseline (secondary-like) and far-above-baseline (hadronic spike).
+                const double edep_    = hitEdepKeV.at(idx);
+                const double lowDev_  = std::max(0.0, meanEdepSingle - edep_);
+                const double highDev_ = std::max(0.0, edep_ - 2.0 * meanEdepSingle);
+                hitEdepScore[idx]     = lowDev_ + highDev_;
                 debug() << "  EdepScore hit[" << idx << "] compositeID="
                         << allHitInfo[idx].compositeID
-                        << " edep=" << hitEdepKeV.at(idx) << " keV"
-                        << " |Δ|=" << hitEdepScore[idx] << " keV" << endmsg;
+                        << " edep=" << edep_ << " keV  baseline=" << meanEdepSingle << " keV"
+                        << " score=" << hitEdepScore[idx] << " keV" << endmsg;
             }
 
             // If MaxHitsPerCompositeID > 0, trim crowded compositeIDs to the top-N
@@ -1107,6 +1113,7 @@ void DisplacedTracking::findTracks(
             double pT        = 0.0;
         };
         CombResult bestCombo;
+        CombResult fallbackCombo;  // best over-threshold combo; promoted if no valid combo exists
         bool foundCombination = false;
 
         // Per-event diagnostic counters (not atomic — single-threaded per event)
@@ -1189,9 +1196,37 @@ void DisplacedTracking::findTracks(
             }
 
             // Cut 1: consecutive-layer |Δφ|
+            // Bypass conditions (no extra Gaudi properties):
+            //   • near beam pipe: combo θ < 15° or > 160° → bypass ALL φ road cuts
+            //     (low-pT tracks here spiral in φ between endcap layers, producing large Δφ)
+            //   • barrel↔endcap boundary pair → skip that pair only (transition region)
+            {
+                double sumR = 0.0, sumAbsZ = 0.0;
+                for (int i = 0; i < nH; ++i) {
+                    const auto& p = (*hits)[gIdxVec[i]].getPosition();
+                    sumR    += std::sqrt(p[0]*p[0] + p[1]*p[1]);
+                    sumAbsZ += std::abs(p[2]);
+                }
+                const double thetaCombo = std::atan2(sumR / nH, sumAbsZ / nH);
+                constexpr double kNearBeamLo = 15.0 * M_PI / 180.0;
+                constexpr double kNearBeamHi = 160.0 * M_PI / 180.0;
+                if (thetaCombo < kNearBeamLo || thetaCombo > kNearBeamHi) return true;
+            }
             const double maxConsec = m_maxConsecDeltaPhi.value();
             if (maxConsec > 0.0) {
                 for (int i = 0; i < nH - 1; ++i) {
+                    int cidA = 0, cidB = 0;
+                    {
+                        auto itA = gIdxToComposite.find(gIdxVec[i]);
+                        auto itB = gIdxToComposite.find(gIdxVec[i+1]);
+                        if (itA != gIdxToComposite.end()) cidA = itA->second;
+                        if (itB != gIdxToComposite.end()) cidB = itB->second;
+                    }
+                    const bool aBarrel = (cidA >= 0 && cidA < 1000);
+                    const bool bBarrel = (cidB >= 0 && cidB < 1000);
+                    // Barrel↔endcap transition: large Δφ is expected — skip this pair
+                    if (aBarrel != bBarrel) continue;
+
                     double dPhi = phi[i+1] - phi[i];
                     while (dPhi >  M_PI) dPhi -= 2*M_PI;
                     while (dPhi < -M_PI) dPhi += 2*M_PI;
@@ -1223,6 +1258,43 @@ void DisplacedTracking::findTracks(
                     return false;
                 }
             }
+
+            // Cut 3: endcap z/r monotonicity.
+            // For a forward-going track the transverse radius r must increase (or stay
+            // constant) as |z| increases — i.e. the particle moves outward in both
+            // coordinates together.  A hit where r decreases while |z| increases is
+            // geometrically inconsistent with any single forward track and signals a
+            // secondary or noise hit merged from a different disk.
+            {
+                std::vector<std::pair<double,double>> posEC, negEC; // (|z| mm, r mm)
+                for (int i = 0; i < nH; ++i) {
+                    const auto& p = (*hits)[gIdxVec[i]].getPosition();
+                    auto it = gIdxToComposite.find(gIdxVec[i]);
+                    if (it == gIdxToComposite.end()) continue;
+                    const int cid = it->second;
+                    const double r    = std::sqrt(p[0]*p[0] + p[1]*p[1]);
+                    const double absZ = std::abs(p[2]);
+                    if (cid >= 1000)  posEC.emplace_back(absZ, r);
+                    if (cid <= -1000) negEC.emplace_back(absZ, r);
+                }
+                auto checkZRMono = [&](std::vector<std::pair<double,double>>& ec) -> bool {
+                    if (ec.size() < 2) return true;
+                    std::sort(ec.begin(), ec.end(),
+                              [](const auto& a, const auto& b){ return a.first < b.first; });
+                    for (int i = 0; i < (int)ec.size() - 1; ++i) {
+                        const double dr = ec[i+1].second - ec[i].second;
+                        if (dr < 0.0) {
+                            debug() << "    road FAIL (endcap z/r mono): dr=" << dr
+                                    << " mm  |z|=[" << ec[i].first << "→" << ec[i+1].first
+                                    << "] mm" << endmsg;
+                            return false;
+                        }
+                    }
+                    return true;
+                };
+                if (!checkZRMono(posEC) || !checkZRMono(negEC)) return false;
+            }
+
             return true;
         };
 
@@ -1276,6 +1348,18 @@ void DisplacedTracking::findTracks(
             if (maxDev <= 0.0) return true;
             const int nH = static_cast<int>(gIdxVec.size());
             if (nH < 3) return true;
+
+            // Mixed barrel+endcap combos have very different tanλ per pair by geometry;
+            // the cut is only meaningful for pure-barrel or pure-endcap track segments.
+            bool hasBarrel = false, hasEndcap = false;
+            for (size_t gi : gIdxVec) {
+                auto it = gIdxToComposite.find(gi);
+                if (it == gIdxToComposite.end()) continue;
+                int cid = it->second;
+                if (cid >= 0 && cid < 1000) hasBarrel = true;
+                else                         hasEndcap = true;
+                if (hasBarrel && hasEndcap) return true; // mixed combo — skip cut
+            }
 
             std::vector<double> tanLPairs;
             tanLPairs.reserve(nH - 1);
@@ -1367,6 +1451,31 @@ void DisplacedTracking::findTracks(
                         if (distCut > 0.0) {
                             double dx=pb[0]-pa[0], dy=pb[1]-pa[1], dz=pb[2]-pa[2];
                             if (std::sqrt(dx*dx+dy*dy+dz*dz)*0.1 > distCut) continue;
+                        }
+                        ufUnite(hii_a, hii_b);
+                    }
+                }
+            }
+
+            // One-gap bridging: connect ci and ci+2 with doubled thresholds so a
+            // single missing intermediate layer does not split a cluster.
+            const double phiCut2  = (phiCut  > 0.0) ? phiCut  * 2.0 : -1.0;
+            const double distCut2 = (distCut > 0.0) ? distCut * 2.0 : -1.0;
+            for (int ci = 0; ci < nDistinctAll - 2; ++ci) {
+                for (size_t hii_a : hitsForCompAll[ci]) {
+                    const auto& pa    = (*hits)[allHitInfo[hii_a].index].getPosition();
+                    const double phiA = std::atan2(pa[1], pa[0]);
+                    for (size_t hii_b : hitsForCompAll[ci + 2]) {
+                        const auto& pb = (*hits)[allHitInfo[hii_b].index].getPosition();
+                        if (phiCut2 > 0.0) {
+                            double dPhi = std::atan2(pb[1], pb[0]) - phiA;
+                            while (dPhi >  M_PI) dPhi -= 2*M_PI;
+                            while (dPhi < -M_PI) dPhi += 2*M_PI;
+                            if (std::abs(dPhi) > phiCut2) continue;
+                        }
+                        if (distCut2 > 0.0) {
+                            double dx=pb[0]-pa[0], dy=pb[1]-pa[1], dz=pb[2]-pa[2];
+                            if (std::sqrt(dx*dx+dy*dy+dz*dz)*0.1 > distCut2) continue;
                         }
                         ufUnite(hii_a, hii_b);
                     }
@@ -1479,9 +1588,28 @@ void DisplacedTracking::findTracks(
                                 bool consecFail = false;
                                 {
                                     const int nH = static_cast<int>(gIdxVec.size());
+                                    // Mirror passesRoadCuts bypass: near beam pipe → all φ cuts bypassed
+                                    double sumR = 0.0, sumAbsZ = 0.0;
+                                    for (int i = 0; i < nH; ++i) {
+                                        const auto& p = (*hits)[gIdxVec[i]].getPosition();
+                                        sumR    += std::sqrt(p[0]*p[0] + p[1]*p[1]);
+                                        sumAbsZ += std::abs(p[2]);
+                                    }
+                                    const double thetaCombo = std::atan2(sumR / nH, sumAbsZ / nH);
+                                    constexpr double kNearBeamLo = 15.0 * M_PI / 180.0;
+                                    constexpr double kNearBeamHi = 160.0 * M_PI / 180.0;
+                                    const bool nearBeamPipe = (thetaCombo < kNearBeamLo || thetaCombo > kNearBeamHi);
                                     const double maxConsec = m_maxConsecDeltaPhi.value();
-                                    if (maxConsec > 0.0) {
+                                    if (!nearBeamPipe && maxConsec > 0.0) {
                                         for (int ri = 0; ri < nH - 1 && !consecFail; ++ri) {
+                                            int cidA = 0, cidB = 0;
+                                            auto itA = gIdxToComposite.find(gIdxVec[ri]);
+                                            auto itB = gIdxToComposite.find(gIdxVec[ri+1]);
+                                            if (itA != gIdxToComposite.end()) cidA = itA->second;
+                                            if (itB != gIdxToComposite.end()) cidB = itB->second;
+                                            const bool aBarrel = (cidA >= 0 && cidA < 1000);
+                                            const bool bBarrel = (cidB >= 0 && cidB < 1000);
+                                            if (aBarrel != bBarrel) continue; // transition — bypassed
                                             const auto& pa = (*hits)[gIdxVec[ri]].getPosition();
                                             const auto& pb = (*hits)[gIdxVec[ri+1]].getPosition();
                                             double dPhi = std::atan2(pb[1],pb[0]) - std::atan2(pa[1],pa[0]);
@@ -1567,11 +1695,40 @@ void DisplacedTracking::findTracks(
                                             << " -> REJECT chi2 threshold="
                                             << m_nHitMaxChi2NDF.value() << endmsg;
                                 } else if ((0.3 * absBRefForK3 * cr / 100.0) > m_maxComboPT.value()) {
-                                    // Combo pT exceeds MaxComboPT — exclude during search
+                                    // Combo pT exceeds MaxComboPT — exclude from primary search,
+                                    // but keep as fallback: if every combo in this event exceeds the
+                                    // threshold (e.g. near-straight high-pT muons whose circle fit is
+                                    // noise-dominated), the fallback with the lowest implied pT is
+                                    // promoted rather than leaving the muon completely untracked.
                                     m_statComboPTRejected++;
+                                    const double comboPTfb = 0.3 * absBRefForK3 * cr / 100.0;
                                     debug() << "  k=" << k << " " << comboLabel()
-                                            << " -> REJECT pT=" << (0.3 * absBRefForK3 * cr / 100.0)
-                                            << " > MaxComboPT=" << m_maxComboPT.value() << endmsg;
+                                            << " -> REJECT pT=" << comboPTfb
+                                            << " > MaxComboPT=" << m_maxComboPT.value()
+                                            << " (stored as fallback)" << endmsg;
+                                    // Update fallback: more hits wins; equal k → for k>=4 prefer
+                                    // lower chi2/NDF (fit quality is reliable even when pT is noisy);
+                                    // for k=3 prefer lowest implied pT (closest to the threshold).
+                                    bool isBetterFallback = false;
+                                    if (k != fallbackCombo.nHits) {
+                                        isBetterFallback = (k > fallbackCombo.nHits);
+                                    } else if (k == 3) {
+                                        isBetterFallback = (cr < fallbackCombo.radius);
+                                    } else {
+                                        isBetterFallback = (cchi2ndf < fallbackCombo.chi2ndf);
+                                    }
+                                    if (isBetterFallback) {
+                                        fallbackCombo.hiiVec    = hiiVec;
+                                        fallbackCombo.gIdxVec   = gIdxVec;
+                                        fallbackCombo.chi2ndf   = cchi2ndf;
+                                        fallbackCombo.avgProxCm = 0.0;  // not yet computed at this point
+                                        fallbackCombo.x0        = cx0;
+                                        fallbackCombo.y0        = cy0;
+                                        fallbackCombo.radius    = cr;
+                                        fallbackCombo.fitCov    = cCov;
+                                        fallbackCombo.residuals = cRes;
+                                        fallbackCombo.nHits     = k;
+                                    }
                                 } else {
                                     // Selection priority:
                                     //  1. More hits always beats fewer hits.
@@ -1736,26 +1893,42 @@ void DisplacedTracking::findTracks(
                << endmsg;
 
         if (!foundCombination) {
-            info() << "No valid N-hit combination found for track " << trackNumber << " — stopping" << endmsg;
-            break;
+            if (fallbackCombo.nHits > 0) {
+                // Every combo exceeded MaxComboPT — promote the fallback with the lowest
+                // implied pT (k=3) or best chi2/NDF (k>=4) so the muon is not lost entirely.
+                bestCombo        = fallbackCombo;
+                foundCombination = true;
+                info() << "  Promoted fallback combo: k=" << bestCombo.nHits
+                       << " chi2/ndf=" << bestCombo.chi2ndf
+                       << " pT=" << std::fixed << std::setprecision(1)
+                       << (0.3 * absBRefForK3 * bestCombo.radius / 100.0)
+                       << " GeV (all combos exceeded MaxComboPT="
+                       << m_maxComboPT.value() << " GeV)" << endmsg;
+            } else {
+                info() << "No valid N-hit combination found for track " << trackNumber << " — stopping" << endmsg;
+                break;
+            }
         }
 
+
         // ── Guided crowded-layer hit selection ────────────────────────────────────
-        // Applies when ≥4 distinct compositeIDs are available and ≥3 of them are
-        // clean (exactly 1 hit each). Any number of crowded CIDs (>1 hit each) is
-        // handled: the clean-hit circle is used to guide the selection of ONE hit
-        // from each crowded CID (the one with the smallest radial residual).
-        // Strategy:
-        //   1. Fit a circle using ONLY the ≥3 clean-layer hits (unbiased estimate).
-        //   2. For EACH crowded CID independently, pick the hit with the smallest
-        //      radial residual to that circle.
-        //   3. Refit all hits (all clean + one chosen per crowded CID); require
-        //      chi2/NDF ≤ NHitMaxChi2NDF.
-        //   4. If the guided result differs from or improves on the general combo,
-        //      replace bestCombo so the correct hit propagates to all downstream steps.
-        // Prevents collinear secondary hits from being accidentally preferred over
-        // the real muon hit in any crowded layer.
-        if (m_doCrowdedLayerHitSelection){
+        // Two branches, both enabled by doCrowdedLayerHitSelection:
+        //
+        // Branch A (≥3 clean CIDs + ≥1 crowded CID):
+        //   Fit a circle from clean hits, pick each crowded CID's best hit by
+        //   combined score: 0.75*(dr/sigmaHit) + 0.25*(edepDev/edepNorm).
+        //   Geometry dominates; edep breaks ties when residuals are similar.
+        //
+        // Branch B (exactly 2 clean CIDs + ≥1 crowded CID):
+        //   Circle fit is degenerate with only 2 anchor points. Instead compute
+        //   the 3D direction D_AB (inner clean → outer clean) and for each crowded
+        //   candidate C score by kink angle κ = acos(D_AB · D_AC / |D_AB||D_AC|)
+        //   and edep: 0.75*(κ/sigmaKappa) + 0.25*(edepDev/edepNorm).
+        //   sigmaKappa reuses MaxConsecDeltaPhi (rad) as the natural angular scale.
+        //
+        // In both branches: refit guided hits, require chi2/NDF ≤ NHitMaxChi2NDF,
+        // override bestCombo when guided chose differently or produced better chi2.
+        if (m_doCrowdedLayerHitSelection) {
             int nCleanCIDs   = 0;
             int nCrowdedCIDs = 0;
             for (const auto& [cid, cidHIIs] : hitIndicesByCompositeLayer) {
@@ -1764,13 +1937,11 @@ void DisplacedTracking::findTracks(
             }
             const int totalCIDs = nCleanCIDs + nCrowdedCIDs;
 
-            if (nCleanCIDs >= 3 && nCrowdedCIDs >= 1 && totalCIDs >= 4) {
-                debug() << "Guided crowded-layer: " << nCleanCIDs
-                        << " clean CIDs + " << nCrowdedCIDs << " crowded CID(s)" << endmsg;
-
-                // Step 1: collect clean-layer hits (exactly 1 per CID, not globally used)
-                std::vector<edm4hep::TrackerHitPlane> cleanHits;
-                std::vector<size_t> cleanHIIs, cleanGIdxs;
+            // ── helpers shared by both branches ──────────────────────────────────
+            // Collect clean hits (ordered by compositeID, map iteration is sorted)
+            auto collectCleanHits = [&](std::vector<edm4hep::TrackerHitPlane>& cleanHits,
+                                        std::vector<size_t>& cleanHIIs,
+                                        std::vector<size_t>& cleanGIdxs) {
                 for (const auto& [cid, cidHIIs] : hitIndicesByCompositeLayer) {
                     if (static_cast<int>(cidHIIs.size()) != 1) continue;
                     size_t hii = cidHIIs[0];
@@ -1779,9 +1950,67 @@ void DisplacedTracking::findTracks(
                     cleanGIdxs.push_back(allHitInfo[hii].index);
                     cleanHits.push_back(allHitInfo[hii].hit);
                 }
+            };
+
+            // Apply guided selection: refit, check chi2, override bestCombo if better
+            auto applyGuidedResult = [&](std::vector<edm4hep::TrackerHitPlane>& guidedHits,
+                                         std::vector<size_t>& guidedHIIs,
+                                         std::vector<size_t>& guidedGIdxs,
+                                         const char* branchName) {
+                double gx0 = 0, gy0 = 0, gr = 0, gchi2 = 0;
+                Eigen::Matrix3d gCov;
+                std::vector<double> gRes;
+                bool guidedOK = false;
+                try { guidedOK = fitCircleNHits(guidedHits, gx0, gy0, gr, gchi2, gCov, gRes); }
+                catch (...) {}
+
+                if (!guidedOK) {
+                    debug() << branchName << " fit failed — keeping general combo" << endmsg;
+                    return;
+                }
+                if (gchi2 > m_nHitMaxChi2NDF.value()) {
+                    debug() << branchName << " fit chi2/ndf=" << gchi2
+                            << " > threshold — keeping general combo" << endmsg;
+                    return;
+                }
+                bool differentChoice = false;
+                for (size_t gHII : guidedHIIs) {
+                    bool inGeneral = false;
+                    for (size_t bHII : bestCombo.hiiVec)
+                        if (bHII == gHII) { inGeneral = true; break; }
+                    if (!inGeneral) { differentChoice = true; break; }
+                }
+                if (differentChoice && gchi2 < bestCombo.chi2ndf) {
+                    info() << branchName << ": "
+                           << (differentChoice ? "OVERRIDING" : "CONFIRMING")
+                           << " (" << nCrowdedCIDs << " crowded CID(s))"
+                           << " | guided chi2/ndf=" << gchi2
+                           << " | general chi2/ndf=" << bestCombo.chi2ndf << endmsg;
+                    bestCombo.hiiVec    = guidedHIIs;
+                    bestCombo.gIdxVec   = guidedGIdxs;
+                    bestCombo.chi2ndf   = gchi2;
+                    bestCombo.x0        = gx0;
+                    bestCombo.y0        = gy0;
+                    bestCombo.radius    = gr;
+                    bestCombo.fitCov    = gCov;
+                    bestCombo.residuals = gRes;
+                    bestCombo.nHits     = static_cast<int>(guidedHIIs.size());
+                } else {
+                    debug() << branchName << ": confirms general combo"
+                            << " (all same hits, guided chi2/ndf=" << gchi2 << ")" << endmsg;
+                }
+            };
+
+            // ── Branch A: ≥3 clean CIDs — circle-fit guided selection ────────────
+            if (nCleanCIDs >= 3 && nCrowdedCIDs >= 1) {
+                debug() << "Guided crowded-layer Branch A: " << nCleanCIDs
+                        << " clean CIDs + " << nCrowdedCIDs << " crowded CID(s)" << endmsg;
+
+                std::vector<edm4hep::TrackerHitPlane> cleanHits;
+                std::vector<size_t> cleanHIIs, cleanGIdxs;
+                collectCleanHits(cleanHits, cleanHIIs, cleanGIdxs);
 
                 if (static_cast<int>(cleanHits.size()) >= 3) {
-                    // Step 2: fit circle to clean hits only
                     double cx0 = 0, cy0 = 0, cr = 0, cchi2 = 0;
                     Eigen::Matrix3d cCov;
                     std::vector<double> cRes;
@@ -1790,13 +2019,8 @@ void DisplacedTracking::findTracks(
                     catch (...) {}
 
                     if (cleanOK && cr > 0) {
-                        // Step 3: for each crowded CID pick the hit with the best combined score:
-                        //   combined = 0.5 * (dr / sigmaHit) + 0.5 * (edepDev / edepNorm)
-                        // where dr   = radial residual to clean-fit circle (cm),
-                        //       edepDev = |edep_hit - event MIP baseline| (keV).
-                        // Equal weight between geometry and edep gives the MIP-like hit
-                        // priority even when it is slightly farther from the circle than a
-                        // stopping secondary (which has anomalous edep).
+                        // 0.75 geometry / 0.25 edep — radial residual is the primary discriminator;
+                        // edep breaks ties when two candidates lie equally close to the circle.
                         const double drNorm   = std::max(m_sigmaHitDefault.value(), 1e-9); // cm
                         const double edepNorm = std::max(m_edepNormKeV.value(),     1e-9); // keV
 
@@ -1806,26 +2030,21 @@ void DisplacedTracking::findTracks(
                         bool allCrowdedResolved = true;
 
                         for (const auto& [cid, cidHIIs] : hitIndicesByCompositeLayer) {
-                            if (static_cast<int>(cidHIIs.size()) <= 1) continue; // skip clean
+                            if (static_cast<int>(cidHIIs.size()) <= 1) continue;
                             size_t bestHII   = SIZE_MAX;
                             double bestScore = std::numeric_limits<double>::max();
                             for (size_t hii : cidHIIs) {
                                 if (globalUsedHits[allHitInfo[hii].index]) continue;
                                 const auto& hp = allHitInfo[hii].hit.getPosition(); // mm
                                 double px = hp.x * 0.1, py = hp.y * 0.1;           // → cm
-                                // Geometric term: radial residual to clean circle
                                 double dr      = std::abs(
                                     std::sqrt((px-cx0)*(px-cx0) + (py-cy0)*(py-cy0)) - cr);
-                                // Edep term: deviation from event MIP baseline
                                 double edepDev = hitEdepScore.count(hii)
-                                                 ? hitEdepScore.at(hii) : 0.0;  // keV
-                                // Combined score: equal 0.5 / 0.5 weight
-                                double score   = 0.5 * (dr / drNorm) + 0.5 * (edepDev / edepNorm);
-                                debug() << "    guided CID=" << cid
-                                        << " hit hii=" << hii
-                                        << " dr=" << dr << " cm"
-                                        << " edepDev=" << edepDev << " keV"
-                                        << " score=" << score << endmsg;
+                                                 ? hitEdepScore.at(hii) : 0.0;
+                                double score   = 0.75 * (dr / drNorm) + 0.25 * (edepDev / edepNorm);
+                                debug() << "    BranchA CID=" << cid << " hii=" << hii
+                                        << " dr=" << dr << " cm edepDev=" << edepDev
+                                        << " keV score=" << score << endmsg;
                                 if (score < bestScore) { bestScore = score; bestHII = hii; }
                             }
                             if (bestHII == SIZE_MAX) { allCrowdedResolved = false; break; }
@@ -1834,52 +2053,76 @@ void DisplacedTracking::findTracks(
                             guidedHits.push_back(allHitInfo[bestHII].hit);
                         }
 
-                        if (allCrowdedResolved) {
-                            // Step 4: refit all guided hits together
-                            double gx0 = 0, gy0 = 0, gr = 0, gchi2 = 0;
-                            Eigen::Matrix3d gCov;
-                            std::vector<double> gRes;
-                            bool guidedOK = false;
-                            try { guidedOK = fitCircleNHits(guidedHits, gx0, gy0, gr, gchi2, gCov, gRes); }
-                            catch (...) {}
+                        if (allCrowdedResolved)
+                            applyGuidedResult(guidedHits, guidedHIIs, guidedGIdxs,
+                                              "Guided crowded-layer BranchA");
+                    }
+                }
+            }
+            // ── Branch B: exactly 2 clean CIDs — kink-angle guided selection ──────
+            else if (nCleanCIDs == 2 && nCrowdedCIDs >= 1 && totalCIDs >= 3) {
+                debug() << "Guided crowded-layer Branch B: 2 clean CIDs + "
+                        << nCrowdedCIDs << " crowded CID(s)" << endmsg;
 
-                            if (guidedOK && gchi2 <= m_nHitMaxChi2NDF.value()) {
-                                // Check if guided chose differently for ANY crowded CID
-                                bool differentChoice = false;
-                                for (size_t gHII : guidedHIIs) {
-                                    bool inGeneral = false;
-                                    for (size_t bHII : bestCombo.hiiVec)
-                                        if (bHII == gHII) { inGeneral = true; break; }
-                                    if (!inGeneral) { differentChoice = true; break; }
-                                }
+                std::vector<edm4hep::TrackerHitPlane> cleanHits;
+                std::vector<size_t> cleanHIIs, cleanGIdxs;
+                collectCleanHits(cleanHits, cleanHIIs, cleanGIdxs);
 
-                                if (differentChoice || gchi2 < bestCombo.chi2ndf) {
-                                    info() << "Guided crowded-layer: "
-                                           << (differentChoice ? "OVERRIDING" : "CONFIRMING")
-                                           << " (" << nCrowdedCIDs << " crowded CID(s))"
-                                           << " | guided chi2/ndf=" << gchi2
-                                           << " | general chi2/ndf=" << bestCombo.chi2ndf
-                                           << endmsg;
-                                    bestCombo.hiiVec    = guidedHIIs;
-                                    bestCombo.gIdxVec   = guidedGIdxs;
-                                    bestCombo.chi2ndf   = gchi2;
-                                    bestCombo.x0        = gx0;
-                                    bestCombo.y0        = gy0;
-                                    bestCombo.radius    = gr;
-                                    bestCombo.fitCov    = gCov;
-                                    bestCombo.residuals = gRes;
-                                    bestCombo.nHits     = static_cast<int>(guidedHIIs.size());
-                                } else {
-                                    debug() << "Guided crowded-layer: confirms general combo"
-                                            << " (all same hits, guided chi2/ndf=" << gchi2 << ")" << endmsg;
+                if (static_cast<int>(cleanHits.size()) == 2) {
+                    // Direction from inner clean hit (A) to outer clean hit (B), in cm 3D
+                    const auto& posA_mm = cleanHits[0].getPosition();
+                    const auto& posB_mm = cleanHits[1].getPosition();
+                    double ax = posA_mm.x * 0.1, ay = posA_mm.y * 0.1, az = posA_mm.z * 0.1;
+                    double bx = posB_mm.x * 0.1, by = posB_mm.y * 0.1, bz = posB_mm.z * 0.1;
+                    double dabx = bx - ax, daby = by - ay, dabz = bz - az;
+                    double lenAB = std::sqrt(dabx*dabx + daby*daby + dabz*dabz);
+
+                    // sigmaKappa reuses the consecutive Δφ cut as the angular scale
+                    const double sigmaKappa = std::max(m_maxConsecDeltaPhi.value(), 1e-4); // rad
+                    const double edepNorm   = std::max(m_edepNormKeV.value(),       1e-9); // keV
+
+                    std::vector<edm4hep::TrackerHitPlane> guidedHits = cleanHits;
+                    std::vector<size_t> guidedHIIs  = cleanHIIs;
+                    std::vector<size_t> guidedGIdxs = cleanGIdxs;
+                    bool allCrowdedResolved = (lenAB > 1e-9); // degenerate if A==B
+
+                    if (allCrowdedResolved) {
+                        for (const auto& [cid, cidHIIs] : hitIndicesByCompositeLayer) {
+                            if (static_cast<int>(cidHIIs.size()) <= 1) continue;
+                            size_t bestHII   = SIZE_MAX;
+                            double bestScore = std::numeric_limits<double>::max();
+                            for (size_t hii : cidHIIs) {
+                                if (globalUsedHits[allHitInfo[hii].index]) continue;
+                                const auto& hp = allHitInfo[hii].hit.getPosition(); // mm
+                                double cx = hp.x * 0.1, cy = hp.y * 0.1, cz = hp.z * 0.1;
+                                double dacx = cx - ax, dacy = cy - ay, dacz = cz - az;
+                                double lenAC = std::sqrt(dacx*dacx + dacy*dacy + dacz*dacz);
+                                // Kink angle κ at A between direction AB and direction AC
+                                double kappa = 0.0;
+                                if (lenAC > 1e-9) {
+                                    double cosK = (dabx*dacx + daby*dacy + dabz*dacz)
+                                                  / (lenAB * lenAC);
+                                    cosK  = std::max(-1.0, std::min(1.0, cosK));
+                                    kappa = std::acos(cosK); // rad
                                 }
-                            } else if (guidedOK) {
-                                debug() << "Guided fit chi2/ndf=" << gchi2
-                                        << " > threshold — keeping general combo" << endmsg;
-                            } else {
-                                debug() << "Guided fit failed — keeping general combo" << endmsg;
+                                double edepDev = hitEdepScore.count(hii)
+                                                 ? hitEdepScore.at(hii) : 0.0;
+                                double score   = 0.75 * (kappa / sigmaKappa)
+                                               + 0.25 * (edepDev / edepNorm);
+                                debug() << "    BranchB CID=" << cid << " hii=" << hii
+                                        << " kappa=" << kappa << " rad edepDev=" << edepDev
+                                        << " keV score=" << score << endmsg;
+                                if (score < bestScore) { bestScore = score; bestHII = hii; }
                             }
+                            if (bestHII == SIZE_MAX) { allCrowdedResolved = false; break; }
+                            guidedHIIs.push_back(bestHII);
+                            guidedGIdxs.push_back(allHitInfo[bestHII].index);
+                            guidedHits.push_back(allHitInfo[bestHII].hit);
                         }
+
+                        if (allCrowdedResolved)
+                            applyGuidedResult(guidedHits, guidedHIIs, guidedGIdxs,
+                                              "Guided crowded-layer BranchB");
                     }
                 }
             }
