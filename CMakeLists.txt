@@ -1,5 +1,9 @@
 cmake_minimum_required(VERSION 3.12)
-project(DisplacedTracking LANGUAGES CXX)
+project(CombinatorialTrackFinder LANGUAGES CXX)
+
+# Standalone build of the CombinatorialTrackFinder (formerly DisplacedTracking /
+# StandaloneMuonTracking). The sources mirror Tracking/ in k4RecTracker; only the
+# files this component needs are kept here.
 
 # Find required packages
 find_package(DD4hep REQUIRED)
@@ -16,13 +20,21 @@ find_package(GenFit REQUIRED)
 
 # Define sources
 set(sources
-    components/DisplacedTracking.cpp
+    components/CombinatorialTrackFinder.cpp
+    components/MergeTrackerHitPlanes.cpp
+    src/TrackingPrimitives.cpp
+    src/LayerGeometry.cpp
+    src/HelixExtrapolator.cpp
+    src/SeedFinder.cpp
+    src/TrackQuality.cpp
+    src/genfit_interfaces/GenfitField.cpp
+    src/genfit_interfaces/GenfitMaterialInterface.cpp
 )
 
 # Create the module
-gaudi_add_module(DisplacedTracking
+gaudi_add_module(CombinatorialTrackFinder
     SOURCES ${sources}
-    LINK 
+    LINK
         podio::podioIO
         Gaudi::GaudiKernel
         k4FWCore::k4FWCore
@@ -32,17 +44,20 @@ gaudi_add_module(DisplacedTracking
         DD4hep::DDCore
         ROOT::Core
         ROOT::MathCore
+        ROOT::Geom
+        Eigen3::Eigen
         GenFit::genfit2
 )
 
 # Include directories
-target_include_directories(DisplacedTracking PUBLIC
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_LIST_DIR}>
+target_include_directories(CombinatorialTrackFinder PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_LIST_DIR}/include>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_LIST_DIR}/include/genfit_interfaces>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 
 # Install the target
-install(TARGETS DisplacedTracking
+install(TARGETS CombinatorialTrackFinder
     EXPORT ${CMAKE_PROJECT_NAME}Targets
     RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}" COMPONENT bin
     LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}" COMPONENT shlib
@@ -53,3 +68,23 @@ install(TARGETS DisplacedTracking
 # Set up configuration generation directory
 set(GAUDI_GENCONF_DIR "genConfDir")
 file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${GAUDI_GENCONF_DIR})
+
+# Unit tests (no Gaudi, no input files): `ctest` in the build directory.
+enable_testing()
+
+# Analytic helix crossings vs an independent RK4 Lorentz-force integration.
+add_executable(test_HelixExtrapolator
+    test/testHelixExtrapolator/test_HelixExtrapolator.cpp
+    src/HelixExtrapolator.cpp)
+target_include_directories(test_HelixExtrapolator PRIVATE ${CMAKE_CURRENT_LIST_DIR}/include)
+target_link_libraries(test_HelixExtrapolator PRIVATE Eigen3::Eigen)
+add_test(NAME test_HelixExtrapolator COMMAND test_HelixExtrapolator)
+
+# Toy calibration of the multiple-scattering-aware kink chi2.
+add_executable(test_TrackQuality
+    test/testTrackQuality/test_TrackQuality.cpp
+    src/TrackQuality.cpp
+    src/HelixExtrapolator.cpp)
+target_include_directories(test_TrackQuality PRIVATE ${CMAKE_CURRENT_LIST_DIR}/include)
+target_link_libraries(test_TrackQuality PRIVATE Eigen3::Eigen)
+add_test(NAME test_TrackQuality COMMAND test_TrackQuality)

@@ -3,7 +3,8 @@
 #
 # GenFit does not ship a CMakeConfig file, so this module finds it via
 # find_path / find_library, honouring CMAKE_PREFIX_PATH (set by the
-# key4hep nightlies) and the optional GENFIT_INSTALL_DIR hint.
+# key4hep nightlies) and the optional hints GENFIT_INSTALL_DIR (prefix) or
+# GENFIT_INC / GENFIT_LIB (include dir / full library path, as set by env1001.sh).
 #
 # Imported target
 #   GenFit::genfit2
@@ -13,16 +14,20 @@
 #   GENFIT_INCLUDE_DIRS
 #   GENFIT_LIBRARIES
 
+if(DEFINED ENV{GENFIT_LIB})
+    get_filename_component(_genfit_libdir "$ENV{GENFIT_LIB}" DIRECTORY)
+endif()
+
 find_path(GENFIT_INCLUDE_DIR
     NAMES AbsBField.h
     PATH_SUFFIXES include
-    HINTS ENV GENFIT_INSTALL_DIR
+    HINTS ENV GENFIT_INC ENV GENFIT_INSTALL_DIR
 )
 
 find_library(GENFIT_LIBRARY
     NAMES genfit2
     PATH_SUFFIXES lib lib64
-    HINTS ENV GENFIT_INSTALL_DIR
+    HINTS ${_genfit_libdir} ENV GENFIT_INSTALL_DIR
 )
 
 include(FindPackageHandleStandardArgs)

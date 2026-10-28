@@ -1,12 +1,20 @@
+/**
+ * CombinatorialTrackFinder: pattern recognition and GenFit-based track fitting
+ * for the IDEA Muon-System.
+ *
+ * @author Mahmoud Althakeel
+ * @email  mahmoud.althakeel@cern.ch
+ */
+
 #include <iostream>
 #include <iomanip>
-#include "DisplacedTracking.h"
+#include <chrono>
+#include "CombinatorialTrackFinder.h"
+#include "TrackingPrimitives.h"
 #include "DDRec/SurfaceManager.h"
 #include "DDRec/SurfaceHelper.h"
 #include "DD4hep/DD4hepUnits.h"
-#include "DDRec/MaterialManager.h"
 #include "podio/Frame.h"
-#include "k4FWCore/PodioDataSvc.h"
 #include "k4FWCore/DataHandle.h"
 
 // Some physical constants
@@ -19,11 +27,11 @@ constexpr double c_light = 299792458.0;     // m/s
 constexpr double qe = 1.602176634e-19;      // coulombs
 
 //------------------------------------------------------------------------------
-// DisplacedTracking Implementation
+// CombinatorialTrackFinder Implementation
 //------------------------------------------------------------------------------
 
 // Constructor
-DisplacedTracking::DisplacedTracking(const std::string& name, ISvcLocator* pSvcLocator)
+CombinatorialTrackFinder::CombinatorialTrackFinder(const std::string& name, ISvcLocator* pSvcLocator)
     : MultiTransformer(name, pSvcLocator,
         {
             KeyValues{"InputHitCollection",       {"TrackerHits"}},
@@ -48,7 +56,7 @@ DisplacedTracking::DisplacedTracking(const std::string& name, ISvcLocator* pSvcL
 }
 
 // Initialize method
-StatusCode DisplacedTracking::initialize() {
+StatusCode CombinatorialTrackFinder::initialize() {
     StatusCode sc = Algorithm::initialize();
     if (!sc.isSuccess()) return sc;
 
@@ -69,12 +77,81 @@ StatusCode DisplacedTracking::initialize() {
     std::string cellIDEncodingString = m_geoSvc->constantAsString(m_encodingStringParameter);
     m_bitFieldCoder = std::make_unique<dd4hep::DDSegmentation::BitFieldCoder>(cellIDEncodingString);
     
-    // Get surface map
+    // Validate the configured cellID field names against the actual encoding, so a
+    // readout mismatch fails loudly here instead of silently decoding garbage later.
+    {
+        const auto& desc = m_bitFieldCoder->fieldDescription();
+        auto hasField = [&](const std::string& n) {
+            for (const auto& f : m_bitFieldCoder->fields())
+                if (f.name() == n) return true;
+            return false;
+        };
+        if (!hasField(m_layerFieldName.value())) {
+            error() << "Readout '" << m_encodingStringParameter.value() << "' (" << desc
+                    << ") has no field '" << m_layerFieldName.value()
+                    << "'. Set LayerFieldName to match this readout." << endmsg;
+            return StatusCode::FAILURE;
+        }
+        m_hasRegionField = hasField(m_regionFieldName.value());
+        if (!m_hasRegionField) {
+            warning() << "Readout '" << m_encodingStringParameter.value() << "' (" << desc
+                      << ") has no field '" << m_regionFieldName.value()
+                      << "'; treating every hit as barrel. Set RegionFieldName "
+                      << "(\"type\" for MuonSystemReadoutID, \"side\" for GlobalTrackerReadoutID)."
+                      << endmsg;
+        }
+        // Fold "system" into the layer key when one readout spans several
+        // subdetectors, else identically-numbered layers in different subdetectors
+        // collide (GlobalTrackerReadoutID: VertexBarrel layer 0 vs SiWrB layer 0).
+        const bool multiDet = m_detectorNames.value().size() > 1;
+        if (m_systemInCompositeID.value() < 0)
+            m_useSystemInCompositeID = multiDet && hasField("system");
+        else
+            m_useSystemInCompositeID = (m_systemInCompositeID.value() != 0);
+        if (m_useSystemInCompositeID && !hasField("system")) {
+            error() << "UseSystemInCompositeID requested but readout '"
+                    << m_encodingStringParameter.value() << "' has no 'system' field." << endmsg;
+            return StatusCode::FAILURE;
+        }
+        if (multiDet && !m_useSystemInCompositeID) {
+            warning() << m_detectorNames.value().size() << " detectors share this readout but "
+                      << "'system' is NOT folded into the layer key -- layers with the same "
+                      << "index in different subdetectors will be merged." << endmsg;
+        }
+
+        info() << "CellID decoding: layer field '" << m_layerFieldName.value()
+               << "', region field '" << m_regionFieldName.value()
+               << (m_hasRegionField ? "'" : "' (absent, barrel-only)")
+               << ", system in layer key: " << (m_useSystemInCompositeID ? "yes" : "no") << endmsg;
+    }
+
+    // Get surface map. One readout can span several DetElements — GlobalTrackerReadoutID
+    // covers VertexBarrel, VertexEndcap, SiWrB and SiWrD — so merge their maps when
+    // DetectorNames is given, and fall back to the single DetectorName otherwise.
     auto surfaceMan = m_detector->extension<dd4hep::rec::SurfaceManager>();
-    m_surfaceMap = surfaceMan->map(m_detectorName);
-    if (!m_surfaceMap) {
-        error() << "Could not find surface map for detector: " << m_detectorName << endmsg;
-        return StatusCode::FAILURE;
+    std::vector<std::string> detNames = m_detectorNames.value();
+    if (detNames.empty()) detNames.push_back(m_detectorName.value());
+
+    if (detNames.size() == 1) {
+        m_surfaceMap = surfaceMan->map(detNames.front());
+        if (!m_surfaceMap) {
+            error() << "Could not find surface map for detector: " << detNames.front() << endmsg;
+            return StatusCode::FAILURE;
+        }
+    } else {
+        m_mergedSurfaceMap.clear();
+        for (const auto& name : detNames) {
+            const auto* m = surfaceMan->map(name);
+            if (!m) {
+                error() << "Could not find surface map for detector: " << name << endmsg;
+                return StatusCode::FAILURE;
+            }
+            m_mergedSurfaceMap.insert(m->begin(), m->end());
+            info() << "  merged " << m->size() << " surfaces from '" << name << "'" << endmsg;
+        }
+        m_surfaceMap = &m_mergedSurfaceMap;
+        info() << "Merged surface map over " << detNames.size() << " detectors: "
+               << m_surfaceMap->size() << " surfaces" << endmsg;
     }
 
     // Get magnetic field
@@ -116,12 +193,7 @@ StatusCode DisplacedTracking::initialize() {
             << bfieldVec.z() / dd4hep::tesla << ") Tesla" << endmsg;
     }
     
-    // Create material manager
-    dd4hep::Volume worldVol = m_detector->worldVolume();
-    m_materialManager = new dd4hep::rec::MaterialManager(worldVol);
-    //m_materialManager = new dd4hep::rec::MaterialManager(*m_detector);
-
-    // Get all surfaces and group them by layer 
+    // Get all surfaces and group them by layer
     // Another possible and simpler solution is : to call surface by layer directly from surfaceMap,
     // but for the moment we keep the following effeicient way of surfaceList.
     dd4hep::DetElement world = m_detector->world();
@@ -144,6 +216,141 @@ StatusCode DisplacedTracking::initialize() {
     
     // Group surfaces by layer
     m_surfacesByLayer = getSurfacesByLayer();
+
+    // compositeID -> region from the readout's own region field. The cid range test
+    // (>= 1000 = endcap) misclassifies barrel systems with ID >= 10; see k4rt::regionOfCid.
+    // Two different (region, system, layer) triples encoding to the same cid would make
+    // hits of different layers indistinguishable, so that is fatal.
+    m_cidRegion.clear();
+    {
+        int nMismatch = 0;
+        for (const auto* s : m_surfaces) {
+            dd4hep::DetElement det = s->detElement();
+            if (!det.isValid()) continue;
+            const uint64_t vid = det.volumeID();
+            const int cid = getCompositeID(vid);
+            const int reg = getTypeID(vid);
+            auto [it, inserted] = m_cidRegion.emplace(cid, reg);
+            if (!inserted && it->second != reg) {
+                error() << "compositeID " << cid << " is produced by surfaces in different regions ("
+                        << it->second << " and " << reg << "): the 100*system+layer encoding collides "
+                        << "for this detector" << endmsg;
+                return StatusCode::FAILURE;
+            }
+            if (inserted && reg != k4rt::regionOfCid(cid, nullptr)) ++nMismatch;
+        }
+        if (nMismatch > 0)
+            info() << nMismatch << " compositeID(s) whose region differs from the old cid-range rule "
+                   << "(barrel system ID >= 10); using the readout region field" << endmsg;
+    }
+
+    // Real per-layer geometry (radius / z extents, barrel vs endcap from the normals).
+    // Read-only after initialize(); nothing in the exhaustive search depends on it.
+    m_layerGeo.build(m_surfacesByLayer);
+    info() << "Layer geometry (inside-out by closest approach to the IP):" << endmsg;
+    for (const auto& d : m_layerGeo.layers()) {
+        info() << "  cid " << std::setw(6) << d.compositeID << "  " << std::setw(7) << k4rt::kindName(d.kind)
+               << "  r=[" << std::fixed << std::setprecision(2) << d.rMin_cm << "," << d.rMax_cm << "]"
+               << "  z=[" << d.zMin_cm << "," << d.zMax_cm << "] cm"
+               << "  dMin=" << d.dMin_cm << "  nSurf=" << d.nSurfaces
+               << std::defaultfloat << std::setprecision(6) << endmsg;
+    }
+    for (const auto& p : m_layerGeo.validate()) warning() << "LayerGeometry: " << p << endmsg;
+    // ── Strategy ────────────────────────────────────────────────────────────────
+    if (m_strategy.value() == "SeedAndExtend") {
+        m_useSeedExtend = true;
+    } else if (m_strategy.value() != "Exhaustive") {
+        error() << "Unknown Strategy '" << m_strategy.value()
+                << "' (expected Exhaustive or SeedAndExtend)" << endmsg;
+        return StatusCode::FAILURE;
+    }
+    if (m_useSeedExtend) {
+        k4rt::SeedConfig sc;
+        sc.numSeedLayers   = m_numSeedLayers.value();
+        sc.passes          = m_seedPasses.value();
+        sc.claimMinHits    = m_seedClaimMinHits.value();
+        sc.policy          = m_seedLayerPolicy.value();
+        sc.explicitSets    = m_seedLayers.value();
+        sc.layerSkip       = m_seedLayerSkip.value();
+        sc.maxDeltaPhi     = m_seedMaxDeltaPhi.value();
+        sc.maxHitDist_cm   = m_seedMaxHitDist.value();
+        sc.minRadius_cm    = m_seedMinRadius.value();
+        sc.maxZResid_cm    = m_seedMaxZResid.value();
+        sc.seedMaxChi2NDF  = m_seedMaxChi2NDF.value();
+        sc.direction       = m_extDirection.value();
+        sc.window_cm       = m_extWindow.value();
+        sc.windowSlope     = m_extWindowSlope.value();
+        sc.extMaxChi2NDF   = m_extMaxChi2NDF.value();
+        sc.maxMissedLayers = m_maxMissedLayers.value();
+        sc.maxCandPerLayer = m_maxCandPerLayer.value();
+        sc.minTrackHits    = m_minTrackHits.value();
+        sc.maxSeeds        = m_maxSeedsPerEvent.value();
+        sc.mode                = m_seMode.value();
+        sc.kinkMaxChi2Triplet  = m_kinkMaxChi2Triplet.value();
+        sc.seedKinkMaxChi2NDF  = m_seedKinkMaxChi2NDF.value();
+        sc.trackKinkMaxChi2NDF = m_trackKinkMaxChi2NDF.value();
+        sc.confirmIterations   = m_confirmIterations.value();
+        sc.mergePieces         = m_mergePieces.value();
+        sc.shortTrackMaxHits   = m_shortTrackMaxHits.value();
+        sc.shortTrackMaxHoles  = m_shortTrackMaxHoles.value();
+        sc.shortTrackMinPt     = m_shortTrackMinPt.value();
+        sc.shadowHitWindow_cm  = m_shadowHitWindow.value();
+        sc.bField_T            = m_field.magneticField(dd4hep::Position(0, 0, 0)).z() / dd4hep::tesla;
+        {   // m_particleProperties is only filled later in initialize(): look the mass up here
+            auto pit = m_particleMap.find(m_particleType);
+            sc.mass_GeV = pit != m_particleMap.end() ? pit->second.mass : 0.13957;
+        }
+        m_seBestFirst = (sc.mode == "BestFirst");
+        if (sc.mode != "Classic" && !m_seBestFirst) {
+            error() << "Unknown SeedAndExtendMode '" << sc.mode << "' (expected Classic or BestFirst)" << endmsg;
+            return StatusCode::FAILURE;
+        }
+        if (m_seBestFirst) {
+            // material of each layer, for the multiple-scattering term of the kink chi2
+            m_layerGeo.measureMaterial(*m_detector, m_surfacesByLayer, 24, m_layerMatHalfDepth.value());
+            auto& m = info();
+            m << "BestFirst: B = " << sc.bField_T << " T, mass " << sc.mass_GeV << " GeV; layer x/X0 [%]:";
+            for (const auto& d : m_layerGeo.layers()) m << " " << d.compositeID << ":" << std::fixed << std::setprecision(2) << 100.0 * d.xOverX0;
+            m << std::defaultfloat << std::setprecision(6) << endmsg;
+        }
+        if (sc.direction != "Outward" && sc.direction != "Inward" && sc.direction != "Bidirectional") {
+            error() << "Unknown ExtrapolationDirection '" << sc.direction << "'" << endmsg;
+            return StatusCode::FAILURE;
+        }
+        // One circle fit for both strategies: the seeder calls fitCircleNHits.
+        auto fit = [this](const std::vector<edm4hep::TrackerHitPlane>& hv, double& x0, double& y0,
+                          double& R, double& chi2, Eigen::Matrix3d& cov, std::vector<double>& res) {
+            try { return fitCircleNHits(hv, x0, y0, R, chi2, cov, res); } catch (...) { return false; }
+        };
+        auto plane = [this](uint64_t cellID, Eigen::Vector3d& o, Eigen::Vector3d& n) {
+            const dd4hep::rec::Surface* s = findSurfaceByID(cellID);
+            if (!s) return false;
+            const auto so = s->origin();
+            const auto sn = s->normal(so);
+            o = Eigen::Vector3d(so.x(), so.y(), so.z());
+            n = Eigen::Vector3d(sn.x(), sn.y(), sn.z()).normalized();
+            return true;
+        };
+        m_seedFinder = std::make_unique<k4rt::SeedFinder>(m_layerGeo, sc, fit, plane);
+        for (const auto& p : m_seedFinder->prepare()) warning() << "SeedFinder: " << p << endmsg;
+        {
+            auto& m = info();
+            m << "Strategy SeedAndExtend: passes";
+            for (int n : m_seedFinder->passes()) m << " [" << n << " hits: " << m_seedFinder->numSets(n) << " layer sets]";
+            m << " (policy " << sc.policy << ", skip " << sc.layerSkip << ", claim >= " << sc.claimMinHits
+              << " hits), extension " << sc.direction << endmsg;
+        }
+        if (m_seedFinder->seedLayerSets().empty()) {
+            error() << "SeedAndExtend: no seed layer sets — check SeedLayerPolicy/SeedLayers" << endmsg;
+            return StatusCode::FAILURE;
+        }
+    }
+    if (!m_layerGeoDump.value().empty()) {
+        if (m_layerGeo.dumpCSV(m_layerGeoDump.value()))
+            info() << "Layer geometry table written to " << m_layerGeoDump.value() << endmsg;
+        else
+            warning() << "Could not write layer geometry table to " << m_layerGeoDump.value() << endmsg;
+    }
     
     // Set particle properties based on configuration
     auto it = m_particleMap.find(m_particleType);
@@ -164,18 +371,17 @@ StatusCode DisplacedTracking::initialize() {
     if (m_useGenFit) {
         try {   
             // ---- Field ----
-            // Use DD4hepFieldAdapter which wraps the DD4hep OverlayedField directly.
+            // GenfitInterface::GenfitField wraps the DD4hep OverlayedField directly.
             // This is the authoritative field and properly handles the field flip at R=230 cm.
             // We store the adapter as a member so it lives for the algorithm lifetime.
-            m_genFitField = std::make_unique<DD4hepFieldAdapter>(m_field);
+            m_genFitField = std::make_unique<GenfitInterface::GenfitField>(m_field);
             genfit::FieldManager::getInstance()->init(m_genFitField.get());
 
             // ---- Material ----
-            // Use DD4hepMaterialAdapter wrapping the DD4hep MaterialManager.
-            // This is consistent with the DD4hep geometry used for surface lookup.
-            m_genFitMaterial = std::make_unique<DD4hepMaterialAdapter>(m_materialManager);
+            // GenfitInterface::GenfitMaterialInterface is a singleton keyed on the DD4hep
+            // detector; getInstance() also registers it with genfit::MaterialEffects.
+            m_genFitMaterial = GenfitInterface::GenfitMaterialInterface::getInstance(m_detector);
             genfit::MaterialEffects* matEff = genfit::MaterialEffects::getInstance();
-            matEff->init(m_genFitMaterial.get());
 
             // Set material effects options
             matEff->setMscModel("GEANE");          // Multiple-scattering model
@@ -205,7 +411,7 @@ StatusCode DisplacedTracking::initialize() {
 // Operator method
 std::tuple<edm4hep::TrackCollection,
                edm4hep::TrackerHitPlaneCollection,
-               edm4hep::TrackerHitSimTrackerHitLinkCollection> DisplacedTracking::operator()(
+               edm4hep::TrackerHitSimTrackerHitLinkCollection> CombinatorialTrackFinder::operator()(
     const edm4hep::TrackerHitPlaneCollection& hits,
     const edm4hep::EventHeaderCollection& headers,
     const edm4hep::TrackerHitSimTrackerHitLinkCollection& recoSimLinks) const {
@@ -302,7 +508,7 @@ std::tuple<edm4hep::TrackCollection,
                    << " GeV  phi=" << std::setprecision(3) << ts.phi
                    << " rad  eta=" << std::setprecision(3) << eta_out
                    << "  d0=" << std::setprecision(2) << ts.D0/10.0 << " cm"
-                   << "  z0=" << ts.Z0/10.0 << " cm  (z at innermost hit)" << endmsg;
+                   << "  z0=" << ts.Z0/10.0 << " cm  (perigee, EDM4hep convention)" << endmsg;
             hasOuter = true;
             break;
         }
@@ -391,7 +597,7 @@ std::tuple<edm4hep::TrackCollection,
 }
 
 // Finalize method
-StatusCode DisplacedTracking::finalize() {
+StatusCode CombinatorialTrackFinder::finalize() {
 
     // ================================================================
     //                   RUN STATISTICS SUMMARY
@@ -414,6 +620,7 @@ StatusCode DisplacedTracking::finalize() {
     int nOutlier       = m_statOutlierHitsRemoved.load();
     int nNeighbRej     = m_statNeighbourRejected.load();
     int nPTRej         = m_statComboPTRejected.load();
+    int nMinPTRej      = m_statComboMinPTRejected.load();
     int nTanLRej       = m_statTanLambdaRejected.load();
     int nClusters      = m_statClustersBuilt.load();
     int nH3       = m_statNhit3.load();
@@ -468,6 +675,7 @@ StatusCode DisplacedTracking::finalize() {
         << "║    Outlier hits removed       : " << std::setw(7) << nOutlier<< "  (" << std::setw(5) << std::fixed << std::setprecision(2) << avgOutlier << " / track)      ║\n"
         << "║    Rejected by neighbour gate : " << std::setw(7) << nNeighbRej     << "                   ║\n"
         << "║    Rejected by MaxComboPT     : " << std::setw(7) << nPTRej         << "                   ║\n"
+        << "║    Rejected by MinComboPT     : " << std::setw(7) << nMinPTRej      << "                   ║\n"
         << "║    Rejected by tanλ dev cut   : " << std::setw(7) << nTanLRej       << "                   ║\n"
         << "║    Hit clusters built (total) : " << std::setw(7) << nClusters      << "                   ║\n"
         << "╠══════════════════════════════════════════════════════════╣\n"
@@ -487,6 +695,21 @@ StatusCode DisplacedTracking::finalize() {
         << "║  DOWNSTREAM PROCESSING                                   ║\n"
         << "║    RK4 inner prop. OK         : " << std::setw(7) << nProp   << "  (" << std::setw(5) << std::fixed << std::setprecision(1) << propFrac << "% of tracks)  ║\n"
         << "║    Analytical inner prop. OK  : " << std::setw(7) << nAnalyt << "  (" << std::setw(5) << std::fixed << std::setprecision(1) << analFrac << "% of tracks)  ║\n"
+        << "╠══════════════════════════════════════════════════════════╣\n"
+        << "║  ANALYTICAL PROP. FAILURE REASONS                        ║\n"
+        << "║    Barrel: no solenoid isect  : " << std::setw(7) << m_statAnalBarrelNoIsect.load()   << "                   ║\n"
+        << "║    Barrel: both z fail        : " << std::setw(7) << m_statAnalBarrelBothZfail.load() << "                   ║\n"
+        << "║    Barrel: z swapped (ok)     : " << std::setw(7) << m_statAnalBarrelZswapped.load()  << "                   ║\n"
+        << "║    Endcap: |tanLam| too small : " << std::setw(7) << m_statAnalEndcapSmallTanL.load() << "                   ║\n"
+        << "║    Endcap: already past cap   : " << std::setw(7) << m_statAnalEndcapPastCap.load()   << "                   ║\n"
+        << "║    Endcap: arc > 2π R         : " << std::setw(7) << m_statAnalEndcapArcLong.load()   << "                   ║\n"
+        << "╠══════════════════════════════════════════════════════════╣\n"
+        << "║  PAIR-COINCIDENCE FILTER                                 ║\n"
+        << "║    Hits demoted (no partner)  : " << std::setw(7) << m_statHitsNonCoinc.load()      << "                   ║\n"
+        << "║    Combos rejected (<2 doubl) : " << std::setw(7) << m_statCombosRejByCoinc.load()   << "                   ║\n"
+        << "║    Tracks recovered by pass-2 : " << std::setw(7) << m_statCoincPass2Tracks.load()   << "                   ║\n"
+        << "╠══════════════════════════════════════════════════════════╣\n"
+        << "║  GENFIT DOWNSTREAM                                       ║\n"
         << "║    GenFit fit succeeded       : " << std::setw(7) << nGF     << "  (" << std::setw(5) << std::fixed << std::setprecision(1) << gfFrac   << "% of tracks)  ║\n"
         << "╠══════════════════════════════════════════════════════════╣\n"
         << "║  GENFIT DETAILS                                          ║\n"
@@ -500,32 +723,24 @@ StatusCode DisplacedTracking::finalize() {
         << endmsg;
     // ================================================================
 
-    // Clean up material manager
-    if (m_materialManager) {
-        delete m_materialManager;
-        m_materialManager = nullptr;
-    }
-    
     // Clean up GenFit resources if needed
     if (m_useGenFit) {
-        // Field manager and material effects are singletons
-        // They will be cleaned up automatically at program exit
-        
-        // Release our adapters
+        // Field manager and material effects are singletons, and
+        // m_genFitMaterial is the singleton instance itself (not owned here);
+        // they are cleaned up automatically at program exit.
         m_genFitField.reset();
-        m_genFitMaterial.reset();
     }
     
     return Algorithm::finalize();
 }
 
 // Find surface for a hit
-const dd4hep::rec::Surface* DisplacedTracking::findSurface(const edm4hep::TrackerHitPlane& hit) const {
+const dd4hep::rec::Surface* CombinatorialTrackFinder::findSurface(const edm4hep::TrackerHitPlane& hit) const {
     return findSurfaceByID(hit.getCellID());
 }
 
 // Find surface by cell ID
-const dd4hep::rec::Surface* DisplacedTracking::findSurfaceByID(uint64_t cellID) const {
+const dd4hep::rec::Surface* CombinatorialTrackFinder::findSurfaceByID(uint64_t cellID) const {
     // Find surface for this cell ID using the surface map
     dd4hep::rec::SurfaceMap::const_iterator sI = m_surfaceMap->find(cellID);
     
@@ -536,32 +751,43 @@ const dd4hep::rec::Surface* DisplacedTracking::findSurfaceByID(uint64_t cellID) 
     return nullptr;
 }
 
-// Extract Type (Barrel, Endcap) ID from cell ID
-int DisplacedTracking::getTypeID(uint64_t cellID) const {
-    // Use BitFieldCoder to extract type ID
-    return m_bitFieldCoder->get(cellID, "type");
+// Extract the barrel/endcap region ID from a cell ID.
+// The field is called "type" in MuonSystemReadoutID and "side" in
+// GlobalTrackerReadoutID; both are signed 2-bit with 0 / +1 / -1 meaning
+// barrel / +endcap / -endcap, so only the name is configurable.
+int CombinatorialTrackFinder::getTypeID(uint64_t cellID) const {
+    if (!m_hasRegionField) return 0;   // single-region readout: treat everything as barrel
+    return m_bitFieldCoder->get(cellID, m_regionFieldName.value());
 }
 
 // Extract layer ID from cell ID
-int DisplacedTracking::getLayerID(uint64_t cellID) const {
-    // Use BitFieldCoder to extract layer ID
-    return m_bitFieldCoder->get(cellID, "layer");
+int CombinatorialTrackFinder::getLayerID(uint64_t cellID) const {
+    return m_bitFieldCoder->get(cellID, m_layerFieldName.value());
 }
 
-// Compute composite layer ID that encodes both region and layer number:
-//   barrel:    compositeID = layerID
-//   +endcap:   compositeID = 1000 + layerID
-//   -endcap:   compositeID = -1000 - layerID
-int DisplacedTracking::getCompositeID(uint64_t cellID) const {
+// Compute composite layer ID that encodes subdetector, region and layer number:
+//   barrel:    compositeID =  100*system + layerID
+//   +endcap:   compositeID =  100*system + layerID + 1000
+//   -endcap:   compositeID = -(100*system + layerID + 1000)
+//
+// The system term matters as soon as one readout spans several subdetectors:
+// under GlobalTrackerReadoutID, VertexBarrel layer 0 and SiWrB layer 0 are BOTH
+// barrel with side=0 and would otherwise collapse onto the same key, merging two
+// layers ~30 cm apart into one. With a single-subdetector readout (the muon
+// system) every hit shares one system value, so this is a constant offset and
+// the behaviour is unchanged.
+int CombinatorialTrackFinder::getCompositeID(uint64_t cellID) const {
     int layerID = getLayerID(cellID);
     int typeID  = getTypeID(cellID);
-    if      (typeID ==  0) return layerID;
-    else if (typeID ==  1) return  1000 + layerID;
-    else                   return -1000 - layerID;
+    int base    = layerID;
+    if (m_useSystemInCompositeID) base += 100 * m_bitFieldCoder->get(cellID, "system");
+    if      (typeID ==  0) return base;
+    else if (typeID ==  1) return  1000 + base;
+    else                   return -1000 - base;
 }
 
 // Group surfaces by detector layer
-std::map<int, std::vector<const dd4hep::rec::Surface*>> DisplacedTracking::getSurfacesByLayer() const {
+std::map<int, std::vector<const dd4hep::rec::Surface*>> CombinatorialTrackFinder::getSurfacesByLayer() const {
     std::map<int, std::vector<const dd4hep::rec::Surface*>> result;
     
     // Process all surfaces and group them by layer ID
@@ -577,24 +803,15 @@ std::map<int, std::vector<const dd4hep::rec::Surface*>> DisplacedTracking::getSu
         
 
         // Get the layer ID
-        layerID = m_bitFieldCoder->get(volID, "layer");
+        layerID = getLayerID(volID);
+
+        // Region field ("type" for the muon system, "side" for the global tracker)
+        type = getTypeID(volID);
             
-        // Try to get the type field
-        type = m_bitFieldCoder->get(volID, "type");
-            
-        // Create a composite ID that distinguishes barrel and endcaps
-        // For barrel: layerID
-        // For endcaps: 1000 * type + layerID (1000+layerID for positive, -1000+layerID for negative)
-        int compositeID;
-        if (type == 0) {
-                // Barrel
-                compositeID = layerID;
-        } else if (type == 1) {
-                // Endcaps
-                compositeID = 1000 * type + layerID;
-        } else {
-                compositeID = 1000 * type - layerID;
-        }
+        // Same composite key as the hits use, so surfaces and hits stay in step
+        // (this also folds in the system field when several subdetectors share
+        // one readout -- see getCompositeID()).
+        const int compositeID = getCompositeID(volID);
             
         // Add surface to the appropriate layer group
         result[compositeID].push_back(surface);
@@ -644,7 +861,7 @@ std::map<int, std::vector<const dd4hep::rec::Surface*>> DisplacedTracking::getSu
 }
 
 // Get Transverse Momentum .. it uses reference point, in case of non-homogenious field,it need to be moore complex "Fix"
-double DisplacedTracking::getPT(const edm4hep::TrackState& state) const {
+double CombinatorialTrackFinder::getPT(const edm4hep::TrackState& state) const {
     // Get parameters
     double omega = state.omega;  // 1/mm
 
@@ -663,8 +880,64 @@ double DisplacedTracking::getPT(const edm4hep::TrackState& state) const {
     return pT;
 }
 
+// Convert the outer-segment (AtLastHit) state from the internal circle-fit convention to
+// the EDM4hep helix convention, so that consumers can use the five parameters directly.
+//
+// Internal convention (used by the circle fit, the GenFit seed and the inner propagation):
+//   d0 = |centre| - R and omega = charge/R: the helix built from these with the EDM4hep
+//   formulas does NOT pass through the hits -- both signs are opposite to EDM4hep;
+//   Z0 = z at the first muon hit (s = 0 at that hit), not at the perigee.
+// Stored convention (EDM4hep): d0 -> -d0, omega -> -omega (phi unchanged), and Z0 moved to
+//   the perigee: Z0 -> Z0 - tanLambda * s*, with s* the transverse arc length from the
+//   perigee to the first hit along the circle. d0, phi, omega, Z0, tanLambda are then all
+//   defined at the perigee with respect to the origin.
+// The referencePoint is deliberately left at the first muon hit.
+// Covariance: Jacobian diag(-1, 1, -1, 1, 1) plus dZ0'/dtanLambda = -s* (the dependence of
+//   s* on the circle parameters is neglected).
+// Note: this segment lives in the return field, so the sign of omega describes the
+//   geometric sense of rotation, not the charge in the EDM4hep (B along +z) sense.
+static void toPerigeeConvention(edm4hep::TrackState& state) {
+    const double d0        = -state.D0;
+    const double omega     = -state.omega;
+    const double phi       = state.phi;
+    const double tanLambda = state.tanLambda;
+    if (std::abs(omega) < 1e-12)
+        return;
+    const double radius  = 1.0 / omega;  // signed
+    const double centreX = (radius - d0) * std::sin(phi);
+    const double centreY = -(radius - d0) * std::cos(phi);
+    const double perigeeX = -d0 * std::sin(phi);
+    const double perigeeY = d0 * std::cos(phi);
+    const double anglePerigee = std::atan2(perigeeY - centreY, perigeeX - centreX);
+    const double angleFirstHit =
+        std::atan2(state.referencePoint[1] - centreY, state.referencePoint[0] - centreX);
+    double dAngle = anglePerigee - angleFirstHit;
+    while (dAngle > M_PI) dAngle -= 2.0 * M_PI;
+    while (dAngle < -M_PI) dAngle += 2.0 * M_PI;
+    const double sStar = dAngle / omega;  // arc length perigee -> first hit
+
+    using TP = edm4hep::TrackParams;
+    const double varZ0   = state.getCovMatrix(TP::z0, TP::z0);
+    const double varTanL = state.getCovMatrix(TP::tanLambda, TP::tanLambda);
+    const double covZ0T  = state.getCovMatrix(TP::z0, TP::tanLambda);
+    // sign flips: covariances pairing d0 or omega with phi/z0/tanLambda change sign
+    for (TP a : {TP::d0, TP::omega})
+        for (TP b : {TP::phi, TP::z0, TP::tanLambda})
+            state.setCovMatrix(-state.getCovMatrix(a, b), a, b);
+    // z0 shift along the helix
+    state.setCovMatrix(static_cast<float>(varZ0 - 2.0 * sStar * covZ0T + sStar * sStar * varTanL), TP::z0, TP::z0);
+    state.setCovMatrix(static_cast<float>(covZ0T - sStar * varTanL), TP::z0, TP::tanLambda);
+    for (TP a : {TP::d0, TP::phi, TP::omega})
+        state.setCovMatrix(static_cast<float>(state.getCovMatrix(a, TP::z0) - sStar * state.getCovMatrix(a, TP::tanLambda)),
+                           a, TP::z0);
+
+    state.D0    = static_cast<float>(d0);
+    state.omega = static_cast<float>(omega);
+    state.Z0    = static_cast<float>(state.Z0 - tanLambda * sStar);
+}
+
 // EDM4HEP Track state
-edm4hep::TrackState DisplacedTracking::createTrackState(
+edm4hep::TrackState CombinatorialTrackFinder::createTrackState(
     double d0, double phi, double omega, double z0, double tanLambda,
     int location) const {
     
@@ -703,7 +976,7 @@ edm4hep::TrackState DisplacedTracking::createTrackState(
 // Core tracking methods
 //------------------------------------------------------------------------------
 
-void DisplacedTracking::findTracks(
+void CombinatorialTrackFinder::findTracks(
     const edm4hep::TrackerHitPlaneCollection* hits,
     edm4hep::TrackCollection& finalTracks,
     edm4hep::TrackerHitPlaneCollection& outputHits,
@@ -728,13 +1001,25 @@ void DisplacedTracking::findTracks(
         // debug() << "[UV-DEBUG] Input hit[0]: ...";
     }
 
-    // Build a map from input TrackerHitPlane objectID -> SimTrackerHit
-    // using the existing RecoSim link collection from the digitizer
-    std::unordered_map<uint32_t, edm4hep::SimTrackerHit> recoToSimMap;
+    // Build a map from input TrackerHitPlane objectID -> all contributing SimTrackerHits.
+    // The map is multi-valued because a cluster-based digi can have several
+    // SimHits contributing to one digi hit (e.g. a primary muon + delta-ray e-
+    // both in the same readout cell). Keeping only one would drop the others
+    // and bias downstream MC-truth checks (purity, fake rate) low for cluster
+    // digi. For baseline (1 SimHit per digi) the vector simply has size 1.
+    // Key on (collectionID, index), NOT index alone: when one readout spans several
+    // subdetectors the hits arrive merged from several source collections, whose
+    // indices both start at 0 and would otherwise collide, silently attaching the
+    // wrong SimTrackerHit to a hit from a different subdetector.
+    auto hitKey = [](const auto& h) -> uint64_t {
+        const auto id = h.id();
+        return (static_cast<uint64_t>(id.collectionID) << 32) | static_cast<uint32_t>(id.index);
+    };
+    std::unordered_map<uint64_t, std::vector<edm4hep::SimTrackerHit>> recoToSimMap;
     for (const auto& link : recoSimLinks) {
         // link.getFrom() is a TrackerHit interface — get the underlying object ID
         auto recoHit = link.getFrom();
-        recoToSimMap[recoHit.id().index] = link.getTo();
+        recoToSimMap[hitKey(recoHit)].push_back(link.getTo());
     }
 
     // ── MC truth overview: list all unique MCParticles associated with event hits ─
@@ -744,50 +1029,65 @@ void DisplacedTracking::findTracks(
         std::unordered_set<int> seenMCIdx;
         int nLinked = 0;
         for (size_t gi = 0; gi < hits->size(); ++gi) {
-            auto it = recoToSimMap.find((*hits)[gi].id().index);
+            auto it = recoToSimMap.find(hitKey((*hits)[gi]));
             if (it == recoToSimMap.end()) continue;
             nLinked++;
-            auto mcPart = it->second.getParticle();
-            if (!mcPart.isAvailable()) continue;
-            int mcIdx = mcPart.id().index;
-            if (!seenMCIdx.insert(mcIdx).second) continue;  // already printed
-            const auto& mom = mcPart.getMomentum();
-            const auto& vtx = mcPart.getVertex();
-            double mcPt  = std::sqrt(mom.x*mom.x + mom.y*mom.y);
-            double mcP   = std::sqrt(mcPt*mcPt + mom.z*mom.z);
-            double mcEta = (mcPt > 0.0) ? std::asinh(mom.z / mcPt) : 0.0;
-            double mcPhi = std::atan2(mom.y, mom.x);
-            double vtxR  = std::sqrt(vtx.x*vtx.x + vtx.y*vtx.y) / 10.0;  // mm→cm
-            debug() << "  [MC truth] PDG=" << mcPart.getPDG()
-                    << "  q=" << mcPart.getCharge()
-                    << "  pT=" << std::fixed << std::setprecision(3) << mcPt << " GeV/c"
-                    << "  pz=" << mom.z << " GeV/c"
-                    << "  |p|=" << mcP << " GeV/c"
-                    << "  phi=" << mcPhi << " rad"
-                    << "  eta=" << mcEta
-                    << "  vtx_R=" << vtxR << " cm"
-                    << "  vtx_z=" << vtx.z/10.0 << " cm"
-                    << endmsg;
+            // Iterate over every SimHit contributing to this digi hit; for
+            // cluster digi a single hit may carry both a muon and one or more
+            // delta-ray contributions.
+            for (const auto& sim : it->second) {
+                auto mcPart = sim.getParticle();
+                if (!mcPart.isAvailable()) continue;
+                int mcIdx = mcPart.id().index;
+                if (!seenMCIdx.insert(mcIdx).second) continue;  // already printed
+                const auto& mom = mcPart.getMomentum();
+                const auto& vtx = mcPart.getVertex();
+                double mcPt  = std::sqrt(mom.x*mom.x + mom.y*mom.y);
+                double mcP   = std::sqrt(mcPt*mcPt + mom.z*mom.z);
+                double mcEta = (mcPt > 0.0) ? std::asinh(mom.z / mcPt) : 0.0;
+                double mcPhi = std::atan2(mom.y, mom.x);
+                double vtxR  = std::sqrt(vtx.x*vtx.x + vtx.y*vtx.y) / 10.0;  // mm→cm
+                debug() << "  [MC truth] PDG=" << mcPart.getPDG()
+                        << "  q=" << mcPart.getCharge()
+                        << "  pT=" << std::fixed << std::setprecision(3) << mcPt << " GeV/c"
+                        << "  pz=" << mom.z << " GeV/c"
+                        << "  |p|=" << mcP << " GeV/c"
+                        << "  phi=" << mcPhi << " rad"
+                        << "  eta=" << mcEta
+                        << "  vtx_R=" << vtxR << " cm"
+                        << "  vtx_z=" << vtx.z/10.0 << " cm"
+                        << endmsg;
+            }
         }
         debug() << "  => " << nLinked << "/" << hits->size() << " hits linked to sim, "
                 << seenMCIdx.size() << " unique MC particle(s)" << endmsg;
     }
 
     // Helper lambda: given a newly created output hit whose data was copied from
-    // an input hit, propagate the RecoSim link to the output link collection
+    // an input hit, propagate every RecoSim link of the input hit to the output
+    // link collection. For cluster digi this preserves multi-SimHit links
+    // (muon + delta-rays in the same readout cell) instead of collapsing them
+    // to one; baseline digi yields exactly one link per hit as before.
     auto propagateLink = [&](const edm4hep::MutableTrackerHitPlane& outHit,
                               const edm4hep::TrackerHitPlane& inHit) {
-        auto it = recoToSimMap.find(inHit.id().index);
-        if (it != recoToSimMap.end()) {
+        auto it = recoToSimMap.find(hitKey(inHit));
+        if (it == recoToSimMap.end()) return;
+        for (const auto& sim : it->second) {
             auto outLink = outputLinks.create();
             outLink.setFrom(outHit);
-            outLink.setTo(it->second);
+            outLink.setTo(sim);
             outLink.setWeight(1.0f);
         }
     };
 
     // Global hit usage tracking across all track-finding iterations
     std::vector<bool> globalUsedHits(hits->size(), false);
+
+    // SeedAndExtend: candidates are built once per event (first iteration), then handed out
+    // one per iteration — best first, skipping any that share a hit with an accepted track.
+    std::vector<k4rt::SECandidate> seCands;
+    bool   seBuilt = false;
+    size_t seNext  = 0;
     // 3D hit positions (mm) from every accepted track — used by the neighbour-gate check.
     std::vector<std::array<double, 3>> acceptedTrackHitPositions;
     int trackNumber = 0;
@@ -821,16 +1121,7 @@ void DisplacedTracking::findTracks(
         }
 
         // Structure to hold hit information for this iteration (only unused hits)
-        struct HitInfo {
-            size_t index;
-            edm4hep::TrackerHitPlane hit;
-            int layerID;
-            int typeID;
-            int compositeID;
-
-            HitInfo(size_t idx, const edm4hep::TrackerHitPlane& h, int layer, int type, int composite)
-                : index(idx), hit(h), layerID(layer), typeID(type), compositeID(composite) {}
-        };
+        using HitInfo = k4rt::HitInfo;
 
         std::vector<HitInfo> allHitInfo;
         std::map<int, std::vector<size_t>> hitIndicesByCompositeLayer; 
@@ -1094,24 +1385,7 @@ void DisplacedTracking::findTracks(
         const int minK   = std::max(3, m_minTrackHits.value());
 
         // Result of the best combination found so far
-        struct CombResult {
-            std::vector<size_t> hiiVec;       // indices into allHitInfo
-            std::vector<size_t> gIdxVec;      // indices into the full hit collection
-            double chi2ndf      = std::numeric_limits<double>::max();
-            double avgProxCm    = std::numeric_limits<double>::max();  // avg edep-deviation score (keV)
-            double x0 = 0, y0 = 0, radius = 0;
-            Eigen::Matrix3d fitCov = Eigen::Matrix3d::Zero();
-            std::vector<double> residuals;
-            int nHits = 0;
-            // Track parameters stored after N-hit fit (used to build seed state)
-            double charge    = 0.0;
-            double d0_cm     = 0.0;
-            double phi_rad   = 0.0;
-            double omega_mm  = 0.0;
-            double z0_cm     = 0.0;
-            double tanLambda = 0.0;
-            double pT        = 0.0;
-        };
+        using CombResult = k4rt::CombResult;
         CombResult bestCombo;
         CombResult fallbackCombo;  // best over-threshold combo; promoted if no valid combo exists
         bool foundCombination = false;
@@ -1185,207 +1459,119 @@ void DisplacedTracking::findTracks(
         // Both cuts reject combinations whose hits span an azimuthal window too wide
         // to belong to a single track.  Hits in gIdxVec are ordered inner→outer
         // (slot order matches compositeLayerIDs which is sorted by layer number).
+        // Hit-set predicates live in TrackingPrimitives so the seed finder can reuse them.
+        // The DEBUG stream is re-acquired per call: debug() sets the level on the shared
+        // algorithm stream, so a pointer cached once would print at whatever level the
+        // last info()/warning() left behind.
+        const k4rt::RoadCutConfig roadCfg{m_maxConsecDeltaPhi.value(), m_maxComboPhiSpread.value(),
+                                          m_maxConsecHitDist.value(), m_maxPairHitDist.value(),
+                                          m_maxComboTanLambdaDev.value()};
+        auto roadCtx = [&]() {
+            return k4rt::RoadCutContext{*hits, gIdxToComposite, roadCfg,
+                                        msgLevel(MSG::DEBUG) ? &debug() : nullptr, &m_cidRegion};
+        };
         auto passesRoadCuts = [&](const std::vector<size_t>& gIdxVec) -> bool {
-            const int nH = static_cast<int>(gIdxVec.size());
-
-            // Pre-compute φ for each hit (mm positions, ratio is unit-independent)
-            std::vector<double> phi(nH);
-            for (int i = 0; i < nH; ++i) {
-                const auto& p = (*hits)[gIdxVec[i]].getPosition();
-                phi[i] = std::atan2(p[1], p[0]);
-            }
-
-            // Cut 1: consecutive-layer |Δφ|
-            // Bypass conditions (no extra Gaudi properties):
-            //   • near beam pipe: combo θ < 15° or > 160° → bypass ALL φ road cuts
-            //     (low-pT tracks here spiral in φ between endcap layers, producing large Δφ)
-            //   • barrel↔endcap boundary pair → skip that pair only (transition region)
-            {
-                double sumR = 0.0, sumAbsZ = 0.0;
-                for (int i = 0; i < nH; ++i) {
-                    const auto& p = (*hits)[gIdxVec[i]].getPosition();
-                    sumR    += std::sqrt(p[0]*p[0] + p[1]*p[1]);
-                    sumAbsZ += std::abs(p[2]);
-                }
-                const double thetaCombo = std::atan2(sumR / nH, sumAbsZ / nH);
-                constexpr double kNearBeamLo = 15.0 * M_PI / 180.0;
-                constexpr double kNearBeamHi = 160.0 * M_PI / 180.0;
-                if (thetaCombo < kNearBeamLo || thetaCombo > kNearBeamHi) return true;
-            }
-            const double maxConsec = m_maxConsecDeltaPhi.value();
-            if (maxConsec > 0.0) {
-                for (int i = 0; i < nH - 1; ++i) {
-                    int cidA = 0, cidB = 0;
-                    {
-                        auto itA = gIdxToComposite.find(gIdxVec[i]);
-                        auto itB = gIdxToComposite.find(gIdxVec[i+1]);
-                        if (itA != gIdxToComposite.end()) cidA = itA->second;
-                        if (itB != gIdxToComposite.end()) cidB = itB->second;
-                    }
-                    const bool aBarrel = (cidA >= 0 && cidA < 1000);
-                    const bool bBarrel = (cidB >= 0 && cidB < 1000);
-                    // Barrel↔endcap transition: large Δφ is expected — skip this pair
-                    if (aBarrel != bBarrel) continue;
-
-                    double dPhi = phi[i+1] - phi[i];
-                    while (dPhi >  M_PI) dPhi -= 2*M_PI;
-                    while (dPhi < -M_PI) dPhi += 2*M_PI;
-                    dPhi = std::abs(dPhi);
-                    if (dPhi > maxConsec) {
-                        debug() << "    road FAIL (consec Δφ): gIdx="
-                                << gIdxVec[i] << "→" << gIdxVec[i+1]
-                                << "  dPhi=" << dPhi << " rad  cut=" << maxConsec << " rad" << endmsg;
-                        return false;
-                    }
-                }
-            }
-
-            // Cut 2: total φ spread (max - min relative to innermost hit, wrapped to [-π,π])
-            const double maxSpread = m_maxComboPhiSpread.value();
-            if (maxSpread > 0.0) {
-                double lo = 0.0, hi = 0.0;
-                for (int i = 1; i < nH; ++i) {
-                    double d = phi[i] - phi[0];
-                    while (d >  M_PI) d -= 2*M_PI;
-                    while (d < -M_PI) d += 2*M_PI;
-                    if (d < lo) lo = d;
-                    if (d > hi) hi = d;
-                }
-                double spread = hi - lo;
-                if (spread > maxSpread) {
-                    debug() << "    road FAIL (φ spread): spread=" << spread
-                            << " rad  cut=" << maxSpread << " rad" << endmsg;
-                    return false;
-                }
-            }
-
-            // Cut 3: endcap z/r monotonicity.
-            // For a forward-going track the transverse radius r must increase (or stay
-            // constant) as |z| increases — i.e. the particle moves outward in both
-            // coordinates together.  A hit where r decreases while |z| increases is
-            // geometrically inconsistent with any single forward track and signals a
-            // secondary or noise hit merged from a different disk.
-            {
-                std::vector<std::pair<double,double>> posEC, negEC; // (|z| mm, r mm)
-                for (int i = 0; i < nH; ++i) {
-                    const auto& p = (*hits)[gIdxVec[i]].getPosition();
-                    auto it = gIdxToComposite.find(gIdxVec[i]);
-                    if (it == gIdxToComposite.end()) continue;
-                    const int cid = it->second;
-                    const double r    = std::sqrt(p[0]*p[0] + p[1]*p[1]);
-                    const double absZ = std::abs(p[2]);
-                    if (cid >= 1000)  posEC.emplace_back(absZ, r);
-                    if (cid <= -1000) negEC.emplace_back(absZ, r);
-                }
-                auto checkZRMono = [&](std::vector<std::pair<double,double>>& ec) -> bool {
-                    if (ec.size() < 2) return true;
-                    std::sort(ec.begin(), ec.end(),
-                              [](const auto& a, const auto& b){ return a.first < b.first; });
-                    for (int i = 0; i < (int)ec.size() - 1; ++i) {
-                        const double dr = ec[i+1].second - ec[i].second;
-                        if (dr < 0.0) {
-                            debug() << "    road FAIL (endcap z/r mono): dr=" << dr
-                                    << " mm  |z|=[" << ec[i].first << "→" << ec[i+1].first
-                                    << "] mm" << endmsg;
-                            return false;
-                        }
-                    }
-                    return true;
-                };
-                if (!checkZRMono(posEC) || !checkZRMono(negEC)) return false;
-            }
-
-            return true;
+            return k4rt::passesRoadCuts(gIdxVec, roadCtx());
         };
-
-        // Reject combos where hits are too far apart in 3D space.
-        // Two sub-cuts controlled by Gaudi properties (values in cm; positions in mm):
-        //   MaxConsecutiveHitDistance : max 3D dist between consecutive (inner→outer) hits
-        //   MaxPairHitDistance        : max 3D dist between any two hits in the combo
         auto passesDistanceCuts = [&](const std::vector<size_t>& gIdxVec) -> bool {
-            const int    nH        = static_cast<int>(gIdxVec.size());
-            const double maxConsec = m_maxConsecHitDist.value();
-            const double maxPair   = m_maxPairHitDist.value();
-
-            if (maxConsec > 0.0) {
-                for (int i = 0; i < nH - 1; ++i) {
-                    const auto& pa = (*hits)[gIdxVec[i]].getPosition();
-                    const auto& pb = (*hits)[gIdxVec[i+1]].getPosition();
-                    double dx = pb[0]-pa[0], dy = pb[1]-pa[1], dz = pb[2]-pa[2];
-                    double d  = std::sqrt(dx*dx + dy*dy + dz*dz) * 0.1; // mm → cm
-                    if (d > maxConsec) {
-                        debug() << "    dist FAIL (consec): hit " << gIdxVec[i]
-                                << "→" << gIdxVec[i+1]
-                                << "  d=" << d << " cm  cut=" << maxConsec << " cm" << endmsg;
-                        return false;
-                    }
-                }
-            }
-            if (maxPair > 0.0) {
-                for (int i = 0; i < nH - 1; ++i) {
-                    for (int j = i + 1; j < nH; ++j) {
-                        const auto& pa = (*hits)[gIdxVec[i]].getPosition();
-                        const auto& pb = (*hits)[gIdxVec[j]].getPosition();
-                        double dx = pb[0]-pa[0], dy = pb[1]-pa[1], dz = pb[2]-pa[2];
-                        double d  = std::sqrt(dx*dx + dy*dy + dz*dz) * 0.1; // mm → cm
-                        if (d > maxPair) {
-                            debug() << "    dist FAIL (pair): hit " << gIdxVec[i]
-                                    << "↔" << gIdxVec[j]
-                                    << "  d=" << d << " cm  cut=" << maxPair << " cm" << endmsg;
-                            return false;
-                        }
-                    }
-                }
-            }
-            return true;
+            return k4rt::passesDistanceCuts(gIdxVec, roadCtx());
+        };
+        auto passesTanLambdaCut = [&](const std::vector<size_t>& gIdxVec) -> bool {
+            return k4rt::passesTanLambdaCut(gIdxVec, roadCtx());
         };
 
-        // tanλ consistency: for a real track tanλ = Δz/chord_xy is nearly constant across
-        // all consecutive hit pairs. Delta-ray loops and cross-particle fakes produce hits
-        // with wildly different dip angles, making the per-pair tanλ values scatter by O(1).
-        auto passesTanLambdaCut = [&](const std::vector<size_t>& gIdxVec) -> bool {
-            const double maxDev = m_maxComboTanLambdaDev.value();
-            if (maxDev <= 0.0) return true;
-            const int nH = static_cast<int>(gIdxVec.size());
-            if (nH < 3) return true;
 
-            // Mixed barrel+endcap combos have very different tanλ per pair by geometry;
-            // the cut is only meaningful for pure-barrel or pure-endcap track segments.
-            bool hasBarrel = false, hasEndcap = false;
-            for (size_t gi : gIdxVec) {
-                auto it = gIdxToComposite.find(gi);
-                if (it == gIdxToComposite.end()) continue;
-                int cid = it->second;
-                if (cid >= 0 && cid < 1000) hasBarrel = true;
-                else                         hasEndcap = true;
-                if (hasBarrel && hasEndcap) return true; // mixed combo — skip cut
+        // ── Pair-coincidence helpers (only used when RequirePairCoincidence=true) ──
+        // Doublets at (layer 0,1), (2,3), (4,5) within each region (barrel/+endcap/−endcap).
+        // Hardcoded thresholds (all three must hold):
+        //   |Δφ| < 0.15 rad      (~8.6°, covers pT ≥ 0.5 GeV at 24 cm spacing)
+        //   |Δη| < 0.10          (covers forward tracks across 12-24 cm spacing)
+        //   3D distance ≤ 250 mm (paired layers are 12 cm apart, max 24 cm)
+        constexpr double kPairTolPhi    = 0.15;
+        constexpr double kPairTolEta    = 0.10;
+        // Detector-scale dependent: 250 mm suits muon-system paired layers, but is
+        // meaningless in a vertex detector where layers sit mm apart. Configurable.
+        const double kPairMaxDistMM = m_pairCoincMaxDistMM.value();
+
+        auto coincidentHits = [&](const edm4hep::TrackerHitPlane& a,
+                                  const edm4hep::TrackerHitPlane& b) -> bool {
+            const auto& pa = a.getPosition();
+            const auto& pb = b.getPosition();
+            // 3D distance gate
+            double dx = pb[0] - pa[0];
+            double dy = pb[1] - pa[1];
+            double dz = pb[2] - pa[2];
+            if ((dx*dx + dy*dy + dz*dz) > (kPairMaxDistMM * kPairMaxDistMM))
+                return false;
+            // φ gate
+            double dPhi = std::atan2(pb[1], pb[0]) - std::atan2(pa[1], pa[0]);
+            while (dPhi >  M_PI) dPhi -= 2.0*M_PI;
+            while (dPhi < -M_PI) dPhi += 2.0*M_PI;
+            if (std::abs(dPhi) > kPairTolPhi) return false;
+            // η gate
+            double rA = std::sqrt(pa[0]*pa[0] + pa[1]*pa[1]);
+            double rB = std::sqrt(pb[0]*pb[0] + pb[1]*pb[1]);
+            if (rA < 1e-6 || rB < 1e-6) return false;
+            double etaA = std::asinh(pa[2] / rA);
+            double etaB = std::asinh(pb[2] / rB);
+            return std::abs(etaB - etaA) <= kPairTolEta;
+        };
+
+        // compositeID layout: barrel=layer (0..5); +endcap=1000+layer; -endcap=-(1000+layer)
+        // Pair partner toggles the LSB of layer: 0↔1, 2↔3, 4↔5.
+        auto pairPartnerCid = [](int composite) -> int {
+            int absC = std::abs(composite);
+            int layer = absC % 1000;
+            int partnerLayer = layer ^ 1;
+            int absPartner = (absC >= 1000) ? (1000 + partnerLayer) : partnerLayer;
+            return (composite < 0) ? -absPartner : absPartner;
+        };
+
+        // Does hit at allHitInfo[hii] have any coincident partner in its paired layer?
+        auto hasPartnerInPair = [&](size_t hii) -> bool {
+            int partnerCid = pairPartnerCid(allHitInfo[hii].compositeID);
+            auto it = hitIndicesByCompositeLayer.find(partnerCid);
+            if (it == hitIndicesByCompositeLayer.end()) return false;
+            for (size_t partnerHii : it->second) {
+                if (coincidentHits(allHitInfo[hii].hit, allHitInfo[partnerHii].hit))
+                    return true;
             }
+            return false;
+        };
 
-            std::vector<double> tanLPairs;
-            tanLPairs.reserve(nH - 1);
-            for (int i = 0; i < nH - 1; ++i) {
-                const auto& pa = (*hits)[gIdxVec[i]].getPosition();
-                const auto& pb = (*hits)[gIdxVec[i+1]].getPosition();
-                double dxy = std::sqrt((pb[0]-pa[0])*(pb[0]-pa[0]) + (pb[1]-pa[1])*(pb[1]-pa[1]));
-                if (dxy < 1.0) continue;  // skip degenerate pairs (< 1 mm transverse separation)
-                tanLPairs.push_back((pb[2] - pa[2]) / dxy);
-            }
-            if (static_cast<int>(tanLPairs.size()) < 2) return true;
-
-            std::vector<double> sorted = tanLPairs;
-            std::sort(sorted.begin(), sorted.end());
-            double median = sorted[sorted.size() / 2];
-
-            for (double tl : tanLPairs) {
-                if (std::abs(tl - median) > maxDev) {
-                    debug() << "    tanLambda FAIL: pair tanL=" << tl
-                            << " median=" << median
-                            << " |dev|=" << std::abs(tl - median)
-                            << " cut=" << maxDev << endmsg;
-                    return false;
+        // Count complete doublets in a combo: a doublet is complete when the combo
+        // contains hits in both layers of one of (0,1)/(2,3)/(4,5) AND they are
+        // mutually coincident, both in the same region.
+        auto countCompleteDoublets = [&](const std::vector<size_t>& gIdxVec) -> int {
+            int n_complete = 0;
+            const int pairs[3][2] = {{0,1}, {2,3}, {4,5}};
+            for (int p = 0; p < 3; ++p) {
+                bool complete = false;
+                for (size_t gi_a : gIdxVec) {
+                    auto itA = gIdxToComposite.find(gi_a);
+                    if (itA == gIdxToComposite.end()) continue;
+                    int cidA = itA->second;
+                    int absA = std::abs(cidA);
+                    if ((absA % 1000) != pairs[p][0]) continue;
+                    int regionA = (cidA < 0) ? -1 : (absA >= 1000 ? 1 : 0);
+                    for (size_t gi_b : gIdxVec) {
+                        if (gi_b == gi_a) continue;
+                        auto itB = gIdxToComposite.find(gi_b);
+                        if (itB == gIdxToComposite.end()) continue;
+                        int cidB = itB->second;
+                        int absB = std::abs(cidB);
+                        if ((absB % 1000) != pairs[p][1]) continue;
+                        int regionB = (cidB < 0) ? -1 : (absB >= 1000 ? 1 : 0);
+                        if (regionA != regionB) continue;
+                        if (coincidentHits((*hits)[gi_a], (*hits)[gi_b])) {
+                            complete = true; break;
+                        }
+                    }
+                    if (complete) break;
                 }
+                if (complete) ++n_complete;
             }
-            return true;
+            return n_complete;
         };
 
         // ── Build per-compositeID hit lists (full event pool) ───────────────────
@@ -1399,6 +1585,30 @@ void DisplacedTracking::findTracks(
                     hitsForCompAll[ci].push_back(hii);
                 }
             }
+        }
+
+        // ── Build seedEligible per-hit flag and a filtered hit pool for pass 1 ──
+        // seedEligible[hii] = true if hit has at least one coincident partner in
+        // its paired layer.  hitsForCompSeed contains only seedEligible hits.
+        // Populated only in HARD mode (RequirePairCoincidence=true && !soft);
+        // SOFT mode keeps all hits in the pool and biases bestCombo via scoring.
+        const bool pcHard = m_requirePairCoinc.value() && !m_pairCoincSoftScoring.value();
+        const bool pcSoft = m_requirePairCoinc.value() &&  m_pairCoincSoftScoring.value();
+        std::vector<std::vector<size_t>> hitsForCompSeed;
+        if (pcHard) {
+            hitsForCompSeed.assign(nDistinctAll, std::vector<size_t>{});
+            int evtNonCoinc = 0;
+            for (int ci = 0; ci < nDistinctAll; ++ci) {
+                for (size_t hii : hitsForCompAll[ci]) {
+                    if (hasPartnerInPair(hii)) {
+                        hitsForCompSeed[ci].push_back(hii);
+                    } else {
+                        ++evtNonCoinc;
+                    }
+                }
+            }
+            m_statHitsNonCoinc += evtNonCoinc;
+            debug() << "  PairCoinc: " << evtNonCoinc << " hits demoted (no partner in paired layer)" << endmsg;
         }
 
         // ── Hit clustering: group hits into spatially coherent road candidates ────
@@ -1525,10 +1735,98 @@ void DisplacedTracking::findTracks(
             activeClusters.push_back(std::move(cd));
         }
 
-        // ── Combinatorial loop: one pass per cluster ──────────────────────────────
+        // ── Seed-only cluster pool for pass 1 (HARD mode only) ────────────────────
+        // Single cluster from hitsForCompSeed; no Union-Find needed because the
+        // pair filter already enforces a quality criterion.  Pass 2 falls back to
+        // the original activeClusters when pass 1's best has <3 complete doublets.
+        // SOFT mode skips this entirely and runs a single pass on all hits.
+        std::vector<ClusterDef> activeClustersSeed;
+        if (pcHard) {
+            ClusterDef cd;
+            cd.cids        = compositeLayerIDs;
+            cd.hitsForComp = hitsForCompSeed;
+            activeClustersSeed.push_back(std::move(cd));
+        }
+
+        // ── Combinatorial loop: two-pass in HARD mode, single-pass in SOFT mode ──
+        // HARD: pass 0 over seed-only hits; pass 1 over all hits if pass 0 best has <3 doublets.
+        // SOFT: single pass over all hits, with bestCombo biased toward more doublets.
+        // OFF : single pass, no pair logic.
+        const int nPairPasses = pcHard ? 2 : 1;
+
+        // ── SeedAndExtend: take the next free candidate as bestCombo ─────────────
+        // Everything downstream (outlier rejection, neighbour gate, track states,
+        // output) is shared with the exhaustive path; only the choice of hits differs.
+        if (m_useSeedExtend) {
+            if (!seBuilt) {
+                std::vector<std::pair<size_t, int>> pool;
+                pool.reserve(allHitInfo.size());
+                for (const auto& hi : allHitInfo) pool.emplace_back(hi.index, hi.compositeID);
+                k4rt::SeedStats ss;
+                const auto t0 = std::chrono::steady_clock::now();
+                seCands = m_seedFinder->run(*hits, pool, ss);
+                const double ms = std::chrono::duration<double, std::milli>(
+                                      std::chrono::steady_clock::now() - t0).count();
+                seBuilt = true;
+                if (m_seBestFirst)
+                    info() << "SeedAndExtend BestFirst: " << ss.extended << " seeds extended, " << ss.skippedClaimed
+                           << " skipped (hits claimed), " << ss.rejectedTracks << " rejected (" << ss.rejectedHoles
+                           << " for holes, " << ss.rejectedShortPt << " short with low pT); confirmation +" << ss.confirmAdded
+                           << " hits, " << ss.confirmSwapped << " swapped, " << ss.confirmRemoved << " removed; " << ss.merged
+                           << " pieces merged, " << ss.loopers << " loopers, " << ss.shadowClaimed << " shadow hits claimed" << endmsg;
+                info() << "SeedAndExtend: " << pool.size() << " hits, " << ss.rawTriplets << " raw combinations, "
+                       << ss.seeds << " seeds ("
+                       << ss.seedsAfterZ << " after z check, " << ss.extended << " extended) -> "
+                       << ss.candidates << " candidates in " << ms << " ms"
+                       << (ss.hitSeedCap ? "  [MaxSeedsPerEvent reached]" : "") << endmsg;
+            }
+            std::unordered_map<size_t, size_t> gToHii;
+            for (size_t i = 0; i < allHitInfo.size(); ++i) gToHii[allHitInfo[i].index] = i;
+            while (seNext < seCands.size()) {
+                const auto& c = seCands[seNext++];
+                bool free = true;
+                for (size_t g : c.gIdx)
+                    if (usedHits[g] || !gToHii.count(g)) { free = false; break; }
+                if (!free) continue;
+                bestCombo = CombResult{};
+                bestCombo.gIdxVec = c.gIdx;
+                for (size_t g : c.gIdx) bestCombo.hiiVec.push_back(gToHii[g]);
+                bestCombo.chi2ndf   = c.chi2ndf;
+                bestCombo.avgProxCm = 0.0;
+                bestCombo.x0 = c.x0; bestCombo.y0 = c.y0; bestCombo.radius = c.R;
+                bestCombo.fitCov    = c.cov;
+                bestCombo.residuals = c.residuals;
+                bestCombo.nHits     = static_cast<int>(c.gIdx.size());
+                bestCombo.kinkChi2  = c.kinkChi2;
+                bestCombo.kinkNdf   = c.kinkNdf;
+                bestCombo.looper    = c.looper;
+                foundCombination = true;
+                break;
+            }
+        }
+
+        for (int pairPassIdx = 0; !m_useSeedExtend && pairPassIdx < nPairPasses; ++pairPassIdx) {
+            // Pass-2 trigger (HARD only): skip pass-2 if pass-1 already found a
+            // 3-complete-doublet combo (the optimal case).  If pass-1's best
+            // has <3 complete doublets, run pass-2 over all hits.  The
+            // bestCombo "isBetter" logic naturally keeps pass-1's combo if
+            // pass-2 finds nothing better.
+            if (pairPassIdx == 1 && foundCombination) {
+                int nDoub = countCompleteDoublets(bestCombo.gIdxVec);
+                if (nDoub >= 3) break;
+                debug() << "  PairCoinc: pass-1 best has " << nDoub
+                        << " complete doublets — running pass-2 over all hits"
+                        << endmsg;
+            }
+            bool foundBeforeThisPass = foundCombination;
+            int  doubletsBeforeThisPass = foundCombination
+                ? countCompleteDoublets(bestCombo.gIdxVec) : -1;
+            const std::vector<ClusterDef>& clustersThisPass =
+                (pcHard && pairPassIdx == 0) ? activeClustersSeed : activeClusters;
+
         // compositeLayerIDs / hitsForComp / nDistinct / maxKeff are re-bound to each
         // cluster's data via shadowing so the k-loop body below is unchanged.
-        for (const auto& cluster : activeClusters) {
+        for (const auto& cluster : clustersThisPass) {
         const std::vector<int>&                 compositeLayerIDs = cluster.cids;        // NOLINT(shadow)
         const std::vector<std::vector<size_t>>& hitsForComp       = cluster.hitsForComp; // NOLINT(shadow)
         const int nDistinct = static_cast<int>(compositeLayerIDs.size());
@@ -1607,8 +1905,8 @@ void DisplacedTracking::findTracks(
                                             auto itB = gIdxToComposite.find(gIdxVec[ri+1]);
                                             if (itA != gIdxToComposite.end()) cidA = itA->second;
                                             if (itB != gIdxToComposite.end()) cidB = itB->second;
-                                            const bool aBarrel = (cidA >= 0 && cidA < 1000);
-                                            const bool bBarrel = (cidB >= 0 && cidB < 1000);
+                                            const bool aBarrel = (k4rt::regionOfCid(cidA, &m_cidRegion) == 0);
+                                            const bool bBarrel = (k4rt::regionOfCid(cidB, &m_cidRegion) == 0);
                                             if (aBarrel != bBarrel) continue; // transition — bypassed
                                             const auto& pa = (*hits)[gIdxVec[ri]].getPosition();
                                             const auto& pb = (*hits)[gIdxVec[ri+1]].getPosition();
@@ -1667,6 +1965,15 @@ void DisplacedTracking::findTracks(
                                 evtTanLambdaRej++;
                                 debug() << "  k=" << k << " " << comboLabel()
                                         << " -> REJECT tanLambda dev" << endmsg;
+                            } else if (pcHard
+                                       && countCompleteDoublets(gIdxVec) < 2) {
+                                // HARD mode: need ≥2 complete doublets among
+                                // (0,1)/(2,3)/(4,5).  3 is best, 2 is acceptable,
+                                // <2 rejected.  SOFT mode skips this and biases
+                                // via the isBetter logic below instead.
+                                m_statCombosRejByCoinc++;
+                                debug() << "  k=" << k << " " << comboLabel()
+                                        << " -> REJECT <2 complete doublets" << endmsg;
                             } else {
                                 m_statTotalTripletCombos++;
                                 evtCombosEval++;
@@ -1729,6 +2036,15 @@ void DisplacedTracking::findTracks(
                                         fallbackCombo.residuals = cRes;
                                         fallbackCombo.nHits     = k;
                                     }
+                                } else if (m_minComboPT.value() > 0.0
+                                           && (0.3 * absBRefForK3 * cr / 100.0) < m_minComboPT.value()) {
+                                    // Combo pT below MinComboPT (only when the cut is enabled, i.e. > 0):
+                                    // rejected outright.  Unlike MaxComboPT there is no fallback, so a
+                                    // muon whose only combinations are below the threshold gets no track.
+                                    m_statComboMinPTRejected++;
+                                    debug() << "  k=" << k << " " << comboLabel()
+                                            << " -> REJECT pT=" << (0.3 * absBRefForK3 * cr / 100.0)
+                                            << " < MinComboPT=" << m_minComboPT.value() << endmsg;
                                 } else {
                                     // Selection priority:
                                     //  1. More hits always beats fewer hits.
@@ -1779,7 +2095,18 @@ void DisplacedTracking::findTracks(
                                     //   a slightly better-chi2 combo with an edep outlier hit.
                                     const double edepNorm = std::max(m_edepNormKeV.value(), 1e-9);
                                     bool isBetter;
-                                    if (k != bestCombo.nHits) {
+                                    // SOFT mode: doublet count is the PRIMARY criterion.
+                                    // Falls through to existing hit-count / chi² logic
+                                    // only when both combos have the same doublet count.
+                                    int cDoub = -1, bDoub = -1;
+                                    if (pcSoft) {
+                                        cDoub = countCompleteDoublets(gIdxVec);
+                                        bDoub = (bestCombo.nHits > 0)
+                                            ? countCompleteDoublets(bestCombo.gIdxVec) : -1;
+                                    }
+                                    if (pcSoft && cDoub != bDoub) {
+                                        isBetter = (cDoub > bDoub);
+                                    } else if (k != bestCombo.nHits) {
                                         isBetter = (k > bestCombo.nHits);
                                     } else if (k == 3) {
                                         // For k=3: chi2/ndf = 0 always (3 points define a circle
@@ -1870,6 +2197,19 @@ void DisplacedTracking::findTracks(
             }
         }
         } // end cluster loop
+            // Track recoveries via pass 2 for the run summary.
+            // Counts both: (a) brand-new tracks found in pass-2 when pass-1
+            // returned nothing, and (b) upgrades — pass-2 replaced pass-1's
+            // best with a higher-doublet combo.
+            if (pairPassIdx == 1 && foundCombination) {
+                int nDoubAfter = countCompleteDoublets(bestCombo.gIdxVec);
+                if (!foundBeforeThisPass) {
+                    m_statCoincPass2Tracks++;
+                } else if (nDoubAfter > doubletsBeforeThisPass) {
+                    m_statCoincPass2Tracks++;
+                }
+            }
+        } // end pair-coincidence two-pass
 
         // ── Per-event combinatorial summary ──────────────────────────────────────
         const int maxKeffAll = std::min(maxK, nDistinctAll);
@@ -1928,7 +2268,7 @@ void DisplacedTracking::findTracks(
         //
         // In both branches: refit guided hits, require chi2/NDF ≤ NHitMaxChi2NDF,
         // override bestCombo when guided chose differently or produced better chi2.
-        if (m_doCrowdedLayerHitSelection) {
+        if (m_doCrowdedLayerHitSelection && !m_useSeedExtend) {
             int nCleanCIDs   = 0;
             int nCrowdedCIDs = 0;
             for (const auto& [cid, cidHIIs] : hitIndicesByCompositeLayer) {
@@ -2136,7 +2476,9 @@ void DisplacedTracking::findTracks(
         //   ≥ NeighbourTrackMinHits hits   AND   chi2/NDF ≤ NeighbourTrackMaxChi2NDF
         // On rejection the combo hits are consumed (marked global-used) so the next
         // iteration can search for a legitimate track from a different detector region.
-        if (m_neighbourTrackMaxDist.value() > 0.0 && !acceptedTrackHitPositions.empty()) {
+        // BestFirst tracks already own their hits exclusively and were confirmed with a
+        // scattering-aware chi2; the muon-tuned gate and outlier stage below would undo that.
+        if (!m_seBestFirst && m_neighbourTrackMaxDist.value() > 0.0 && !acceptedTrackHitPositions.empty()) {
             const double distThreshMm  = m_neighbourTrackMaxDist.value() * 10.0; // cm → mm
             const double distThreshSq  = distThreshMm * distThreshMm;
             bool isNeighbour = false;
@@ -2222,7 +2564,7 @@ void DisplacedTracking::findTracks(
         // ── Outlier rejection: remove worst-residual hit and refit ────────────────
         {
             const double outlierCutCm = m_outlierSigma.value() * m_sigmaHitDefault.value();
-            for (int iter = 0; iter < m_maxOutlierIterations.value(); ++iter) {
+            for (int iter = 0; !m_seBestFirst && iter < m_maxOutlierIterations.value(); ++iter) {
                 if (static_cast<int>(bestCombo.gIdxVec.size()) <= minK) break;
 
                 // Find worst residual
@@ -2296,64 +2638,27 @@ void DisplacedTracking::findTracks(
             }
             dd4hep::Position avgPosN(sumXf/Nh, sumYf/Nh, sumZf/Nh);
             double bFieldN = m_field.magneticField(avgPosN).z() / dd4hep::tesla;
-            double bSignN  = (bFieldN >= 0.0) ? 1.0 : -1.0;
+            std::vector<edm4hep::TrackerHitPlane> orderedN;
+            orderedN.reserve(Nh);
+            for (int i = 0; i < Nh; ++i) orderedN.push_back((*hits)[bestCombo.gIdxVec[i]]);
 
-            double sinBendSumN = 0.0, avgChordN = 0.0;
-            int nTripN = 0;
-            for (int ti = 0; ti <= Nh-3; ++ti) {
-                const auto& pa = (*hits)[bestCombo.gIdxVec[ti  ]].getPosition();
-                const auto& pb = (*hits)[bestCombo.gIdxVec[ti+1]].getPosition();
-                const auto& pc = (*hits)[bestCombo.gIdxVec[ti+2]].getPosition();
-                double vabx=pb[0]-pa[0], vaby=pb[1]-pa[1];
-                double vbcx=pc[0]-pb[0], vbcy=pc[1]-pb[1];
-                double crossZ = vabx*vbcy - vaby*vbcx;
-                double lenAB  = std::sqrt(vabx*vabx + vaby*vaby);
-                double lenBC  = std::sqrt(vbcx*vbcx + vbcy*vbcy);
-                double sinB   = (lenAB*lenBC > 1e-6) ? crossZ/(lenAB*lenBC) : 0.0;
-                sinBendSumN += sinB;
-                avgChordN   += (lenAB+lenBC)/2.0;
-                ++nTripN;
-            }
-            if (nTripN > 0) { sinBendSumN /= nTripN; avgChordN /= nTripN; }
-
+            const k4rt::BendSense bsN = k4rt::bendSense(orderedN);
+            const double sinBendSumN = bsN.sinBendMean;
+            const double avgChordN   = bsN.avgChord;
             bool chargeReliableN = (avgChordN > 1e-6) &&
                                    (std::abs(sinBendSumN) >= 0.5/avgChordN);
-            double chargeN = bSignN * (sinBendSumN < 0.0 ? 1.0 : -1.0);
+            double chargeN = k4rt::chargeFromBend(sinBendSumN, bFieldN);
 
-            // ── z vs arc-length linear fit from all N hits ────────────────────────
-            const auto& p0ref = (*hits)[bestCombo.gIdxVec[0]].getPosition();
-            double angle0 = std::atan2(p0ref[1]/10.0 - cy, p0ref[0]/10.0 - cx);
-            double sumS=0, sumZ=0, sumSS=0, sumSZ=0;
-            for (int i = 0; i < Nh; ++i) {
-                const auto& pi = (*hits)[bestCombo.gIdxVec[i]].getPosition();
-                double xi = pi[0]/10.0 - cx, yi = pi[1]/10.0 - cy;
-                double dAngle = std::atan2(yi, xi) - angle0;
-                while (dAngle >  M_PI) dAngle -= 2*M_PI;
-                while (dAngle < -M_PI) dAngle += 2*M_PI;
-                // Multiply by chargeN so s is always positive in the direction of
-                // travel.  Without this, negative-charge tracks (clockwise rotation,
-                // dAngle < 0 for outer hits) produce s < 0 even though physical
-                // arc-length increases, causing tanLambda to have the wrong sign.
-                double s = chargeN * cr * dAngle;  // arc length in cm, sign-corrected
-                double z = pi[2] / 10.0;      // z in cm
-                sumS += s; sumZ += z; sumSS += s*s; sumSZ += s*z;
-            }
-            double det = Nh*sumSS - sumS*sumS;
-            double z0_cm = 0.0, tanLambda = 0.0;
-            if (std::abs(det) > 1e-10) {
-                z0_cm     = (sumZ*sumSS - sumS*sumSZ) / det;
-                tanLambda = (Nh*sumSZ  - sumS*sumZ)  / det;
-            } else {
-                z0_cm = sumZ / Nh;
-            }
+            // z vs arc-length linear fit from all N hits
+            const k4rt::ZFit zfN = k4rt::fitZvsArc(orderedN, cx, cy, cr, chargeN);
+            double z0_cm = zfN.z0_cm, tanLambda = zfN.tanLambda;
 
-            // ── Track parameters from N-hit circle ────────────────────────────────
-            double d0_cm  = std::sqrt(cx*cx + cy*cy) - cr;
-            double phi    = std::atan2(cy, cx) + chargeN * (-M_PI/2.0);
-            if (phi >  M_PI) phi -= 2*M_PI;
-            if (phi < -M_PI) phi += 2*M_PI;
-            double omega  = chargeN / (cr * 10.0);   // 1/mm
-            double pTN    = 0.3 * std::abs(bFieldN) * cr / 100.0; // GeV/c
+            // Track parameters from N-hit circle
+            const k4rt::Perigee2D pgN = k4rt::perigeeFromCircle(cx, cy, cr, chargeN);
+            double d0_cm  = pgN.d0_cm;
+            double phi    = pgN.phi_rad;
+            double omega  = pgN.omega_mm;   // 1/mm
+            double pTN    = k4rt::ptFromRadius(bFieldN, cr); // GeV/c
 
             info() << "N-hit circle fit: " << Nh << " hits  pT=" << pTN << " GeV/c"
                    << "  charge=" << chargeN
@@ -2473,6 +2778,11 @@ void DisplacedTracking::findTracks(
         debug() << "Created new final track object for track " << trackNumber << endmsg;
 
 
+        // The AtLastHit state in the internal circle-fit convention. It seeds GenFit and starts
+        // the inner propagation; only the EDM4hep-convention copy (toPerigeeConvention) is stored.
+        edm4hep::TrackState internalLastHitState;
+        bool haveInternalLastHit = false;
+
         // N-hit circle fit: use the precomputed bestCombo result (already outlier-rejected).
         if (trackHits.size() >= 3) {
             {
@@ -2507,32 +2817,16 @@ void DisplacedTracking::findTracks(
                                            sumY / trackHits.size(),
                                            sumZ / trackHits.size());
                     double bField4 = m_field.magneticField(avgPos).z() / dd4hep::tesla;
-                    double pT = 0.3 * std::abs(bField4) * radius / 100.0; // GeV/c
+                    double pT = k4rt::ptFromRadius(bField4, radius);  // GeV/c
                     double bSign4 = (bField4 >= 0.0) ? 1.0 : -1.0;
 
                     // N-hit charge sign: sum normalised cross-product sin(bend) over all
                     // consecutive triplets (i, i+1, i+2) for i = 0..N-3.
                     // Each triplet contributes sin_i = crossZ / (|chord_a| * |chord_b|).
                     // Averaging over N-2 triplets gives equal weight to all hits.
-                    const int Nh = static_cast<int>(trackHits.size());
-                    double sinBendSum4 = 0.0;
-                    double avgChord4   = 0.0;
-                    int nTriplets = 0;
-                    for (int ti = 0; ti <= Nh - 3; ++ti) {
-                        const auto& pa = trackHits[ti  ].getPosition();
-                        const auto& pb = trackHits[ti+1].getPosition();
-                        const auto& pc = trackHits[ti+2].getPosition();
-                        double vabx = pb[0]-pa[0], vaby = pb[1]-pa[1];
-                        double vbcx = pc[0]-pb[0], vbcy = pc[1]-pb[1];
-                        double crossZ = vabx*vbcy - vaby*vbcx;
-                        double lenAB  = std::sqrt(vabx*vabx + vaby*vaby);
-                        double lenBC  = std::sqrt(vbcx*vbcx + vbcy*vbcy);
-                        double sinBend = (lenAB*lenBC > 1e-6) ? crossZ/(lenAB*lenBC) : 0.0;
-                        sinBendSum4 += sinBend;
-                        avgChord4   += (lenAB + lenBC) / 2.0;
-                        ++nTriplets;
-                    }
-                    if (nTriplets > 0) { sinBendSum4 /= nTriplets; avgChord4 /= nTriplets; }
+                    const k4rt::BendSense bs4 = k4rt::bendSense(trackHits);
+                    double sinBendSum4 = bs4.sinBendMean;
+                    double avgChord4   = bs4.avgChord;
 
                     double sinThreshold4 = (avgChord4 > 1e-6) ? 0.5 / avgChord4 : 1.0;
                     bool chargeReliable4 = (std::abs(sinBendSum4) >= sinThreshold4);
@@ -2558,9 +2852,19 @@ void DisplacedTracking::findTracks(
                     // MC truth debug: extract charge and momentum from the MCParticle
                     // linked to the first hit via the RecoSim map built at the top of findTracks.
                     {
-                        auto mcIt = recoToSimMap.find(trackHits[0].id().index);
-                        if (mcIt != recoToSimMap.end()) {
-                            auto mcPart = mcIt->second.getParticle();
+                        auto mcIt = recoToSimMap.find(hitKey(trackHits[0]));
+                        if (mcIt != recoToSimMap.end() && !mcIt->second.empty()) {
+                            // Pick a muon SimHit if any contributed to this digi
+                            // hit, otherwise fall back to the first contributor.
+                            edm4hep::SimTrackerHit chosenSim = mcIt->second.front();
+                            for (const auto& s : mcIt->second) {
+                                auto p = s.getParticle();
+                                if (p.isAvailable() && std::abs(p.getPDG()) == 13) {
+                                    chosenSim = s;
+                                    break;
+                                }
+                            }
+                            auto mcPart = chosenSim.getParticle();
                             if (mcPart.isAvailable()) {
                                 const auto& mom = mcPart.getMomentum();
                                 double mcPt = std::sqrt(mom.x*mom.x + mom.y*mom.y);
@@ -2581,16 +2885,10 @@ void DisplacedTracking::findTracks(
                         }
                     }
 
-                    double d0  = std::sqrt(x0*x0 + y0*y0) - radius;
-                    // phi: tangent direction at reference point, sign depends on curvature
-                    // clockwise (charge>0 in B>0): phi = atan2(y0,x0) - π/2
-                    // counter-clockwise (charge<0 in B>0): phi = atan2(y0,x0) + π/2
-                    double phi = std::atan2(y0, x0) + charge4 * (-M_PI/2);
-                    if (phi >  M_PI) phi -= 2*M_PI;
-                    if (phi < -M_PI) phi += 2*M_PI;
-
-                    // omega = charge / R  (R in mm)
-                    double omega = charge4 / (radius * 10.0);
+                    const k4rt::Perigee2D pg4 = k4rt::perigeeFromCircle(x0, y0, radius, charge4);
+                    double d0    = pg4.d0_cm;
+                    double phi   = pg4.phi_rad;
+                    double omega = pg4.omega_mm;  // 1/mm
 
                     debug() << "N-hit AtLastHit: charge=" << charge4
                             << (chargeReliable4 ? "" : " [UNRELIABLE]")
@@ -2717,11 +3015,21 @@ void DisplacedTracking::findTracks(
                         << "  σ_tanL=" << std::sqrt(var_tanL)
                         << endmsg;
                 }
-                    finalTrack.addToTrackStates(circleFitState);
-                    // NDF = 2*n_hits - 5
-                    // Each hit gives 2 measurements (2D detector: x, y).
-                    // Helix has 5 free parameters: d0, phi0, omega, z0, tanLambda.
-                    const int fitNdf = std::max(0, 2 * static_cast<int>(trackHits.size()) - 5);
+                    internalLastHitState = circleFitState;
+                    haveInternalLastHit = true;
+                    {
+                        edm4hep::TrackState storedLastHit = circleFitState;
+                        toPerigeeConvention(storedLastHit);
+                        finalTrack.addToTrackStates(storedLastHit);
+                    }
+                    // NDF = n_hits - 3, matching the fit that produced this chi2.
+                    // fitCircleNHits() forms ONE radial residual per hit and fits three
+                    // circle parameters (x0, y0, R), so the dof is n_hits - 3 -- not the
+                    // 2*n_hits - 5 of a 5-parameter helix with two measurements per hit.
+                    // Using the helix formula here made the stored raw chi2 inconsistent
+                    // with the stored ndf (only their ratio came out right), so a chi2
+                    // probability computed from the output file was wrong.
+                    const int fitNdf = std::max(1, static_cast<int>(trackHits.size()) - 3);
                     finalTrack.setChi2(static_cast<float>(chi2 * fitNdf));   // store raw chi2
                     finalTrack.setNdf(fitNdf);
 
@@ -2761,7 +3069,16 @@ void DisplacedTracking::findTracks(
                 debug() << "Using analytical seed parameters for track " << trackNumber << " (GenFit disabled)" << endmsg;
             }
 
-            finalTrack.setNdf(std::max(1, static_cast<int>(trackHits.size() * 2 - 5)));
+            // Same dof as the circle fit above (n_hits - 3); this branch runs whenever
+            // GenFit is off or failed, and must not clobber the ndf set with the chi2.
+            finalTrack.setNdf(std::max(1, static_cast<int>(trackHits.size()) - 3));
+            // BestFirst: store the multiple-scattering-aware kink chi2 instead (calibrated,
+            // chi2/ndf ~ 1 for real tracks), and mark loopers with track type 1.
+            if (bestCombo.kinkNdf > 0) {
+                finalTrack.setChi2(static_cast<float>(bestCombo.kinkChi2));
+                finalTrack.setNdf(bestCombo.kinkNdf);
+            }
+            if (bestCombo.looper) finalTrack.setType(1);
 
             // seedTrack carries no states (N-hit params are stored in bestCombo);
             // AtLastHit is added by the circle fit block above when GenFit is skipped.
@@ -2805,16 +3122,11 @@ void DisplacedTracking::findTracks(
                 break;
             }
         }
-        if (!foundStateForProp) {
-            for (int j = 0; j < finalTrack.trackStates_size(); ++j) {
-                auto st = finalTrack.getTrackStates(j);
-                if (st.location == edm4hep::TrackState::AtLastHit) {
-                    bestState = st;
-                    foundStateForProp = true;
-                    debug() << "Using AtLastHit state (N-hit circle) for inner propagation" << endmsg;
-                    break;
-                }
-            }
+        if (!foundStateForProp && haveInternalLastHit) {
+            // internal convention (the stored AtLastHit copy is in the EDM4hep convention)
+            bestState = internalLastHitState;
+            foundStateForProp = true;
+            debug() << "Using AtLastHit state (N-hit circle) for inner propagation" << endmsg;
         }
             
         // ===== INNER PROPAGATION =====
@@ -2875,53 +3187,26 @@ void DisplacedTracking::findTracks(
                     );
                     double pMagFinal = inner.finalMomentum.norm();
                     double pRatio = pMagFinal / mom.norm();
-                    
-                    // ===== SAVE INNER STATE AS AtVertex =====
-                    double d0_inner = std::sqrt(
-                        inner.finalPosition.x() * inner.finalPosition.x() +
-                        inner.finalPosition.y() * inner.finalPosition.y()
-                    ) - (1.0 / std::abs(omega)) / 10.0;  // Approximation
-                    
-                    double phi_inner = std::atan2(
-                        inner.finalPosition.y(),
-                        inner.finalPosition.x()
-                    );
-                    
-                    double omega_inner = omega * -1.176;  // Field flip: B_outer/B_inner ratio .. need to be fixed for automated ratio
-                    
-                    double z0_inner = inner.finalPosition.z();
-                    
-                    // Create inner track state at AtVertex (distinct from AtOther used by GenFit)
-                    edm4hep::TrackState innerState = createTrackState(
-                        d0_inner * 10.0,    // cm to mm
-                        phi_inner,
-                        omega_inner / 10.0, // 1/cm to 1/mm
-                        z0_inner * 10.0,    // cm to mm
-                        tanLambda,
-                        edm4hep::TrackState::AtVertex  // ← Inner propagation result
-                    );
-                    
-                    // Add to track
-                    finalTrack.addToTrackStates(innerState);
-                    
-                    info() << "  ✓ Inner propagation SUCCESS → saved as AtVertex:" << endmsg;
-                    info() << "    Final R=" << rxy << " cm, |p|=" << pMagFinal 
+
+                    info() << "  ✓ Inner propagation SUCCESS (AtVertex saving disabled):" << endmsg;
+                    info() << "    Final R=" << rxy << " cm, |p|=" << pMagFinal
                         << " GeV/c (ratio=" << pRatio << ")" << endmsg;
                     info() << "    Arc length: " << inner.arcLength << " cm, steps: "
                         << inner.numSteps << endmsg;
-                    
-                    // ===== TRUTH COMPARISON =====
-                    try {
-                        if (m_mcParticles.exist()) {
-                            const auto* mcParts = m_mcParticles.get();
-                            if (mcParts && !mcParts->empty()) {
-                                edm4hep::Track trackView = finalTrack;
-                                validateTrackWithTruth(trackView, *mcParts, trackNumber);
-                            }
-                        }
-                    } catch (const std::exception& e) {
-                        debug() << "Could not access MCParticles for truth comparison: " << e.what() << endmsg;
-                    }
+
+                    // ===== AtVertex STATE SAVING DISABLED =====
+                    // The RK4 track-state extraction (d0, phi, omega from final position/momentum)
+                    // is not yet reliable — d0 approximation and hardcoded B-ratio are incorrect.
+                    // Re-enable once the state conversion is fixed.
+                    //
+                    // double d0_inner = rxy - (1.0 / std::abs(omega)) / 10.0;
+                    // double phi_inner = std::atan2(inner.finalPosition.y(), inner.finalPosition.x());
+                    // double omega_inner = omega * -1.176;
+                    // double z0_inner = inner.finalPosition.z();
+                    // edm4hep::TrackState innerState = createTrackState(
+                    //     d0_inner * 10.0, phi_inner, omega_inner / 10.0,
+                    //     z0_inner * 10.0, tanLambda, edm4hep::TrackState::AtVertex);
+                    // finalTrack.addToTrackStates(innerState);
                 } else {
                     debug() << "  ✗ Inner propagation failed: " << inner.message << endmsg;
                 }
@@ -2931,17 +3216,24 @@ void DisplacedTracking::findTracks(
         // ===== END INNER PROPAGATION (RK4) =====
 
         // ===== ANALYTICAL TWO-SEGMENT INNER PROPAGATION → AtIP ===============
-        // Always runs (independent of DoInnerPropagation).  Reconstructs the
-        // inner segment analytically by reversing the outer helix at the
-        // solenoid boundary and saves the result as TrackState::AtIP.
-        if (foundCombination && std::abs(bestCombo.omega_mm) > 1e-10
+        // Reconstructs the inner segment analytically by reversing the outer
+        // helix at the solenoid boundary and saves the result as TrackState::AtIP.
+        // Controlled by DoAnalyticalPropagation (default true).
+        if (m_doAnalyticalPropagation.value()
+            && foundCombination && std::abs(bestCombo.omega_mm) > 1e-10
             && finalTrack.trackerHits_size() > 0)
         {
-            // Reconstruct outer circle center from stored helix parameters
-            double R_outer_anal = 1.0 / (std::abs(bestCombo.omega_mm) * 10.0);  // cm
-            double alpha_c = bestCombo.phi_rad + bestCombo.charge * M_PI / 2.0;
-            double cx_o_anal = (bestCombo.d0_cm + R_outer_anal) * std::cos(alpha_c);
-            double cy_o_anal = (bestCombo.d0_cm + R_outer_anal) * std::sin(alpha_c);
+            // Use the circle-fit center directly — exact for any d0, no
+            // perigee-encoding assumption.  The previous formula reconstructed
+            // (cx, cy) from (d0, phi, omega), which is only correct when the
+            // helix perigee is at the origin; for displaced tracks (Z→bb etc.)
+            // the angular encoding introduces a bias that is amplified by the
+            // solenoid-crossing geometry into unrealistic d0 values.
+            // fitCircleNHits works in cm (converts hit mm positions internally)
+            // so x0, y0, radius are already in cm — no conversion needed.
+            double R_outer_anal = bestCombo.radius;  // cm
+            double cx_o_anal    = bestCombo.x0;      // cm
+            double cy_o_anal    = bestCombo.y0;      // cm
 
             // Use the innermost muon-system hit as the reference anchor
             auto refHit = finalTrack.getTrackerHits(0);
@@ -2965,6 +3257,51 @@ void DisplacedTracking::findTracks(
 
             if (atIPok) {
                 m_statAnalyticalPropSuccess++;
+
+                // ── Truth vertex rxy vs reco d0 (INFO, all samples) ──────────
+                // Find majority MCParticle for this track, retrieve production vertex
+                try {
+                    int bestMCCount = 0;
+                    edm4hep::MCParticle bestMCpart;
+                    bool hasMCpart = false;
+                    for (const auto& th : trackHits) {
+                        auto it = recoToSimMap.find(hitKey(th));
+                        if (it == recoToSimMap.end()) continue;
+                        // Prefer a muon contributor when the digi-hit has several.
+                        for (const auto& sim : it->second) {
+                            auto mcp = sim.getParticle();
+                            if (!mcp.isAvailable()) continue;
+                            if (!hasMCpart) {
+                                bestMCpart = mcp; bestMCCount = 1; hasMCpart = true;
+                            }
+                            if (std::abs(mcp.getPDG()) == 13) {
+                                bestMCpart = mcp;
+                                break;
+                            }
+                        }
+                    }
+                    if (hasMCpart) {
+                        const auto& vtx = bestMCpart.getVertex();  // mm (EDM4hep)
+                        double rxy_truth = std::sqrt(vtx.x*vtx.x + vtx.y*vtx.y);  // mm
+                        // Extract reco d0 from the AtIP state just added
+                        double d0_reco_mm = 0.0;
+                        for (int si = 0; si < finalTrack.trackStates_size(); ++si) {
+                            auto ts = finalTrack.getTrackStates(si);
+                            if (ts.location == edm4hep::TrackState::AtIP) {
+                                d0_reco_mm = ts.D0;
+                                break;
+                            }
+                        }
+                        bool suspicious = (std::abs(d0_reco_mm) > rxy_truth + 20.0);
+                        info() << "  [TruthRxy] rxy_vtx=" << std::fixed << std::setprecision(2)
+                               << rxy_truth << " mm  d0_reco=" << d0_reco_mm << " mm"
+                               << "  PDG=" << bestMCpart.getPDG()
+                               << (suspicious ? "  ** |d0|>rxy+20mm **" : "") << endmsg;
+                    }
+                } catch (const std::exception& e) {
+                    debug() << "[TruthRxy] Exception: " << e.what() << endmsg;
+                }
+
                 // ── Truth comparison (prompt muon gun: expect d0≈0, z0≈0) ──
                 try {
                     if (m_mcParticles.exist()) {
@@ -3026,13 +3363,20 @@ void DisplacedTracking::findTracks(
             // Tally MCParticle associations across all track hits
             std::unordered_map<int, std::pair<edm4hep::MCParticle, int>> mcCount;
             for (const auto& th : trackHits) {
-                auto it = recoToSimMap.find(th.id().index);
+                auto it = recoToSimMap.find(hitKey(th));
                 if (it == recoToSimMap.end()) continue;
-                auto mcPart = it->second.getParticle();
-                if (!mcPart.isAvailable()) continue;
-                int mcIdx = mcPart.id().index;
-                mcCount[mcIdx].first  = mcPart;
-                mcCount[mcIdx].second++;
+                // Count every MCParticle that contributed to this digi-hit,
+                // deduplicating within the same hit so one cluster doesn't
+                // count twice for the same MC.
+                std::unordered_set<int> seenInThisHit;
+                for (const auto& sim : it->second) {
+                    auto mcPart = sim.getParticle();
+                    if (!mcPart.isAvailable()) continue;
+                    int mcIdx = mcPart.id().index;
+                    if (!seenInThisHit.insert(mcIdx).second) continue;
+                    mcCount[mcIdx].first  = mcPart;
+                    mcCount[mcIdx].second++;
+                }
             }
             // Find majority MCParticle
             int bestCount = 0;
@@ -3145,7 +3489,7 @@ void DisplacedTracking::findTracks(
 // Both cases share the same inner-helix construction once the crossing point
 // (xc_sol, yc_sol, z_sol) on the solenoid surface is known.
 // ─────────────────────────────────────────────────────────────────────────────
-bool DisplacedTracking::analyticalInnerPropagation(
+bool CombinatorialTrackFinder::analyticalInnerPropagation(
     double cx_o, double cy_o, double R_outer,
     double omega_outer_mm,
     double pT,
@@ -3169,6 +3513,15 @@ bool DisplacedTracking::analyticalInnerPropagation(
     const double R_sol = m_solenoidBoundaryMm / 10.0;   // mm → cm
     const double Z_sol = m_solenoidHalfZmm    / 10.0;   // mm → cm
 
+    // ── Entry diagnostic ─────────────────────────────────────────────────────
+    double d_oc = std::sqrt(cx_o*cx_o + cy_o*cy_o);  // outer center dist from IP (cm)
+    info() << "  [Anal.Entry] " << (isEndcap ? "endcap" : "barrel")
+           << "  R_o=" << std::fixed << std::setprecision(2) << R_outer
+           << " d_oc=" << d_oc
+           << " outerPOCA=" << (d_oc - R_outer) << " cm"   // outer circle closest approach to IP
+           << "  pT=" << std::setprecision(3) << pT << " GeV"
+           << "  z_ref=" << std::setprecision(2) << z_ref << " cm" << endmsg;
+
     // Sign that encodes the backward direction on the outer circle:
     //   CW outer (omega<0): backward = increasing θ → +1
     //   CCW outer (omega>0): backward = decreasing θ → -1
@@ -3187,15 +3540,17 @@ bool DisplacedTracking::analyticalInnerPropagation(
 
     if (!isEndcap) {
         // ── BARREL: intersect outer circle with solenoid cylinder ────────────
-        double d_oc = std::sqrt(cx_o*cx_o + cy_o*cy_o);
+        // d_oc already computed at entry above
         if (d_oc < 1e-6) {
             debug() << "  [Analytical] Barrel: outer circle center at IP – degenerate" << endmsg;
+            m_statAnalBarrelNoIsect++;
             return false;
         }
         if (R_outer <= std::abs(d_oc - R_sol) || R_outer >= d_oc + R_sol) {
             debug() << "  [Analytical] Barrel: outer circle does not cross solenoid"
                     << "  d_oc=" << d_oc << " R_outer=" << R_outer
                     << " R_sol=" << R_sol << endmsg;
+            m_statAnalBarrelNoIsect++;
             return false;
         }
 
@@ -3223,8 +3578,36 @@ bool DisplacedTracking::analyticalInnerPropagation(
         double s_bwd = R_outer * arc_back;
         z_sol = z_ref - tanLambda * s_bwd;
 
-        debug() << "  [Analytical] Barrel crossing: (" << xc_sol << ", " << yc_sol
-                << ") cm  bwd arc=" << s_bwd << " cm  z_sol=" << z_sol << " cm" << endmsg;
+        // Fix 1: validate z_sol is on the IP side of z_ref.
+        // A displaced track can cause the arc criterion to pick the forward crossing
+        // (going away from IP), giving |z_sol| > |z_ref|.  When that happens, try
+        // the other intersection; if both fail, bail out.
+        if (std::abs(z_sol) > std::abs(z_ref) + 1e-3) {
+            double arc_alt, s_bwd_alt, z_sol_alt;
+            double xc_alt, yc_alt;
+            if (arc1 <= arc2) { xc_alt = P2x; yc_alt = P2y; arc_alt = arc2; }
+            else              { xc_alt = P1x; yc_alt = P1y; arc_alt = arc1; }
+            s_bwd_alt = R_outer * arc_alt;
+            z_sol_alt = z_ref - tanLambda * s_bwd_alt;
+            if (std::abs(z_sol_alt) > std::abs(z_ref) + 1e-3) {
+                debug() << "  [Analytical] Barrel: both crossings have |z_sol|>|z_ref|"
+                        << " z_ref=" << z_ref << " z_sol=" << z_sol
+                        << " z_sol_alt=" << z_sol_alt << " – skip" << endmsg;
+                m_statAnalBarrelBothZfail++;
+                return false;
+            }
+            debug() << "  [Analytical] Barrel: swapped to alt crossing"
+                    << " (|z_sol|=" << std::abs(z_sol) << " > |z_ref|=" << std::abs(z_ref)
+                    << ") -> z_sol_alt=" << z_sol_alt << " cm" << endmsg;
+            m_statAnalBarrelZswapped++;
+            xc_sol = xc_alt; yc_sol = yc_alt;
+            s_bwd  = s_bwd_alt;
+            z_sol  = z_sol_alt;
+        }
+
+        info() << "  [Anal.Brl] crossing=(" << std::fixed << std::setprecision(2) << xc_sol
+               << ", " << yc_sol << ") cm  bwd_arc=" << s_bwd
+               << " cm  z_sol=" << z_sol << " cm" << endmsg;
 
     } else {
         // ── ENDCAP: intersect outer helix with solenoid endcap disk at |z|=Z_sol
@@ -3235,6 +3618,7 @@ bool DisplacedTracking::analyticalInnerPropagation(
         // then compute the (x,y) on the outer circle at that arc.
         if (std::abs(tanLambda) < 1e-6) {
             debug() << "  [Analytical] Endcap: |tanLambda| too small to extrapolate z" << endmsg;
+            m_statAnalEndcapSmallTanL++;
             return false;
         }
 
@@ -3244,14 +3628,47 @@ bool DisplacedTracking::analyticalInnerPropagation(
         // Backward transverse arc to reach z = z_cap:  z_ref - tanLambda*s = z_cap
         double s_endcap = (z_ref - z_cap) / tanLambda;
         if (s_endcap < 0.0) {
-            // Reference hit is already closer to IP than the endcap cap — skip
+            // Reference hit is already inside the solenoid z boundary — the hit
+            // is endcap-typed by cell ID but sits at |z| < Z_sol.  Fall back to
+            // the barrel solenoid crossing (R = R_sol) which is the relevant
+            // boundary for this hit geometry.
             debug() << "  [Analytical] Endcap: z_ref=" << z_ref
-                    << " cm already past cap z=" << z_cap
-                    << " cm (s=" << s_endcap << ") – skip" << endmsg;
-            return false;
-        }
+                    << " cm already inside z_cap=" << z_cap
+                    << " cm – falling back to barrel formula" << endmsg;
+            m_statAnalEndcapPastCap++;
+            // ---- barrel fallback ----
+            if (d_oc < 1e-6 || R_outer <= std::abs(d_oc - R_sol) || R_outer >= d_oc + R_sol) {
+                debug() << "  [Analytical] Endcap→Barrel fallback: no barrel crossing" << endmsg;
+                return false;
+            }
+            double h   = (R_sol*R_sol + d_oc*d_oc - R_outer*R_outer) / (2.0 * d_oc);
+            double l   = std::sqrt(std::max(0.0, R_sol*R_sol - h*h));
+            double ex  = cx_o / d_oc,  ey = cy_o / d_oc;
+            double px  = -ey,          py = ex;
+            double P1x = h*ex + l*px,  P1y = h*ey + l*py;
+            double P2x = h*ex - l*px,  P2y = h*ey - l*py;
+            double theta_hit = std::atan2(y_ref - cy_o, x_ref - cx_o);
+            auto bwdArc2 = [&](double Px, double Py) -> double {
+                double tc = std::atan2(Py - cy_o, Px - cx_o);
+                return (omega_outer_mm < 0) ? normPos(tc - theta_hit) : normPos(theta_hit - tc);
+            };
+            double arc1 = bwdArc2(P1x, P1y), arc2 = bwdArc2(P2x, P2y);
+            double s_bwd_fb;
+            if (arc1 <= arc2) { xc_sol = P1x; yc_sol = P1y; s_bwd_fb = arc1 * R_outer; }
+            else               { xc_sol = P2x; yc_sol = P2y; s_bwd_fb = arc2 * R_outer; }
+            z_sol = z_ref - tanLambda * s_bwd_fb;
+            if (std::abs(z_sol) > std::abs(z_ref) + 1e-3) {
+                debug() << "  [Analytical] Endcap→Barrel fallback: z_sol=" << z_sol << " cm out of range" << endmsg;
+                return false;
+            }
+            info() << "  [Anal.Brl*] fallback crossing=(" << std::fixed << std::setprecision(2) << xc_sol
+                   << ", " << yc_sol << ") cm  bwd_arc=" << s_bwd_fb
+                   << " cm  z_sol=" << z_sol << " cm" << endmsg;
+            // continue to common section below with the barrel crossing point
+        } else {
         if (s_endcap > 2.0 * M_PI * R_outer) {
             debug() << "  [Analytical] Endcap: backward arc would exceed one loop – skip" << endmsg;
+            m_statAnalEndcapArcLong++;
             return false;
         }
 
@@ -3264,9 +3681,10 @@ bool DisplacedTracking::analyticalInnerPropagation(
         yc_sol = cy_o + R_outer * std::sin(theta_cap);
         z_sol  = z_cap;
 
-        debug() << "  [Analytical] Endcap crossing: (" << xc_sol << ", " << yc_sol
-                << ", " << z_sol << ") cm  bwd arc=" << s_endcap << " cm" << endmsg;
-    }
+        info() << "  [Anal.End] crossing=(" << std::fixed << std::setprecision(2) << xc_sol
+               << ", " << yc_sol << ", " << z_sol << ") cm  bwd_arc=" << s_endcap << " cm" << endmsg;
+    }   // closes: if (s_endcap < 0.0) { ... } else { ... }
+    }   // closes: if (!isEndcap) { ... } else { ... }
 
     // ── Common: tangent and outward radial at the solenoid crossing ───────────
     double rx = (xc_sol - cx_o) / R_outer;
@@ -3294,9 +3712,10 @@ bool DisplacedTracking::analyticalInnerPropagation(
     double cy_i    = yc_sol + R_inner * ry;
 
     double B_outer_approx = pT * 100.0 / (0.3 * R_outer);
-    debug() << "  [Analytical] Inner circle: center=(" << cx_i << ", " << cy_i
-            << ") cm  R_inner=" << R_inner << " cm"
-            << "  B_inner=" << B_inner << " T  |B_outer|≈" << B_outer_approx << " T" << endmsg;
+    info() << "  [Anal.Inner] R_i=" << std::fixed << std::setprecision(2) << R_inner
+           << " cx_i=" << cx_i << " cy_i=" << cy_i
+           << " B_i=" << std::setprecision(3) << B_inner << " T"
+           << "  d0=" << std::setprecision(2) << (std::sqrt(cx_i*cx_i+cy_i*cy_i)-R_inner) << " cm" << endmsg;
 
     // ── Inner helix parameters at the 2-D perigee (CCA to z-axis) ────────────
     double d0_inner_cm    = std::sqrt(cx_i*cx_i + cy_i*cy_i) - R_inner;
@@ -3350,7 +3769,7 @@ bool DisplacedTracking::analyticalInnerPropagation(
 // ------------------------------------ //
 // -------------- GenFit -------------- //
 // ------------------------------------ //
-genfit::MeasuredStateOnPlane DisplacedTracking::convertToGenFitState(
+genfit::MeasuredStateOnPlane CombinatorialTrackFinder::convertToGenFitState(
     const edm4hep::TrackState& state,
     genfit::AbsTrackRep* rep) const {
     
@@ -3425,7 +3844,7 @@ genfit::MeasuredStateOnPlane DisplacedTracking::convertToGenFitState(
 }
 
 
-edm4hep::TrackState DisplacedTracking::convertToEDM4hepState(
+edm4hep::TrackState CombinatorialTrackFinder::convertToEDM4hepState(
     const genfit::MeasuredStateOnPlane& state,
     int location) const {
     
@@ -3603,7 +4022,7 @@ edm4hep::TrackState DisplacedTracking::convertToEDM4hepState(
     return outState;
 }
 
-genfit::AbsMeasurement* DisplacedTracking::createGenFitMeasurement(
+genfit::AbsMeasurement* CombinatorialTrackFinder::createGenFitMeasurement(
     const edm4hep::TrackerHitPlane& hit,
     const dd4hep::rec::Surface* surface,
     int hitId,
@@ -3660,7 +4079,7 @@ genfit::AbsMeasurement* DisplacedTracking::createGenFitMeasurement(
     return meas;
 }
 
-bool DisplacedTracking::fitTrackWithGenFit(
+bool CombinatorialTrackFinder::fitTrackWithGenFit(
     const std::vector<edm4hep::TrackerHitPlane>& hits,
     const edm4hep::TrackState& seedState,
     edm4hep::MutableTrack& finalTrack,
@@ -4022,7 +4441,7 @@ bool DisplacedTracking::fitTrackWithGenFit(
     }
 }
 
-bool DisplacedTracking::fitCircleNHits(
+bool CombinatorialTrackFinder::fitCircleNHits(
     const std::vector<edm4hep::TrackerHitPlane>& hits,
     double& x0, double& y0, double& radius, double& chi2ndf,
     Eigen::Matrix3d& fitCov3x3,
@@ -4041,10 +4460,15 @@ bool DisplacedTracking::fitCircleNHits(
         const auto& pos = hits[i].getPosition();
         pts[i] = { pos[0] / 10.0, pos[1] / 10.0 };
         double su = hits[i].getDu();
-        double sv = hits[i].getDv();
         if (su <= 0) su = m_sigmaHitDefault.value() * 10.0;  // property is in cm, du is in mm
-        if (sv <= 0) sv = m_sigmaHitDefault.value() * 10.0;
-        sigma[i] = std::sqrt(su*su + sv*sv) / 10.0;  // convert mm → cm
+        // The fit forms a single SCALAR radial residual per hit (see step 4), so the
+        // weight must be a single 1D uncertainty. Adding du and dv in quadrature here
+        // described a 2D position error and inflated sigma by up to sqrt(2) (exactly
+        // sqrt(2) when du == dv, as the muon-system digitiser produces), which deflated
+        // chi2 by a factor 2. Use the precise measurement coordinate du instead.
+        // NOTE: strictly the radial direction should be projected onto the local (u,v)
+        // axes; du is the right scale for the bending-plane residual in this geometry.
+        sigma[i] = su / 10.0;  // convert mm → cm
         w[i]     = 1.0 / (sigma[i] * sigma[i]);
     }
 
@@ -4139,7 +4563,7 @@ bool DisplacedTracking::fitCircleNHits(
     return true;
 }
 // Helper to get PDG code
-int DisplacedTracking::getPDGCode() const {
+int CombinatorialTrackFinder::getPDGCode() const {
     // Map particle type to PDG code
     if (m_particleType == "electron") return 11;
     else if (m_particleType == "positron") return -11;
@@ -4155,7 +4579,7 @@ int DisplacedTracking::getPDGCode() const {
 // ============================================================================
 // SOLENOID BOUNDARY SCAN
 // ============================================================================
-double DisplacedTracking::findSolenoidBoundary() const {
+double CombinatorialTrackFinder::findSolenoidBoundary() const {
     // Scan B_z along the +x axis (y=z=0) in 1 mm steps around the nominal radius
     // to bracket the sign change, then binary-search for < 0.01 mm precision.
 
@@ -4232,7 +4656,7 @@ double DisplacedTracking::findSolenoidBoundary() const {
 // Scan B_z along the z-axis (x=y=0) to find the solenoid endcap boundary.
 // Same algorithm as findSolenoidBoundary() but in z instead of R.
 // ─────────────────────────────────────────────────────────────────────────────
-double DisplacedTracking::findSolenoidBoundaryZ() const {
+double CombinatorialTrackFinder::findSolenoidBoundaryZ() const {
     const double nominalMm   = m_solenoidHalfZ.value();
     const double stepMm      = 1.0;
     const double scanRangeMm = 600.0;
@@ -4310,7 +4734,7 @@ double DisplacedTracking::findSolenoidBoundaryZ() const {
 // ============================================================================
 // TRUTH COMPARISON
 // ============================================================================
-void DisplacedTracking::compareStatesWithTruth(
+void CombinatorialTrackFinder::compareStatesWithTruth(
     const edm4hep::Track& track,
     const edm4hep::MCParticleCollection& mcParticles,
     int trackNumber) const {
@@ -4420,13 +4844,13 @@ void DisplacedTracking::compareStatesWithTruth(
 // ============================================================================
 // INNER SOLENOID PROPAGATION IMPLEMENTATIONS
 // ============================================================================
-bool DisplacedTracking::isInsideSolenoid(const Eigen::Vector3d& pos) const {
+bool CombinatorialTrackFinder::isInsideSolenoid(const Eigen::Vector3d& pos) const {
     double r = std::sqrt(pos.x() * pos.x() + pos.y() * pos.y());
     double z = std::abs(pos.z());
     return (r < m_solenoidBoundaryMm / 10.0) && (z < SOLENOID_Z_HALF_CM);
 }
 
-void DisplacedTracking::rk4PropagationStep(
+void CombinatorialTrackFinder::rk4PropagationStep(
     Eigen::Vector3d& pos,
     Eigen::Vector3d& mom,
     double stepSize,
@@ -4482,7 +4906,7 @@ void DisplacedTracking::rk4PropagationStep(
     }
 }
 
-InnerTrajectory DisplacedTracking::propagateToInner(
+InnerTrajectory CombinatorialTrackFinder::propagateToInner(
     const Eigen::Vector3d& outerPos,
     const Eigen::Vector3d& outerMom,
     double targetRadius,
@@ -4547,7 +4971,7 @@ InnerTrajectory DisplacedTracking::propagateToInner(
     return result;
 }
 
-const edm4hep::MCParticle* DisplacedTracking::findTruthParticle(
+const edm4hep::MCParticle* CombinatorialTrackFinder::findTruthParticle(
     const edm4hep::Track& recoTrack,
     const edm4hep::MCParticleCollection& mcParticles) const {
     
@@ -4607,7 +5031,7 @@ const edm4hep::MCParticle* DisplacedTracking::findTruthParticle(
     return bestMatch;
 }
 
-void DisplacedTracking::validateTrackWithTruth(
+void CombinatorialTrackFinder::validateTrackWithTruth(
     const edm4hep::Track& recoTrack,
     const edm4hep::MCParticleCollection& mcParticles,
     int trackNumber) const {

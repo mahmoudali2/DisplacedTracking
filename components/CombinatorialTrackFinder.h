@@ -1,5 +1,5 @@
-#ifndef DISPLACED_TRACKING_H
-#define DISPLACED_TRACKING_H
+#ifndef COMBINATORIAL_TRACK_FINDER_H
+#define COMBINATORIAL_TRACK_FINDER_H
 
 #include <vector>
 #include <map>
@@ -19,18 +19,18 @@
 #include "GAUDI_VERSION.h"
 
 #include <Eigen/Dense>
+#include "LayerGeometry.h"
+#include "SeedFinder.h"
 #include "DD4hep/Detector.h"
 #include "DD4hep/Fields.h"
 #include "DD4hep/DD4hepUnits.h"
 #include "DDRec/Surface.h"
 #include "DDRec/SurfaceManager.h"
-#include "DDRec/MaterialManager.h"
 #include "DDSegmentation/BitFieldCoder.h"
 
 #include "k4FWCore/DataHandle.h"
 #include "k4FWCore/Transformer.h"
 //#include "k4FWCore/MultiTransformer.h"
-#include "k4FWCore/PodioDataSvc.h"
 #include "k4Interface/IUniqueIDGenSvc.h"
 
 // EDM4hep includes
@@ -67,15 +67,15 @@
 #include <atomic>
 #include <iomanip>
 
-// Include our adapter classes
-#include "GenFitAdapters.h"
+// Reuse the field/material GenFit adapters already provided by k4RecTracker's Tracking module
+#include "GenfitField.h"
+#include "GenfitMaterialInterface.h"
 
 // Forward declarations
 namespace dd4hep {
     class OverlayedField;
     namespace rec {
         class Surface;
-        class MaterialManager;
     }
 }
 
@@ -112,13 +112,24 @@ struct InnerTrajectory {
     std::string message;                // status/error message
 };
 
-/**
- * Displaced Track Finder/Fitter implemented as a Key4hep Transformer
+/** @class CombinatorialTrackFinder
+ *
+ *  Standalone pattern-recognition and track fitter for the IDEA Muon-System,
+ *  implemented as a Key4hep Gaudi MultiTransformer.
+ *
+ *  Reconstructs tracks directly from Muon-System tracker hits via an N-hit
+ *  combinatorial circle-fit search (with configurable quality/outlier/road
+ *  cuts), optionally refining the result with a GenFit Kalman/DAF fit and
+ *  analytical or RK4 propagation of the track inward through the solenoid
+ *  boundary.
+ *
+ *  @author Mahmoud Althakeel
+ *  @email  mahmoud.althakeel@cern.ch
  */
 // Convenience alias for the link-propagation callback
 using LinkPropagator = std::function<void(const edm4hep::MutableTrackerHitPlane&, const edm4hep::TrackerHitPlane&)>;
 
-class DisplacedTracking final
+class CombinatorialTrackFinder final
     : public k4FWCore::MultiTransformer<
         std::tuple<edm4hep::TrackCollection,
                    edm4hep::TrackerHitPlaneCollection,
@@ -128,8 +139,8 @@ class DisplacedTracking final
                        const edm4hep::TrackerHitSimTrackerHitLinkCollection&)
       > {
 public:
-    DisplacedTracking(const std::string& name, ISvcLocator* pSvcLocator);
-    virtual ~DisplacedTracking() = default;
+    CombinatorialTrackFinder(const std::string& name, ISvcLocator* pSvcLocator);
+    virtual ~CombinatorialTrackFinder() = default;
 
     StatusCode initialize() override;
     StatusCode finalize() override;
@@ -172,17 +183,6 @@ private:
                     double d0, double phi, double omega, double z0, double tanLambda,
                     int location = edm4hep::TrackState::AtOther) const;
         
-    // Predict track state to a new surface
-    edm4hep::TrackState predictToSurface(
-        const edm4hep::TrackState& state,
-        const dd4hep::rec::Surface* surface) const;
-        
-    // Calculate chi-square between track state and hit
-    double getChi2(
-        const edm4hep::TrackState& state,
-        const edm4hep::TrackerHitPlane& hit,
-        const dd4hep::rec::Surface* surface) const;
-
     // Group surfaces by detector layer
     std::map<int, std::vector<const dd4hep::rec::Surface*>> getSurfacesByLayer() const;
 
@@ -221,9 +221,9 @@ private:
         int hitId,
         genfit::TrackPoint* trackPoint) const;
 
-    // Add field and material adapters as members
-    std::unique_ptr<DD4hepFieldAdapter> m_genFitField;
-    std::unique_ptr<DD4hepMaterialAdapter> m_genFitMaterial;
+    // Field and material adapters (shared GenFit interfaces from Tracking/include/genfit_interfaces)
+    std::unique_ptr<GenfitInterface::GenfitField> m_genFitField;
+    GenfitInterface::GenfitMaterialInterface* m_genFitMaterial{nullptr}; // singleton, not owned
     
     // ==================== TRUTH MATCHING ====================
     // Data handle for truth information - use mutable to allow get() in const methods
@@ -324,8 +324,102 @@ private:
     
     // Properties
     Gaudi::Property<std::string> m_detectorName{this, "DetectorName", "Tracker", "Name of detector to process"};
+    Gaudi::Property<std::vector<std::string>> m_detectorNames{this, "DetectorNames", {},
+        "Optional list of detector names whose surface maps are merged. Use when one readout "
+        "spans several DetElements (e.g. GlobalTrackerReadoutID covers VertexBarrel, VertexEndcap, "
+        "SiWrB, SiWrD). If empty, DetectorName is used on its own."};
     Gaudi::Property<std::string> m_particleType{this, "ParticleType", "pion", "Particle type for material effects"};
     Gaudi::Property<std::string> m_encodingStringParameter{this, "EncodingStringParameterName", "GlobalTrackerReadoutID", "Name of DD4hep parameter with the encoding string"};
+    // CellID field names. Different readouts spell the same concepts differently:
+    //   MuonSystemReadoutID  : system:5,type:-2,layer:2,chamber:13,slice:1,y:-10,z:-10
+    //   GlobalTrackerReadoutID: system:5,side:-2,layer:6,module:11,sensor:8
+    // "type" and "side" are both signed 2-bit fields with the same 0 / +1 / -1
+    // barrel / +endcap / -endcap meaning, so only the NAME differs.
+    Gaudi::Property<std::string> m_regionFieldName{this, "RegionFieldName", "type",
+        "CellID field separating barrel (0) from +endcap (1) and -endcap (-1). "
+        "\"type\" for MuonSystemReadoutID, \"side\" for GlobalTrackerReadoutID."};
+    Gaudi::Property<std::string> m_layerFieldName{this, "LayerFieldName", "layer",
+        "CellID field holding the layer index."};
+    // ── Strategy ────────────────────────────────────────────────────────────────
+    // "Exhaustive"   : C(N,k) over all layers (the original algorithm; default).
+    // "SeedAndExtend": N-plet seeds on NumSeedLayers layers, then helix extension layer by
+    //                  layer. For dense events where the exhaustive search explodes.
+    Gaudi::Property<std::string> m_strategy{this, "Strategy", "Exhaustive",
+        "Exhaustive | SeedAndExtend"};
+    Gaudi::Property<int> m_numSeedLayers{this, "NumSeedLayers", 3,
+        "SeedAndExtend: hits (= layers) per seed, >= 3"};
+    Gaudi::Property<std::string> m_seedLayerPolicy{this, "SeedLayerPolicy", "consecutive",
+        "SeedAndExtend: consecutive (any run of NumSeedLayers consecutive layers; works for "
+        "displaced tracks) | innermost | outermost | explicit (use SeedLayers)"};
+    Gaudi::Property<std::vector<std::vector<int>>> m_seedLayers{this, "SeedLayers", {},
+        "SeedAndExtend: explicit seed layer sets as lists of compositeIDs, inside-out"};
+    Gaudi::Property<std::vector<int>> m_seedPasses{this, "SeedPasses", {},
+        "SeedAndExtend: iterative seeding, hits per seed for each pass, e.g. [5,4,3]; later "
+        "passes only use hits not claimed by earlier ones. Empty = one pass of NumSeedLayers"};
+    Gaudi::Property<int> m_seedClaimMinHits{this, "SeedClaimMinHits", 4,
+        "SeedAndExtend: a candidate with at least this many hits claims them from later passes"};
+    Gaudi::Property<int> m_seedLayerSkip{this, "SeedLayerSkip", 0,
+        "SeedAndExtend: layers that may be skipped inside one seed window (inefficiency)"};
+    Gaudi::Property<double> m_seedMaxDeltaPhi{this, "SeedMaxDeltaPhi", 0.3,
+        "SeedAndExtend: max azimuth difference (rad) between consecutive seed hits"};
+    Gaudi::Property<double> m_seedMaxHitDist{this, "SeedMaxHitDistance", 100.0,
+        "SeedAndExtend: max 3D distance (cm) between consecutive seed hits"};
+    Gaudi::Property<double> m_seedMinRadius{this, "SeedMinRadius", 0.0,
+        "SeedAndExtend: min seed circle radius (cm), i.e. a pT floor; 0 = off"};
+    Gaudi::Property<double> m_seedMaxZResid{this, "SeedMaxZResidual", 0.5,
+        "SeedAndExtend: max |z residual| (cm) of seed hits about their z-vs-s line"};
+    Gaudi::Property<double> m_seedMaxChi2NDF{this, "SeedMaxChi2NDF", 10.0,
+        "SeedAndExtend: seed circle chi2/ndf cut (only bites for NumSeedLayers > 3)"};
+    Gaudi::Property<std::string> m_extDirection{this, "ExtrapolationDirection", "Outward",
+        "SeedAndExtend: Outward | Inward | Bidirectional"};
+    Gaudi::Property<double> m_extWindow{this, "ExtensionWindow", 1.0,
+        "SeedAndExtend: hit search radius (cm) around the predicted crossing ..."};
+    Gaudi::Property<double> m_extWindowSlope{this, "ExtensionWindowSlope", 0.02,
+        "... growing by this many cm per cm extrapolated"};
+    Gaudi::Property<double> m_extMaxChi2NDF{this, "ExtensionMaxChi2NDF", 10.0,
+        "SeedAndExtend: refit chi2/ndf a newly attached hit must keep"};
+    Gaudi::Property<int> m_maxMissedLayers{this, "MaxMissedLayers", 1,
+        "SeedAndExtend: stop extending after this many consecutive layers without a hit"};
+    Gaudi::Property<int> m_maxCandPerLayer{this, "MaxCandidatesPerLayer", 3,
+        "SeedAndExtend: hits tried per crossed layer, nearest first"};
+    Gaudi::Property<std::string> m_seMode{this, "SeedAndExtendMode", "Classic",
+        "SeedAndExtend: Classic (all seeds extended, then ranked) | BestFirst (windows inside-out, "
+        "best seed first, immediate hit claiming, multiple-scattering-aware kink chi2, confirmation "
+        "pass, merging of track pieces)"};
+    Gaudi::Property<double> m_kinkMaxChi2Triplet{this, "KinkMaxChi2Triplet", 16.0,
+        "BestFirst: a hit is attached only if the kink chi2 (2 dof) of its triplet is below this"};
+    Gaudi::Property<double> m_seedKinkMaxChi2NDF{this, "SeedKinkMaxChi2NDF", 9.0,
+        "BestFirst: seed acceptance on kink chi2/ndf"};
+    Gaudi::Property<double> m_trackKinkMaxChi2NDF{this, "TrackKinkMaxChi2NDF", 5.0,
+        "BestFirst: a finished track is kept, and claims its hits, below this kink chi2/ndf"};
+    Gaudi::Property<int> m_confirmIterations{this, "ConfirmationIterations", 2,
+        "BestFirst: confirmation passes (fill crossed-but-empty layers, swap hits, drop outliers)"};
+    Gaudi::Property<bool> m_mergePieces{this, "MergeTrackPieces", true,
+        "BestFirst: merge sequential pieces of one trajectory; overlapping arcs are flagged as loopers (track type 1)"};
+    Gaudi::Property<int> m_shortTrackMaxHits{this, "ShortTrackMaxHits", 4,
+        "BestFirst: tracks with at most this many hits must pass the hole check (ShortTrackMaxHoles)"};
+    Gaudi::Property<int> m_shortTrackMaxHoles{this, "ShortTrackMaxHoles", 1,
+        "BestFirst: max layers crossed without a hit (inside the track's span and outward to the "
+        "tracker exit; inward not counted) for a short track"};
+    Gaudi::Property<double> m_shortTrackMinPt{this, "ShortTrackMinPt", 0.0,
+        "BestFirst: tracks with at most ShortTrackMaxHits hits need fitted pT >= this (GeV); 0 = off"};
+    Gaudi::Property<double> m_shadowHitWindow{this, "ShadowHitWindow", 0.1,
+        "BestFirst: unclaimed hits within this distance (cm) of an accepted track's trajectory are "
+        "claimed (overlapping-sensor double hits), so they cannot seed a duplicate; 0 = off"};
+    Gaudi::Property<double> m_layerMatHalfDepth{this, "LayerMaterialHalfDepth", 150.0,
+        "BestFirst: per-layer x/X0 is integrated from halfway to the inner neighbour layer to halfway "
+        "to the outer one, each side capped at this depth (cm)"};
+    Gaudi::Property<long> m_maxSeedsPerEvent{this, "MaxSeedsPerEvent", 200000,
+        "SeedAndExtend: safety cap on seeds evaluated per event"};
+
+    Gaudi::Property<std::string> m_layerGeoDump{this, "LayerGeometryDump", "",
+        "If set, write the per-layer geometry table (radius/z extents, barrel/endcap) to "
+        "this CSV path at initialize()."};
+    Gaudi::Property<int> m_systemInCompositeID{this, "UseSystemInCompositeID", -1,
+        "Fold the cellID 'system' field into the per-layer key. -1 = auto (on when "
+        "DetectorNames lists more than one detector), 0 = off, 1 = on. Required when "
+        "one readout spans several subdetectors, otherwise e.g. VertexBarrel layer 0 "
+        "and SiWrB layer 0 collapse onto the same key."};
     // GenFit properties
     Gaudi::Property<int> m_maxFitIterations{this, "MaxFitIterations", 4, "Maximum iterations for track fitting"};
     Gaudi::Property<bool> m_useGenFit{this, "UseGenFit", true, "Use GenFit for track fitting"};
@@ -336,12 +430,20 @@ private:
     Gaudi::Property<double> m_solenoidHalfZ{this, "SolenoidHalfZ", 2180.0,
         "Nominal solenoid half-length in mm; start for Bz sign-change scan along z-axis in initialize()"};
     // Inner propagation steering
-    Gaudi::Property<bool> m_doInnerPropagation{this, "DoInnerPropagation", true,
-        "Propagate outer track inward through the solenoid boundary using RK4 (saves state at AtVertex)"};
+    Gaudi::Property<bool> m_doInnerPropagation{this, "DoInnerPropagation", false,
+        "Propagate outer track inward through the solenoid boundary using RK4. "
+        "State saving (AtVertex) is currently disabled pending fix of the state extraction. "
+        "Set true only to inspect propagation diagnostics in the log."};
     Gaudi::Property<double> m_innerPropTargetRadius{this, "InnerPropTargetRadius", 100.0,
         "Target radius in cm for inner RK4 propagation"};
+    Gaudi::Property<bool> m_doAnalyticalPropagation{this, "DoAnalyticalPropagation", true,
+        "Run the analytical two-segment inner propagation and save TrackState::AtIP. "
+        "Set false to skip and save CPU when AtIP is not needed."};
     Gaudi::Property<double> m_maxComboPT{this, "MaxComboPT", 200.0,
         "Maximum allowed combo pT in GeV/c. Combinations whose circle-fit radius implies pT above this threshold are excluded during the combinatorial search."};
+    Gaudi::Property<double> m_minComboPT{this, "MinComboPT", -1.0,
+        "Minimum allowed combo pT in GeV/c. Combinations whose circle-fit radius implies pT below this threshold are "
+        "rejected during the combinatorial search (no fallback). A value <= 0 disables the cut (default: disabled)."};
 
 
     // ── N-hit combinatorial strategy properties ─────────────────────────────
@@ -420,6 +522,29 @@ private:
         "Default false (original single-pool behaviour). Enable for high-occupancy events "
         "where delta-ray or multi-track hit pollution inflates the Cartesian product."};
 
+    Gaudi::Property<bool> m_requirePairCoinc{this, "RequirePairCoincidence", false,
+        "If true, exploit paired-layer geometry (doublets at layers (0,1), (2,3), (4,5)) "
+        "as a hit-quality filter. Real muons traverse both layers of a doublet within a "
+        "tight (Δφ, Δη) window; delta-rays/secondaries usually fire only one. "
+        "Two-pass: pass 1 enumerates combos using only hits with a coincident partner in "
+        "the paired layer; pass 2 (if pass 1 finds nothing) uses all hits. Either way, "
+        "candidate combos are required to have ≥2 complete doublets — exactly 3 is best, "
+        "2 is acceptable, <2 rejected. Default false (no behaviour change)."};
+
+    Gaudi::Property<bool> m_pairCoincSoftScoring{this, "PairCoincidenceSoftScoring", false,
+        "Only honoured when RequirePairCoincidence=true. Switches the doublet quality "
+        "logic from HARD (reject combos with <2 complete doublets) to SOFT: keep all "
+        "combos in the running but bias bestCombo selection to prefer higher doublet "
+        "count (3>2>1>0) as the primary criterion ahead of hit count and chi². "
+        "Soft mode disables the seed-eligible hit filter and the two-pass fallback — "
+        "it runs a single pass over all hits, just with doublet-aware ranking. "
+        "Default false (HARD mode, the validated direction 2)."};
+
+    Gaudi::Property<double> m_pairCoincMaxDistMM{this, "PairCoincidenceMaxDistMM", 250.0,
+        "Max 3D distance (mm) between two hits treated as a paired-layer doublet. "
+        "250 mm suits the muon system (paired layers 12-24 cm apart); scale it down "
+        "for inner-tracker readouts where layers are far closer."};
+
     // ── Neighbour-track quality gate ──────────────────────────────────────
     Gaudi::Property<double> m_neighbourTrackMaxDist{this, "NeighbourTrackMaxDist", 5.0,
         "If the best-combo candidate has any hit within this distance (cm) of a hit from "
@@ -443,12 +568,20 @@ private:
     // Member variables
     dd4hep::Detector* m_detector{nullptr};  // Detector instance
     dd4hep::OverlayedField m_field;         // Magnetic field
-    dd4hep::rec::MaterialManager* m_materialManager{nullptr}; // Material manager
     const dd4hep::rec::SurfaceMap* m_surfaceMap{nullptr};    // Surface map from detector
     std::vector<const dd4hep::rec::Surface*> m_surfaces;      // All detector surfaces
     std::map<int, std::vector<const dd4hep::rec::Surface*>> m_surfacesByLayer; // Surfaces grouped by layer
+    k4rt::LayerGeometry m_layerGeo;          // per-layer radius/z extents, built from m_surfacesByLayer
+    std::unordered_map<int, int> m_cidRegion;  // compositeID -> readout region (0, +1, -1); see k4rt::regionOfCid
+    bool m_useSeedExtend{false};             // Strategy == "SeedAndExtend"
+    bool m_seBestFirst{false};               // SeedAndExtendMode == "BestFirst"
+    std::unique_ptr<k4rt::SeedFinder> m_seedFinder;  // built in initialize() when m_useSeedExtend
     ParticleProperties m_particleProperties;  // Particle properties for material effects
     std::unique_ptr<dd4hep::DDSegmentation::BitFieldCoder> m_bitFieldCoder; // For cell ID decoding
+    bool m_hasRegionField{true};   // false when the readout has no barrel/endcap field at all
+    bool m_useSystemInCompositeID{false};  // fold "system" into the layer key (multi-subdetector readouts)
+    // Owns the merged surface map when several detectors are combined (DetectorNames).
+    dd4hep::rec::SurfaceMap m_mergedSurfaceMap;
 
     int getPDGCode() const;
     
@@ -479,6 +612,7 @@ private:
     mutable std::atomic<int> m_statOutlierHitsRemoved{0};   // total hits removed by outlier rejection
     mutable std::atomic<int> m_statNeighbourRejected{0};    // combos rejected by neighbour-track gate
     mutable std::atomic<int> m_statComboPTRejected{0};      // combos rejected by MaxComboPT threshold
+    mutable std::atomic<int> m_statComboMinPTRejected{0};   // combos rejected by MinComboPT threshold
     mutable std::atomic<int> m_statTanLambdaRejected{0};   // combos rejected by MaxComboTanLambdaDev
     mutable std::atomic<int> m_statClustersBuilt{0};        // total clusters built across all iterations
 
@@ -497,6 +631,19 @@ private:
     mutable std::atomic<int> m_statInnerPropSuccess{0};
     mutable std::atomic<int> m_statAnalyticalPropSuccess{0};
     mutable std::atomic<int> m_statGenFitSuccess{0};
+
+    // Analytical inner propagation — per-failure-reason counters
+    mutable std::atomic<int> m_statAnalBarrelNoIsect{0};    // outer circle doesn't cross solenoid barrel
+    mutable std::atomic<int> m_statAnalBarrelBothZfail{0};  // both crossings have |z_sol|>|z_ref|
+    mutable std::atomic<int> m_statAnalBarrelZswapped{0};   // swapped successfully to alt crossing
+    mutable std::atomic<int> m_statAnalEndcapSmallTanL{0};  // |tanLambda| too small to extrapolate z
+    mutable std::atomic<int> m_statAnalEndcapPastCap{0};    // ref hit already past endcap cap
+    mutable std::atomic<int> m_statAnalEndcapArcLong{0};    // arc would exceed one loop
+
+    // Pair-coincidence (doublet) counters
+    mutable std::atomic<int> m_statHitsNonCoinc{0};       // hits with no partner in paired layer
+    mutable std::atomic<int> m_statCombosRejByCoinc{0};   // combos rejected by <2 complete doublets
+    mutable std::atomic<int> m_statCoincPass2Tracks{0};   // tracks recovered by pass-2 fallback
 
     // GenFit detailed counters
     mutable std::atomic<int>       m_statGenFitFailed{0};
@@ -518,5 +665,5 @@ private:
 
 };
 
-DECLARE_COMPONENT(DisplacedTracking)
-#endif // DISPLACED_TRACKING_H
+DECLARE_COMPONENT(CombinatorialTrackFinder)
+#endif // COMBINATORIAL_TRACK_FINDER_H
