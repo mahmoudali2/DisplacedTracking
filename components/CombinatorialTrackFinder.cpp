@@ -1,6 +1,6 @@
 /**
- * CombinatorialTrackFinder: pattern recognition and GenFit-based track fitting
- * for the IDEA Muon-System.
+ * CombinatorialTrackFinder: track finding on the planar hits of one tracking system.
+ * See CombinatorialTrackFinder.h for an overview of the algorithm.
  *
  * @author Mahmoud Althakeel
  * @email  mahmoud.althakeel@cern.ch
@@ -17,7 +17,7 @@
 #include "podio/Frame.h"
 #include "k4FWCore/DataHandle.h"
 
-// Some physical constants
+// Particle masses for the material-effects hypothesis
 constexpr double electron_mass = 0.000511;  // GeV
 constexpr double muon_mass = 0.10566;       // GeV
 constexpr double pion_mass = 0.13957;       // GeV
@@ -26,11 +26,6 @@ constexpr double proton_mass = 0.93827;     // GeV
 constexpr double c_light = 299792458.0;     // m/s
 constexpr double qe = 1.602176634e-19;      // coulombs
 
-//------------------------------------------------------------------------------
-// CombinatorialTrackFinder Implementation
-//------------------------------------------------------------------------------
-
-// Constructor
 CombinatorialTrackFinder::CombinatorialTrackFinder(const std::string& name, ISvcLocator* pSvcLocator)
     : MultiTransformer(name, pSvcLocator,
         {
@@ -43,8 +38,7 @@ CombinatorialTrackFinder::CombinatorialTrackFinder(const std::string& name, ISvc
             KeyValues{"OutputHitCollection",      {"TrackHits"}},
             KeyValues{"OutputRecoSimLinkCollection", {"DisplacedTrackHitSimLinks"}}
         }) {
-    
-    // Initialize particle map with common particles
+
     m_particleMap["electron"] = ParticleProperties(electron_mass, -1.0, "electron");
     m_particleMap["positron"] = ParticleProperties(electron_mass, 1.0, "positron");
     m_particleMap["muon"] = ParticleProperties(muon_mass, -1.0, "muon");
@@ -55,30 +49,26 @@ CombinatorialTrackFinder::CombinatorialTrackFinder(const std::string& name, ISvc
     m_particleMap["antiproton"] = ParticleProperties(proton_mass, -1.0, "antiproton");
 }
 
-// Initialize method
 StatusCode CombinatorialTrackFinder::initialize() {
     StatusCode sc = Algorithm::initialize();
     if (!sc.isSuccess()) return sc;
 
-    // Get detector service
     if (!m_geoSvc.retrieve()) {
         error() << "Failed to retrieve GeoSvc" << endmsg;
         return StatusCode::FAILURE;
     }
 
-    // Get detector
     m_detector = m_geoSvc->getDetector();
     if (!m_detector) {
         error() << "Failed to access detector" << endmsg;
         return StatusCode::FAILURE;
     }
 
-    // Get BitFieldCoder for cell ID decoding
+    // cellID decoder
     std::string cellIDEncodingString = m_geoSvc->constantAsString(m_encodingStringParameter);
     m_bitFieldCoder = std::make_unique<dd4hep::DDSegmentation::BitFieldCoder>(cellIDEncodingString);
-    
-    // Validate the configured cellID field names against the actual encoding, so a
-    // readout mismatch fails loudly here instead of silently decoding garbage later.
+
+    // Check that the configured cellID field names exist in this readout.
     {
         const auto& desc = m_bitFieldCoder->fieldDescription();
         auto hasField = [&](const std::string& n) {
@@ -100,9 +90,8 @@ StatusCode CombinatorialTrackFinder::initialize() {
                       << "(\"type\" for MuonSystemReadoutID, \"side\" for GlobalTrackerReadoutID)."
                       << endmsg;
         }
-        // Fold "system" into the layer key when one readout spans several
-        // subdetectors, else identically-numbered layers in different subdetectors
-        // collide (GlobalTrackerReadoutID: VertexBarrel layer 0 vs SiWrB layer 0).
+        // When one readout spans several subdetectors, "system" goes into the layer key,
+        // so that equally numbered layers of different subdetectors stay apart.
         const bool multiDet = m_detectorNames.value().size() > 1;
         if (m_systemInCompositeID.value() < 0)
             m_useSystemInCompositeID = multiDet && hasField("system");
@@ -125,9 +114,7 @@ StatusCode CombinatorialTrackFinder::initialize() {
                << ", system in layer key: " << (m_useSystemInCompositeID ? "yes" : "no") << endmsg;
     }
 
-    // Get surface map. One readout can span several DetElements — GlobalTrackerReadoutID
-    // covers VertexBarrel, VertexEndcap, SiWrB and SiWrD — so merge their maps when
-    // DetectorNames is given, and fall back to the single DetectorName otherwise.
+    // Surface map: merged over DetectorNames when given, else the one of DetectorName.
     auto surfaceMan = m_detector->extension<dd4hep::rec::SurfaceManager>();
     std::vector<std::string> detNames = m_detectorNames.value();
     if (detNames.empty()) detNames.push_back(m_detectorName.value());
@@ -154,25 +141,23 @@ StatusCode CombinatorialTrackFinder::initialize() {
                << m_surfaceMap->size() << " surfaces" << endmsg;
     }
 
-    // Get magnetic field
+    // Magnetic field (printed at a few points for reference)
     m_field = m_detector->field();
-   
+
     dd4hep::Position center(0, 0, 0);
-    // check the field strength at different point at the detector
     dd4hep::Direction bfield = m_field.magneticField(center);
     info() << "Magnetic field at detector center: ("
         << bfield.x() / dd4hep::tesla << ", "
         << bfield.y() / dd4hep::tesla << ", "
         << bfield.z() / dd4hep::tesla << ") Tesla" << endmsg;
 
-    // Check field at several points
     const double solenoidRadius = 230.0; // cm
     const std::vector<dd4hep::Position> testPoints = { // in cm
-        dd4hep::Position(0, 0, 0),  
-        dd4hep::Position(100, 100, 100), 
+        dd4hep::Position(0, 0, 0),
+        dd4hep::Position(100, 100, 100),
         dd4hep::Position(solenoidRadius, 0, 0),
         dd4hep::Position(0, solenoidRadius, 0),
-        dd4hep::Position(solenoidRadius/sqrt(2), solenoidRadius/sqrt(2), 0),           
+        dd4hep::Position(solenoidRadius/sqrt(2), solenoidRadius/sqrt(2), 0),
         dd4hep::Position(249, 0, 0),
         dd4hep::Position(0, 251, 0),
         dd4hep::Position(0, 0, 249),
@@ -181,46 +166,37 @@ StatusCode CombinatorialTrackFinder::initialize() {
         dd4hep::Position(0, 500, 0),
         dd4hep::Position(460, 0, 0),
         dd4hep::Position(200, 200, 460),
-        dd4hep::Position(460, 0, 460)   
+        dd4hep::Position(460, 0, 460)
     };
 
     info() << "Magnetic field at different positions:" << endmsg;
     for (const auto& point : testPoints) {
         dd4hep::Direction bfieldVec = m_field.magneticField(point);
-        info() << "  Position (" << point.x() << ", " << point.y() << ", " << point.z() 
+        info() << "  Position (" << point.x() << ", " << point.y() << ", " << point.z()
             << ") cm: B = (" << bfieldVec.x() / dd4hep::tesla << ", "
             << bfieldVec.y() / dd4hep::tesla << ", "
             << bfieldVec.z() / dd4hep::tesla << ") Tesla" << endmsg;
     }
-    
-    // Get all surfaces and group them by layer
-    // Another possible and simpler solution is : to call surface by layer directly from surfaceMap,
-    // but for the moment we keep the following effeicient way of surfaceList.
+
     dd4hep::DetElement world = m_detector->world();
     dd4hep::rec::SurfaceHelper surfHelper(world);
-    //dd4hep::rec::SurfaceHelper surfHelper(*m_detector);
 
     const dd4hep::rec::SurfaceList& surfList = surfHelper.surfaceList();
 
-    // Get all surfaces and group them by layer 
-    // Use only Muon-System surfaces from the surface map, not all world surfaces
+    // Surfaces of the selected detector(s), grouped by layer
     m_surfaces.clear();
     for (const auto& [cellID, surface] : *m_surfaceMap) {
-        // Cast from ISurface* to Surface*
-        const dd4hep::rec::Surface* concreteSurface = 
+        const dd4hep::rec::Surface* concreteSurface =
             dynamic_cast<const dd4hep::rec::Surface*>(surface);
         if (concreteSurface) {
             m_surfaces.push_back(concreteSurface);
         }
     }
-    
-    // Group surfaces by layer
+
     m_surfacesByLayer = getSurfacesByLayer();
 
-    // compositeID -> region from the readout's own region field. The cid range test
-    // (>= 1000 = endcap) misclassifies barrel systems with ID >= 10; see k4rt::regionOfCid.
-    // Two different (region, system, layer) triples encoding to the same cid would make
-    // hits of different layers indistinguishable, so that is fatal.
+    // Layer key -> region (barrel / endcap), taken from the readout's region field.
+    // Two different layers must not share a key.
     m_cidRegion.clear();
     {
         int nMismatch = 0;
@@ -240,12 +216,11 @@ StatusCode CombinatorialTrackFinder::initialize() {
             if (inserted && reg != k4rt::regionOfCid(cid, nullptr)) ++nMismatch;
         }
         if (nMismatch > 0)
-            info() << nMismatch << " compositeID(s) whose region differs from the old cid-range rule "
+            info() << nMismatch << " compositeID(s) whose region differs from the cid-range rule "
                    << "(barrel system ID >= 10); using the readout region field" << endmsg;
     }
 
-    // Real per-layer geometry (radius / z extents, barrel vs endcap from the normals).
-    // Read-only after initialize(); nothing in the exhaustive search depends on it.
+    // Per-layer geometry (radius / z extents, barrel or endcap from the surface normals).
     m_layerGeo.build(m_surfacesByLayer);
     info() << "Layer geometry (inside-out by closest approach to the IP):" << endmsg;
     for (const auto& d : m_layerGeo.layers()) {
@@ -256,6 +231,13 @@ StatusCode CombinatorialTrackFinder::initialize() {
                << std::defaultfloat << std::setprecision(6) << endmsg;
     }
     for (const auto& p : m_layerGeo.validate()) warning() << "LayerGeometry: " << p << endmsg;
+
+    if (m_ipStateMode.value() != "None" && m_ipStateMode.value() != "Helix" &&
+        m_ipStateMode.value() != "SolenoidCrossing") {
+        error() << "Unknown IPStateMode '" << m_ipStateMode.value()
+                << "' (expected None, Helix or SolenoidCrossing)" << endmsg;
+        return StatusCode::FAILURE;
+    }
     // ── Strategy ────────────────────────────────────────────────────────────────
     if (m_strategy.value() == "SeedAndExtend") {
         m_useSeedExtend = true;
@@ -296,7 +278,7 @@ StatusCode CombinatorialTrackFinder::initialize() {
         sc.shortTrackMinPt     = m_shortTrackMinPt.value();
         sc.shadowHitWindow_cm  = m_shadowHitWindow.value();
         sc.bField_T            = m_field.magneticField(dd4hep::Position(0, 0, 0)).z() / dd4hep::tesla;
-        {   // m_particleProperties is only filled later in initialize(): look the mass up here
+        {   // mass of the particle hypothesis
             auto pit = m_particleMap.find(m_particleType);
             sc.mass_GeV = pit != m_particleMap.end() ? pit->second.mass : 0.13957;
         }
@@ -317,7 +299,7 @@ StatusCode CombinatorialTrackFinder::initialize() {
             error() << "Unknown ExtrapolationDirection '" << sc.direction << "'" << endmsg;
             return StatusCode::FAILURE;
         }
-        // One circle fit for both strategies: the seeder calls fitCircleNHits.
+        // the seed finder uses the same circle fit and detector surfaces
         auto fit = [this](const std::vector<edm4hep::TrackerHitPlane>& hv, double& x0, double& y0,
                           double& R, double& chi2, Eigen::Matrix3d& cov, std::vector<double>& res) {
             try { return fitCircleNHits(hv, x0, y0, R, chi2, cov, res); } catch (...) { return false; }
@@ -351,40 +333,33 @@ StatusCode CombinatorialTrackFinder::initialize() {
         else
             warning() << "Could not write layer geometry table to " << m_layerGeoDump.value() << endmsg;
     }
-    
-    // Set particle properties based on configuration
+
+    // Particle hypothesis
     auto it = m_particleMap.find(m_particleType);
     if (it != m_particleMap.end()) {
         m_particleProperties = it->second;
-        info() << "Using particle type: " << m_particleType 
-               << " (mass=" << m_particleProperties.mass 
+        info() << "Using particle type: " << m_particleType
+               << " (mass=" << m_particleProperties.mass
                << " GeV, charge=" << m_particleProperties.charge << ")" << endmsg;
     } else {
-        warning() << "Unknown particle type: " << m_particleType 
+        warning() << "Unknown particle type: " << m_particleType
                  << ", defaulting to pion" << endmsg;
     }
-    
-    info() << "Found " << m_surfaces.size() << " detector surfaces in " 
+
+    info() << "Found " << m_surfaces.size() << " detector surfaces in "
            << m_surfacesByLayer.size() << " layers" << endmsg;
 
-    // Initialize GenFit if enabled
+    // GenFit: DD4hep field and material
     if (m_useGenFit) {
-        try {   
-            // ---- Field ----
-            // GenfitInterface::GenfitField wraps the DD4hep OverlayedField directly.
-            // This is the authoritative field and properly handles the field flip at R=230 cm.
-            // We store the adapter as a member so it lives for the algorithm lifetime.
+        try {
             m_genFitField = std::make_unique<GenfitInterface::GenfitField>(m_field);
             genfit::FieldManager::getInstance()->init(m_genFitField.get());
 
-            // ---- Material ----
-            // GenfitInterface::GenfitMaterialInterface is a singleton keyed on the DD4hep
-            // detector; getInstance() also registers it with genfit::MaterialEffects.
+            // singleton; getInstance() also registers it with genfit::MaterialEffects
             m_genFitMaterial = GenfitInterface::GenfitMaterialInterface::getInstance(m_detector);
             genfit::MaterialEffects* matEff = genfit::MaterialEffects::getInstance();
 
-            // Set material effects options
-            matEff->setMscModel("GEANE");          // Multiple-scattering model
+            matEff->setMscModel("GEANE");          // multiple-scattering model
             matEff->setEnergyLossBetheBloch(true);
             matEff->setNoiseBetheBloch(true);
             matEff->setDebugLvl(0);
@@ -396,7 +371,7 @@ StatusCode CombinatorialTrackFinder::initialize() {
         }
     }
 
-    // ── Locate exact solenoid boundary via B_z field scan ────────────────────
+    // Solenoid boundary, from where Bz changes sign
     m_solenoidBoundaryMm = findSolenoidBoundary();
     info() << "Solenoid Bz boundary (radial): R = " << m_solenoidBoundaryMm << " mm  ("
            << m_solenoidBoundaryMm / 10.0 << " cm)" << endmsg;
@@ -415,7 +390,7 @@ std::tuple<edm4hep::TrackCollection,
     const edm4hep::TrackerHitPlaneCollection& hits,
     const edm4hep::EventHeaderCollection& headers,
     const edm4hep::TrackerHitSimTrackerHitLinkCollection& recoSimLinks) const {
-    
+
     // Find tracks using the direct EDM4hep approach
     edm4hep::TrackCollection trackCollection;
     edm4hep::TrackerHitPlaneCollection outputHits;
@@ -423,15 +398,13 @@ std::tuple<edm4hep::TrackCollection,
 
     m_statTotalEvents++;
 
-    // Per-event disambiguation flags (set inside findTracks, counted once per event)
+    // per-event flags filled by findTracks (run statistics only)
     bool evtUsedPtInner    = false;
     bool evtUsedPtInner2   = false;
     bool evtUsedPtFallback = false;
 
-    // Print event separator and basic info
     info() << "\n" << std::string(80, '=') << endmsg;
-    
-    // Get event number from the header
+
     unsigned int eventNumber = 0;
     if (!headers.empty()) {
         eventNumber = headers[0].getEventNumber();
@@ -439,11 +412,10 @@ std::tuple<edm4hep::TrackCollection,
     } else {
         info() << "Processing new event (unknown number)" << endmsg;
     }
-    
+
     info() << std::string(80, '-') << endmsg;
     info() << "Processing " << hits.size() << " tracker hits" << endmsg;
-    
-    // Print some details about hits
+
     if (msgLevel(MSG::DEBUG)) {
         debug() << "Hit details:" << endmsg;
         for (size_t i = 0; i < hits.size(); ++i) {
@@ -453,31 +425,29 @@ std::tuple<edm4hep::TrackCollection,
                     << pos[0] << ", " << pos[1] << ", " << pos[2] << ") mm" << endmsg;
         }
     }
-    
-    // Check if we have enough hits for tracking
+
     if (hits.size() < 3) {
         warning() << "Not enough hits to create tracks. Need at least 3." << endmsg;
-        info() << std::string(80, '=') << "\n" << endmsg; // Bottom separator
-        return std::make_tuple(std::move(trackCollection), std::move(outputHits), std::move(outputLinks)); // Return empty collections
+        info() << std::string(80, '=') << "\n" << endmsg;
+        return std::make_tuple(std::move(trackCollection), std::move(outputHits), std::move(outputLinks));
     }
-    
+
     try {
         findTracks(&hits, trackCollection, outputHits, recoSimLinks, outputLinks,
                    evtUsedPtInner, evtUsedPtInner2, evtUsedPtFallback);
     } catch (const std::exception& ex) {
         error() << "Exception during track finding: " << ex.what() << endmsg;
-        info() << std::string(80, '=') << "\n" << endmsg; // Bottom separator
-       return std::make_tuple(std::move(trackCollection), std::move(outputHits), std::move(outputLinks)); // Return empty collections
+        info() << std::string(80, '=') << "\n" << endmsg;
+       return std::make_tuple(std::move(trackCollection), std::move(outputHits), std::move(outputLinks));
     }
-    
-    // Count per-event disambiguation (once per event, not per track)
+
     if (evtUsedPtInner)    m_statHighestPtInner++;
     if (evtUsedPtInner2)   m_statHighestPtInner2++;
     if (evtUsedPtFallback) m_statHighestPtFallback++;
 
     info() << "Found " << trackCollection.size() << " tracks" << endmsg;
 
-    // Build a sim-link map so we can find the truth particle for each track
+    // Per-track printout, with the matched MC particle when the sim links are there
     std::unordered_map<uint32_t, edm4hep::SimTrackerHit> summarySimMap;
     for (const auto& link : recoSimLinks)
         summarySimMap[link.getFrom().id().index] = link.getTo();
@@ -487,13 +457,13 @@ std::tuple<edm4hep::TrackCollection,
         const auto& track = trackCollection[i];
         info() << "─── Track " << (i+1) << "  (" << track.trackerHits_size() << " hits) ───" << endmsg;
 
-        // ── Outer segment (AtLastHit) ─────────────────────────────────────────
+        // state at the first hit
         bool hasOuter = false;
         for (int j = 0; j < track.trackStates_size(); ++j) {
             auto ts = track.getTrackStates(j);
-            if (ts.location != edm4hep::TrackState::AtLastHit) continue;
+            if (ts.location != edm4hep::TrackState::AtFirstHit) continue;
             double B_outer = m_field.magneticField(dd4hep::Position(0,0,0)).z() / dd4hep::tesla;
-            // Use B at the muon hits (outer field)
+            // field at the first hit
             if (track.trackerHits_size() > 0) {
                 auto h0 = track.getTrackerHits(0);
                 B_outer = m_field.magneticField(dd4hep::Position(
@@ -504,16 +474,16 @@ std::tuple<edm4hep::TrackCollection,
             double pT_out = (std::abs(ts.omega) > 1e-12)
                             ? 0.3 * std::abs(B_outer) * 1e-3 / std::abs(ts.omega) : 0.0;
             double eta_out = std::asinh(ts.tanLambda);
-            info() << "  [Outer/AtLastHit]  pT=" << std::fixed << std::setprecision(2) << pT_out
+            info() << "  [AtFirstHit]       pT=" << std::fixed << std::setprecision(2) << pT_out
                    << " GeV  phi=" << std::setprecision(3) << ts.phi
                    << " rad  eta=" << std::setprecision(3) << eta_out
                    << "  d0=" << std::setprecision(2) << ts.D0/10.0 << " cm"
-                   << "  z0=" << ts.Z0/10.0 << " cm  (perigee, EDM4hep convention)" << endmsg;
+                   << "  z0=" << ts.Z0/10.0 << " cm  (w.r.t. the first hit)" << endmsg;
             hasOuter = true;
             break;
         }
 
-        // ── Inner segment (AtIP, analytical) ─────────────────────────────────
+        // state at the IP, if stored (IPStateMode)
         bool hasIP = false;
         for (int j = 0; j < track.trackStates_size(); ++j) {
             auto ts = track.getTrackStates(j);
@@ -531,8 +501,7 @@ std::tuple<edm4hep::TrackCollection,
             break;
         }
 
-        // ── Truth comparison ──────────────────────────────────────────────────
-        // Find majority MCParticle from the track's hits
+        // MC particle with most hits on the track
         std::unordered_map<int, std::pair<edm4hep::MCParticle,int>> mcCount;
         for (int j = 0; j < track.trackerHits_size(); ++j) {
             auto hit = track.getTrackerHits(j);
@@ -563,7 +532,6 @@ std::tuple<edm4hep::TrackCollection,
                    << "  d0=" << std::setprecision(2) << mcD0 << " cm"
                    << "  z0=" << mcZ0 << " cm" << endmsg;
 
-            // Resolution (AtIP vs truth) if available
             if (hasIP) {
                 for (int j = 0; j < track.trackStates_size(); ++j) {
                     auto ts = track.getTrackStates(j);
@@ -590,18 +558,13 @@ std::tuple<edm4hep::TrackCollection,
         }
     }
 
-    // Bottom separator
     info() << std::string(80, '=') << "\n" << endmsg;
-    
+
     return std::make_tuple(std::move(trackCollection), std::move(outputHits), std::move(outputLinks));
 }
 
-// Finalize method
+// Prints the run statistics.
 StatusCode CombinatorialTrackFinder::finalize() {
-
-    // ================================================================
-    //                   RUN STATISTICS SUMMARY
-    // ================================================================
     int nEvt      = m_statTotalEvents.load();
     int nTrk      = m_statTracksReconstructed.load();
     int nPos      = m_statPositiveCharge.load();
@@ -650,7 +613,7 @@ StatusCode CombinatorialTrackFinder::finalize() {
     double avgOutlier = (nValid > 0)  ? double(nOutlier)/double(nValid) : 0.0;
     info() << "\n"
         << "╔══════════════════════════════════════════════════════════╗\n"
-        << "║          DISPLACED TRACKING  -  RUN SUMMARY             ║\n"
+        << "║       COMBINATORIAL TRACK FINDER  -  RUN SUMMARY        ║\n"
         << "╠══════════════════════════════════════════════════════════╣\n"
         << "║  Events processed             : " << std::setw(7) << nEvt    << "                   ║\n"
         << "║  Tracks reconstructed         : " << std::setw(7) << nTrk    << "                   ║\n"
@@ -687,16 +650,16 @@ StatusCode CombinatorialTrackFinder::finalize() {
         << "║    7+ hits                    : " << std::setw(7) << nH7p    << "                   ║\n"
         << "╠══════════════════════════════════════════════════════════╣\n"
         << "║  TRACK STATES STORED                                     ║\n"
-        << "║    AtLastHit   (N-hit circle) : " << std::setw(7) << nSL     << "                   ║\n"
+        << "║    AtLastHit   (helix)        : " << std::setw(7) << nSL     << "                   ║\n"
         << "║    AtOther     (GenFit fit)   : " << std::setw(7) << nSO     << "                   ║\n"
         << "║    AtVertex    (RK4 inner)    : " << std::setw(7) << nSV     << "                   ║\n"
-        << "║    AtIP        (analytical)   : " << std::setw(7) << nSIP    << "                   ║\n"
+        << "║    AtIP        (IPStateMode)  : " << std::setw(7) << nSIP    << "                   ║\n"
         << "╠══════════════════════════════════════════════════════════╣\n"
         << "║  DOWNSTREAM PROCESSING                                   ║\n"
         << "║    RK4 inner prop. OK         : " << std::setw(7) << nProp   << "  (" << std::setw(5) << std::fixed << std::setprecision(1) << propFrac << "% of tracks)  ║\n"
         << "║    Analytical inner prop. OK  : " << std::setw(7) << nAnalyt << "  (" << std::setw(5) << std::fixed << std::setprecision(1) << analFrac << "% of tracks)  ║\n"
         << "╠══════════════════════════════════════════════════════════╣\n"
-        << "║  ANALYTICAL PROP. FAILURE REASONS                        ║\n"
+        << "║  SOLENOID-CROSSING AtIP: FAILURE REASONS                 ║\n"
         << "║    Barrel: no solenoid isect  : " << std::setw(7) << m_statAnalBarrelNoIsect.load()   << "                   ║\n"
         << "║    Barrel: both z fail        : " << std::setw(7) << m_statAnalBarrelBothZfail.load() << "                   ║\n"
         << "║    Barrel: z swapped (ok)     : " << std::setw(7) << m_statAnalBarrelZswapped.load()  << "                   ║\n"
@@ -721,61 +684,44 @@ StatusCode CombinatorialTrackFinder::finalize() {
         << "║    Avg chi2/ndf (sane fitted) : " << std::setw(7) << std::fixed << std::setprecision(3) << avgChi2ndf << "                   ║\n"
         << "╚══════════════════════════════════════════════════════════╝\n"
         << endmsg;
-    // ================================================================
 
-    // Clean up GenFit resources if needed
+    // GenFit's field manager and material effects are singletons, freed at exit
     if (m_useGenFit) {
-        // Field manager and material effects are singletons, and
-        // m_genFitMaterial is the singleton instance itself (not owned here);
-        // they are cleaned up automatically at program exit.
         m_genFitField.reset();
     }
-    
+
     return Algorithm::finalize();
 }
 
-// Find surface for a hit
 const dd4hep::rec::Surface* CombinatorialTrackFinder::findSurface(const edm4hep::TrackerHitPlane& hit) const {
     return findSurfaceByID(hit.getCellID());
 }
 
-// Find surface by cell ID
 const dd4hep::rec::Surface* CombinatorialTrackFinder::findSurfaceByID(uint64_t cellID) const {
-    // Find surface for this cell ID using the surface map
     dd4hep::rec::SurfaceMap::const_iterator sI = m_surfaceMap->find(cellID);
-    
+
     if (sI != m_surfaceMap->end()) {
         return dynamic_cast<const dd4hep::rec::Surface*>(sI->second);
     }
-    
+
     return nullptr;
 }
 
-// Extract the barrel/endcap region ID from a cell ID.
-// The field is called "type" in MuonSystemReadoutID and "side" in
-// GlobalTrackerReadoutID; both are signed 2-bit with 0 / +1 / -1 meaning
-// barrel / +endcap / -endcap, so only the name is configurable.
+// Region of a cellID: 0 barrel, +1 / -1 endcaps (field RegionFieldName).
 int CombinatorialTrackFinder::getTypeID(uint64_t cellID) const {
     if (!m_hasRegionField) return 0;   // single-region readout: treat everything as barrel
     return m_bitFieldCoder->get(cellID, m_regionFieldName.value());
 }
 
-// Extract layer ID from cell ID
 int CombinatorialTrackFinder::getLayerID(uint64_t cellID) const {
     return m_bitFieldCoder->get(cellID, m_layerFieldName.value());
 }
 
-// Compute composite layer ID that encodes subdetector, region and layer number:
-//   barrel:    compositeID =  100*system + layerID
-//   +endcap:   compositeID =  100*system + layerID + 1000
-//   -endcap:   compositeID = -(100*system + layerID + 1000)
-//
-// The system term matters as soon as one readout spans several subdetectors:
-// under GlobalTrackerReadoutID, VertexBarrel layer 0 and SiWrB layer 0 are BOTH
-// barrel with side=0 and would otherwise collapse onto the same key, merging two
-// layers ~30 cm apart into one. With a single-subdetector readout (the muon
-// system) every hit shares one system value, so this is a constant offset and
-// the behaviour is unchanged.
+// Layer key of a cellID:
+//   barrel:    100*system + layer
+//   +endcap:   100*system + layer + 1000
+//   -endcap: -(100*system + layer + 1000)
+// The system term is only added when several subdetectors share one readout.
 int CombinatorialTrackFinder::getCompositeID(uint64_t cellID) const {
     int layerID = getLayerID(cellID);
     int typeID  = getTypeID(cellID);
@@ -786,37 +732,26 @@ int CombinatorialTrackFinder::getCompositeID(uint64_t cellID) const {
     else                   return -1000 - base;
 }
 
-// Group surfaces by detector layer
+// Detector surfaces grouped by layer key.
 std::map<int, std::vector<const dd4hep::rec::Surface*>> CombinatorialTrackFinder::getSurfacesByLayer() const {
     std::map<int, std::vector<const dd4hep::rec::Surface*>> result;
-    
-    // Process all surfaces and group them by layer ID
+
     for (const auto& surface : m_surfaces) {
-        // Get detector element
         dd4hep::DetElement det = surface->detElement();
         if (!det.isValid()) continue;
-        
-        // Get volume ID
+
         uint64_t volID = det.volumeID();
         int layerID = 0;
         int type = 0;  // 0=barrel, 1=positive endcap, -1=negative endcap
-        
 
-        // Get the layer ID
+
         layerID = getLayerID(volID);
-
-        // Region field ("type" for the muon system, "side" for the global tracker)
         type = getTypeID(volID);
-            
-        // Same composite key as the hits use, so surfaces and hits stay in step
-        // (this also folds in the system field when several subdetectors share
-        // one readout -- see getCompositeID()).
+
+        // same key as for the hits
         const int compositeID = getCompositeID(volID);
-            
-        // Add surface to the appropriate layer group
         result[compositeID].push_back(surface);
-            
-        // Debug output
+
         if (msgLevel(MSG::DEBUG)) {
                 dd4hep::rec::Vector3D pos = surface->origin();
                 std::string typeStr;
@@ -824,145 +759,235 @@ std::map<int, std::vector<const dd4hep::rec::Surface*>> CombinatorialTrackFinder
                 else if (type == 1) typeStr = "Positive Endcap";
                 else if (type == -1) typeStr = "Negative Endcap";
                 else typeStr = "Unknown";
-                
-               /* debug() << "Surface at (" << pos.x() << ", " << pos.y() << ", " 
-                       << pos.z() << ") - " << typeStr << " Layer " << layerID 
-                       << " (ID=" << compositeID << ")" << endmsg; */
         }
-    } 
-    
-    // Output summary of layer distribution
+    }
+
     if (msgLevel(MSG::INFO)) {
         info() << "Layer distribution:" << endmsg;
         for (const auto& [layer, surfaces] : result) {
             std::string typeStr;
             int actualLayer;
-            
+
             if (layer >= 1000) {
-                // Positive endcap
                 typeStr = "Positive Endcap";
                 actualLayer = layer - 1000;
             } else if (layer <= -1000) {
-                // Negative endcap
                 typeStr = "Negative Endcap";
-                actualLayer = -(layer + 1000);  // Make layer number positive for display
+                actualLayer = -(layer + 1000);
             } else {
-                // Barrel
                 typeStr = "Barrel";
                 actualLayer = layer;
             }
-            
-            info() << "  " << typeStr << " Layer " << actualLayer 
+
+            info() << "  " << typeStr << " Layer " << actualLayer
                   << " (ID=" << layer << "): " << surfaces.size() << " surfaces" << endmsg;
         }
     }
-    
+
     return result;
 }
 
-// Get Transverse Momentum .. it uses reference point, in case of non-homogenious field,it need to be moore complex "Fix"
+// pT from omega, with Bz at the state's reference point.
 double CombinatorialTrackFinder::getPT(const edm4hep::TrackState& state) const {
-    // Get parameters
     double omega = state.omega;  // 1/mm
 
-    // Use reference point (first hit position)
     double x = state.referencePoint[0];
     double y = state.referencePoint[1];
     double z = state.referencePoint[2];
-    
-    // Get field at this position to calculate momentum
-    dd4hep::Position fieldPos(x/10.0, y/10.0, z/10.0); // Convert mm to cm for DD4hep
+
+    dd4hep::Position fieldPos(x/10.0, y/10.0, z/10.0); // mm -> cm
     double bField = m_field.magneticField(fieldPos).z() / dd4hep::tesla;
 
-    // Calculate pT from omega
     double pT = 0.3 * std::abs(bField) / std::abs(omega) * 0.001; // GeV/c
 
     return pT;
 }
 
-// Convert the outer-segment (AtLastHit) state from the internal circle-fit convention to
-// the EDM4hep helix convention, so that consumers can use the five parameters directly.
+// Where along the fitted helix a stored track state is placed.
+enum class StatePoint { FirstHit, LastHit, Origin };
+
+// Describe the fitted helix as an EDM4hep track state at one point of the track.
 //
-// Internal convention (used by the circle fit, the GenFit seed and the inner propagation):
-//   d0 = |centre| - R and omega = charge/R: the helix built from these with the EDM4hep
-//   formulas does NOT pass through the hits -- both signs are opposite to EDM4hep;
-//   Z0 = z at the first muon hit (s = 0 at that hit), not at the perigee.
-// Stored convention (EDM4hep): d0 -> -d0, omega -> -omega (phi unchanged), and Z0 moved to
-//   the perigee: Z0 -> Z0 - tanLambda * s*, with s* the transverse arc length from the
-//   perigee to the first hit along the circle. d0, phi, omega, Z0, tanLambda are then all
-//   defined at the perigee with respect to the origin.
-// The referencePoint is deliberately left at the first muon hit.
-// Covariance: Jacobian diag(-1, 1, -1, 1, 1) plus dZ0'/dtanLambda = -s* (the dependence of
-//   s* on the circle parameters is neglected).
-// Note: this segment lives in the return field, so the sign of omega describes the
-//   geometric sense of rotation, not the charge in the EDM4hep (B along +z) sense.
-static void toPerigeeConvention(edm4hep::TrackState& state) {
-    const double d0        = -state.D0;
-    const double omega     = -state.omega;
-    const double phi       = state.phi;
-    const double tanLambda = state.tanLambda;
-    if (std::abs(omega) < 1e-12)
-        return;
-    const double radius  = 1.0 / omega;  // signed
-    const double centreX = (radius - d0) * std::sin(phi);
-    const double centreY = -(radius - d0) * std::cos(phi);
-    const double perigeeX = -d0 * std::sin(phi);
-    const double perigeeY = d0 * std::cos(phi);
-    const double anglePerigee = std::atan2(perigeeY - centreY, perigeeX - centreX);
-    const double angleFirstHit =
-        std::atan2(state.referencePoint[1] - centreY, state.referencePoint[0] - centreX);
-    double dAngle = anglePerigee - angleFirstHit;
-    while (dAngle > M_PI) dAngle -= 2.0 * M_PI;
-    while (dAngle < -M_PI) dAngle += 2.0 * M_PI;
-    const double sStar = dAngle / omega;  // arc length perigee -> first hit
+// The helix is the fitted circle (centre, radius) plus a straight-line fit of z versus
+// the transverse arc length. Everything is geometric, so it works for either field sign:
+//   - the particle moves outward, from the hit nearest the origin to the farthest one;
+//   - omega > 0 means clockwise seen from +z (EDM4hep); in a field along +z its sign is
+//     the charge;
+//   - the reference point is the innermost hit, the outermost hit or the origin, and
+//     d0, phi, z0 are given at the circle point closest to it (EDM4hep convention:
+//     pca = ref + (-d0 sin(phi), d0 cos(phi), z0), centre = pca + (1/omega)(sin(phi), -cos(phi)),
+//     z(s) = pca_z + tanLambda * s).
+// Units: centre and radius in cm, circleCov is the 3x3 covariance of (x0, y0, R) in cm^2;
+// the state is written in mm. Returns false (state unchanged) for degenerate input.
+static bool makeEdm4hepStateFromCircle(double centreXcm, double centreYcm, double radiusCm,
+                                       const Eigen::Matrix3d& circleCov,
+                                       const std::vector<edm4hep::TrackerHitPlane>& trackHits,
+                                       StatePoint where, edm4hep::TrackState& state) {
+    const double centreX = centreXcm * 10.0;   // mm
+    const double centreY = centreYcm * 10.0;
+    const double radius  = radiusCm * 10.0;
+    if (radius <= 0.0 || trackHits.size() < 2)
+        return false;
+
+    // 1. Hits sorted by distance from the origin: the order an outward-moving particle
+    //    crosses them.
+    struct HitPoint {
+        double x, y, z;      // mm
+        double distance;     // 3D distance from the origin, mm
+        double varianceZ;    // mm^2
+    };
+    std::vector<HitPoint> points;
+    for (const auto& hit : trackHits) {
+        const auto& pos = hit.getPosition();
+        HitPoint point;
+        point.x = pos[0];
+        point.y = pos[1];
+        point.z = pos[2];
+        point.distance = std::sqrt(point.x * point.x + point.y * point.y + point.z * point.z);
+        point.varianceZ = hit.getCovMatrix(edm4hep::Cartesian::z, edm4hep::Cartesian::z);
+        points.push_back(point);
+    }
+    std::sort(points.begin(), points.end(),
+              [](const HitPoint& a, const HitPoint& b) { return a.distance < b.distance; });
+
+    // 2. Sense of rotation seen from +z (+1 = counter-clockwise): sum of the cross
+    //    products of consecutive hits, measured from the circle centre.
+    double crossSum = 0.0;
+    for (size_t i = 0; i + 1 < points.size(); ++i) {
+        const double ax = points[i].x - centreX;
+        const double ay = points[i].y - centreY;
+        const double bx = points[i + 1].x - centreX;
+        const double by = points[i + 1].y - centreY;
+        crossSum += ax * by - ay * bx;
+    }
+    if (crossSum == 0.0)
+        return false;
+    const double sense = (crossSum > 0.0) ? 1.0 : -1.0;
+
+    // 3. Reference point and the circle point closest to it (pca).
+    double refX = 0.0, refY = 0.0, refZ = 0.0;
+    size_t nearestHit = 0;   // hit next to the reference point, used to count the arc
+    if (where == StatePoint::FirstHit) {
+        refX = points.front().x;
+        refY = points.front().y;
+        refZ = points.front().z;
+    } else if (where == StatePoint::LastHit) {
+        nearestHit = points.size() - 1;
+        refX = points.back().x;
+        refY = points.back().y;
+        refZ = points.back().z;
+    }
+    const double toRefX = refX - centreX;
+    const double toRefY = refY - centreY;
+    const double centreToRef = std::sqrt(toRefX * toRefX + toRefY * toRefY);
+    if (centreToRef < 1e-6)
+        return false;   // reference point at the circle centre: no closest point
+    const double anglePca = std::atan2(toRefY, toRefX);   // angle of the pca around the centre
+    const double pcaX = centreX + radius * toRefX / centreToRef;
+    const double pcaY = centreY + radius * toRefY / centreToRef;
+
+    // 4. phi = direction of travel at the pca (radius vector turned by +-90 degrees),
+    //    omega > 0 for clockwise motion, d0 from pca - ref = (-d0 sin(phi), d0 cos(phi)).
+    double phi = anglePca + sense * M_PI / 2.0;
+    while (phi > M_PI) phi -= 2.0 * M_PI;
+    while (phi <= -M_PI) phi += 2.0 * M_PI;
+    const double omega = -sense / radius;   // 1/mm
+    const double d0 = -(pcaX - refX) * std::sin(phi) + (pcaY - refY) * std::cos(phi);
+
+    // 5. Angle turned along the direction of travel, hit by hit (no 2 pi jumps), then the
+    //    arc length of every hit measured from the pca.
+    std::vector<double> turned(points.size());
+    double previousAngle = std::atan2(points[0].y - centreY, points[0].x - centreX);
+    turned[0] = 0.0;
+    for (size_t i = 1; i < points.size(); ++i) {
+        const double angle = std::atan2(points[i].y - centreY, points[i].x - centreX);
+        double step = sense * (angle - previousAngle);
+        while (step > M_PI) step -= 2.0 * M_PI;
+        while (step <= -M_PI) step += 2.0 * M_PI;
+        turned[i] = turned[i - 1] + step;
+        previousAngle = angle;
+    }
+    const double angleNearest = std::atan2(points[nearestHit].y - centreY, points[nearestHit].x - centreX);
+    double pcaStep = sense * (anglePca - angleNearest);
+    while (pcaStep > M_PI) pcaStep -= 2.0 * M_PI;
+    while (pcaStep <= -M_PI) pcaStep += 2.0 * M_PI;
+    const double turnedPca = turned[nearestHit] + pcaStep;
+
+    // 6. Weighted straight-line fit z = zPca + tanLambda * s, weights 1/sigma_z^2 from
+    //    the hit covariance (sigma_z = 1 mm for hits without a z error).
+    double sumW = 0.0, sumWS = 0.0, sumWSS = 0.0, sumWZ = 0.0, sumWSZ = 0.0;
+    for (size_t i = 0; i < points.size(); ++i) {
+        double varianceZ = points[i].varianceZ;
+        if (!(varianceZ > 0.0))
+            varianceZ = 1.0;
+        const double w = 1.0 / varianceZ;
+        const double s = radius * (turned[i] - turnedPca);
+        sumW   += w;
+        sumWS  += w * s;
+        sumWSS += w * s * s;
+        sumWZ  += w * points[i].z;
+        sumWSZ += w * s * points[i].z;
+    }
+    // det >= 0; it is (close to) zero when all hits sit at the same arc length
+    const double det = sumW * sumWSS - sumWS * sumWS;
+    if (!(det > 1e-12 * sumW * sumWSS))
+        return false;
+    const double zPca      = (sumWSS * sumWZ - sumWS * sumWSZ) / det;
+    const double tanLambda = (sumW * sumWSZ - sumWS * sumWZ) / det;
+
+    // 7. Covariance. d0, phi and omega from the circle-fit covariance (gradients with
+    //    respect to x0, y0, R in cm), with the same floors as the GenFit seed;
+    //    z0 and tanLambda from the line fit.
+    const double D2 = centreToRef * centreToRef / 100.0;   // cm^2
+    const Eigen::Vector3d gradD0(-toRefX / centreToRef, -toRefY / centreToRef, -1.0);   // cm/cm
+    const Eigen::Vector3d gradPhi(toRefY / 10.0 / D2, -toRefX / 10.0 / D2, 0.0);        // rad/cm
+    const Eigen::Vector3d gradOmega(0.0, 0.0, 1.0 / (radiusCm * radiusCm * 10.0));     // (1/mm)/cm
+    const double varD0    = std::max(gradD0.dot(circleCov * gradD0) * 100.0, 0.01);    // mm^2
+    const double varPhi   = std::max(gradPhi.dot(circleCov * gradPhi), 0.01);
+    const double varOmega = std::max(gradOmega.dot(circleCov * gradOmega), std::pow(0.1 * omega, 2));
 
     using TP = edm4hep::TrackParams;
-    const double varZ0   = state.getCovMatrix(TP::z0, TP::z0);
-    const double varTanL = state.getCovMatrix(TP::tanLambda, TP::tanLambda);
-    const double covZ0T  = state.getCovMatrix(TP::z0, TP::tanLambda);
-    // sign flips: covariances pairing d0 or omega with phi/z0/tanLambda change sign
-    for (TP a : {TP::d0, TP::omega})
-        for (TP b : {TP::phi, TP::z0, TP::tanLambda})
-            state.setCovMatrix(-state.getCovMatrix(a, b), a, b);
-    // z0 shift along the helix
-    state.setCovMatrix(static_cast<float>(varZ0 - 2.0 * sStar * covZ0T + sStar * sStar * varTanL), TP::z0, TP::z0);
-    state.setCovMatrix(static_cast<float>(covZ0T - sStar * varTanL), TP::z0, TP::tanLambda);
-    for (TP a : {TP::d0, TP::phi, TP::omega})
-        state.setCovMatrix(static_cast<float>(state.getCovMatrix(a, TP::z0) - sStar * state.getCovMatrix(a, TP::tanLambda)),
-                           a, TP::z0);
+    for (int i = 0; i < 6; ++i)
+        for (int j = 0; j <= i; ++j)
+            state.setCovMatrix(0.0f, static_cast<TP>(i), static_cast<TP>(j));
+    state.setCovMatrix(static_cast<float>(varD0), TP::d0, TP::d0);
+    state.setCovMatrix(static_cast<float>(varPhi), TP::phi, TP::phi);
+    state.setCovMatrix(static_cast<float>(varOmega), TP::omega, TP::omega);
+    state.setCovMatrix(static_cast<float>(sumWSS / det), TP::z0, TP::z0);
+    state.setCovMatrix(static_cast<float>(sumW / det), TP::tanLambda, TP::tanLambda);
+    state.setCovMatrix(static_cast<float>(-sumWS / det), TP::z0, TP::tanLambda);
 
-    state.D0    = static_cast<float>(d0);
-    state.omega = static_cast<float>(omega);
-    state.Z0    = static_cast<float>(state.Z0 - tanLambda * sStar);
+    state.D0        = static_cast<float>(d0);
+    state.phi       = static_cast<float>(phi);
+    state.omega     = static_cast<float>(omega);
+    state.Z0        = static_cast<float>(zPca - refZ);
+    state.tanLambda = static_cast<float>(tanLambda);
+    state.referencePoint = edm4hep::Vector3f(refX, refY, refZ);
+    return true;
 }
 
-// EDM4HEP Track state
+// Track state with the given parameters and a default diagonal covariance.
 edm4hep::TrackState CombinatorialTrackFinder::createTrackState(
     double d0, double phi, double omega, double z0, double tanLambda,
     int location) const {
-    
+
     edm4hep::TrackState state;
-    
-    // Set parameters
+
     state.D0 = d0;
     state.phi = phi;
     state.omega = omega;
     state.Z0 = z0;
     state.tanLambda = tanLambda;
     state.location = location;
-    
-    // Zero the full 6×6 covariance (21 lower-triangle elements).
-    // Callers that know their fit uncertainties should set the diagonal
-    // explicitly after calling this function.  The defaults below are
-    // conservative fall-backs for the muon system (poor resolution).
+
+    // callers that know the fit uncertainties overwrite these
     for (int i = 0; i < 6; ++i)
         for (int j = 0; j <= i; ++j)
             state.setCovMatrix(0.0,
                 static_cast<edm4hep::TrackParams>(i),
                 static_cast<edm4hep::TrackParams>(j));
 
-    // Default diagonal: generous seed uncertainties for the outer muon system.
-    // Units: D0/Z0 in mm², phi/tanLambda in rad², omega in (1/mm)².
+    // D0/Z0 in mm^2, phi/tanLambda in rad^2, omega in (1/mm)^2
     state.setCovMatrix(1.0,   edm4hep::TrackParams::d0,        edm4hep::TrackParams::d0);
     state.setCovMatrix(0.01,  edm4hep::TrackParams::phi,       edm4hep::TrackParams::phi);
     state.setCovMatrix(1e-10,  edm4hep::TrackParams::omega,     edm4hep::TrackParams::omega);
@@ -973,7 +998,7 @@ edm4hep::TrackState CombinatorialTrackFinder::createTrackState(
 }
 
 //------------------------------------------------------------------------------
-// Core tracking methods
+// Track finding
 //------------------------------------------------------------------------------
 
 void CombinatorialTrackFinder::findTracks(
@@ -991,39 +1016,24 @@ void CombinatorialTrackFinder::findTracks(
         return;
     }
 
-    // ── DEBUG: sanity-check U/V on the first input hit ─────────────────────────
-    // If these are zero here, the problem is upstream in the digitizer, not in
-    // this algorithm.  If they are non-zero here but zero in the output hits,
-    // the missing setU/setV copies below are the root cause.
     if (msgLevel(MSG::DEBUG) && hits->size() > 0) {
         const auto& dbgHit = (*hits)[0];
-        // [UV-DEBUG] disabled
-        // debug() << "[UV-DEBUG] Input hit[0]: ...";
     }
 
-    // Build a map from input TrackerHitPlane objectID -> all contributing SimTrackerHits.
-    // The map is multi-valued because a cluster-based digi can have several
-    // SimHits contributing to one digi hit (e.g. a primary muon + delta-ray e-
-    // both in the same readout cell). Keeping only one would drop the others
-    // and bias downstream MC-truth checks (purity, fake rate) low for cluster
-    // digi. For baseline (1 SimHit per digi) the vector simply has size 1.
-    // Key on (collectionID, index), NOT index alone: when one readout spans several
-    // subdetectors the hits arrive merged from several source collections, whose
-    // indices both start at 0 and would otherwise collide, silently attaching the
-    // wrong SimTrackerHit to a hit from a different subdetector.
+    // Input hit -> all SimTrackerHits that contributed to it (one digi hit can have
+    // several). Keyed on (collectionID, index): merged input collections all start
+    // their indices at 0.
     auto hitKey = [](const auto& h) -> uint64_t {
         const auto id = h.id();
         return (static_cast<uint64_t>(id.collectionID) << 32) | static_cast<uint32_t>(id.index);
     };
     std::unordered_map<uint64_t, std::vector<edm4hep::SimTrackerHit>> recoToSimMap;
     for (const auto& link : recoSimLinks) {
-        // link.getFrom() is a TrackerHit interface — get the underlying object ID
         auto recoHit = link.getFrom();
         recoToSimMap[hitKey(recoHit)].push_back(link.getTo());
     }
 
-    // ── MC truth overview: list all unique MCParticles associated with event hits ─
-    // Printed at DEBUG level once per event, before track finding begins.
+    // DEBUG: the MC particles behind this event's hits
     if (msgLevel(MSG::DEBUG)) {
         debug() << "MC truth particles for this event (from RecoSim links):" << endmsg;
         std::unordered_set<int> seenMCIdx;
@@ -1032,9 +1042,6 @@ void CombinatorialTrackFinder::findTracks(
             auto it = recoToSimMap.find(hitKey((*hits)[gi]));
             if (it == recoToSimMap.end()) continue;
             nLinked++;
-            // Iterate over every SimHit contributing to this digi hit; for
-            // cluster digi a single hit may carry both a muon and one or more
-            // delta-ray contributions.
             for (const auto& sim : it->second) {
                 auto mcPart = sim.getParticle();
                 if (!mcPart.isAvailable()) continue;
@@ -1080,24 +1087,23 @@ void CombinatorialTrackFinder::findTracks(
         }
     };
 
-    // Global hit usage tracking across all track-finding iterations
+    // hits already used by accepted tracks
     std::vector<bool> globalUsedHits(hits->size(), false);
 
-    // SeedAndExtend: candidates are built once per event (first iteration), then handed out
-    // one per iteration — best first, skipping any that share a hit with an accepted track.
+    // SeedAndExtend: all candidates are built in the first iteration, then taken one per
+    // iteration, best first, skipping those that share a hit with an accepted track.
     std::vector<k4rt::SECandidate> seCands;
     bool   seBuilt = false;
     size_t seNext  = 0;
-    // 3D hit positions (mm) from every accepted track — used by the neighbour-gate check.
+    // hit positions (mm) of the accepted tracks, for the neighbour-track cuts
     std::vector<std::array<double, 3>> acceptedTrackHitPositions;
     int trackNumber = 0;
-    
-    // MAIN LOOP: Continue finding tracks until no more can be formed
+
+    // One track per iteration, until no candidate is left
     while (true) {
         trackNumber++;
         info() << "\n=== TRACK FINDING ITERATION " << trackNumber << " ===" << endmsg;
-        
-        // Count remaining unused hits
+
         int remainingHits = 0;
         std::map<int, int> unusedHitsPerLayer;
         for (size_t i = 0; i < globalUsedHits.size(); ++i) {
@@ -1107,41 +1113,37 @@ void CombinatorialTrackFinder::findTracks(
                 unusedHitsPerLayer[layerID]++;
             }
         }
-        
+
         info() << "Remaining unused hits: " << remainingHits << endmsg;
         if (msgLevel(MSG::DEBUG)) {
             for (const auto& [layer, count] : unusedHitsPerLayer) {
                 debug() << "  Layer " << layer << ": " << count << " unused hits" << endmsg;
             }
         }
-        
+
         if (remainingHits < 3) {
             info() << "Not enough unused hits remaining (" << remainingHits << ") to form another track" << endmsg;
             break;
         }
 
-        // Structure to hold hit information for this iteration (only unused hits)
+        // unused hits of this iteration
         using HitInfo = k4rt::HitInfo;
 
         std::vector<HitInfo> allHitInfo;
-        std::map<int, std::vector<size_t>> hitIndicesByCompositeLayer; 
+        std::map<int, std::vector<size_t>> hitIndicesByCompositeLayer;
 
-        // Reserve space to prevent reallocation during population
         allHitInfo.reserve(remainingHits);
 
-        // Build hit info for ONLY unused hits
-        // MaxHitEdepKeV pre-filter: skip hits whose energy deposit is above threshold.
-        // getEDep() returns GeV in EDM4hep; threshold is stored in keV → divide by 1e6.
+        // MaxHitEdepKeV: skip hits with a large energy deposit (EDM4hep edep is in GeV)
         const double edepThreshGeV = (m_maxHitEdepKeV.value() > 0.0)
                                      ? m_maxHitEdepKeV.value() * 1e-6   // keV → GeV
                                      : -1.0;                              // disabled
         int evtEdepRej = 0;
         for (size_t i = 0; i < hits->size(); ++i) {
-            if (globalUsedHits[i]) continue;  // Skip already used hits
+            if (globalUsedHits[i]) continue;
 
             const auto& hit = (*hits)[i];
 
-            // ── edep pre-filter ──────────────────────────────────────────────
             if (edepThreshGeV > 0.0 && hit.getEDep() > edepThreshGeV) {
                 debug() << "  Hit " << i << " excluded by edep cut: "
                         << hit.getEDep()*1e6 << " keV > " << m_maxHitEdepKeV.value()
@@ -1176,16 +1178,15 @@ void CombinatorialTrackFinder::findTracks(
             break;
         }
 
-        info() << "Available hits for iteration " << trackNumber << ": " << allHitInfo.size() 
+        info() << "Available hits for iteration " << trackNumber << ": " << allHitInfo.size()
                << " in " << hitIndicesByCompositeLayer.size() << " detector different layers/regions" << endmsg;
 
-        // Get composite layer IDs for available hits
         std::vector<int> compositeLayerIDs;
         for (const auto& [compositeID, indices] : hitIndicesByCompositeLayer) {
             compositeLayerIDs.push_back(compositeID);
         }
 
-        // Sort compositeLayerIDs by layer number (nearest to IP first), then by compositeID as tie-breaker.
+        // layer keys sorted by layer number (innermost first), then by key
         auto layerNumber = [](int compositeID) {
             return std::abs(compositeID) % 1000;
         };
@@ -1202,12 +1203,9 @@ void CombinatorialTrackFinder::findTracks(
             break;
         }
 
-        // ── Reference B-field for k=3 radius normalisation ───────────────────────
-        // Compute once per track-finding iteration at the centroid of available hits.
-        // Used to convert MaxComboPT → R_cap (cm), so the k=3 combined score can cap
-        // the radius reward without needing an extra configurable property.
-        //   R_cap [cm] = MaxComboPT [GeV] * 100 / (0.3 * |B| [T])
-        double bRefForK3 = 1.7;  // fallback: IDEA nominal [T] "fix, there should be nor hardcoded values at all"
+        // Field at the centroid of the hits, to turn MaxComboPT into a radius cap for the
+        // k = 3 score: R_cap [cm] = MaxComboPT [GeV] * 100 / (0.3 * |B| [T])
+        double bRefForK3 = 1.7;  // used only if the field lookup fails
         {
             double sx = 0.0, sy = 0.0, sz = 0.0;
             for (const auto& hi : allHitInfo) {
@@ -1223,41 +1221,22 @@ void CombinatorialTrackFinder::findTracks(
             }
         }
         const double absBRefForK3 = std::max(std::abs(bRefForK3), 1e-6);
-        // R_cap: radius at which pT = MaxComboPT (the upper physical pT limit).
-        // Combos with radius >> R_cap are almost certainly noise; the term saturates.
         const double rCapK3 = m_maxComboPT.value() * 100.0 / (0.3 * absBRefForK3);
 
-        // ── Edep-similarity score ─────────────────────────────────────────────────
-        // Strategy: for a crowded compositeID (>1 hit), the "right" hit is the one
-        // whose energy deposit is most similar to the muon hits in other layers.
-        // A delta-ray will have an abnormal edep — either very high (energetic electron)
-        // or very low (soft secondary) — compared to the ~MIP muon signal.
-        //
-        // Pre-computation (event-level baseline):
-        //   meanEdepSingle = average edep (in keV) of compositeIDs that have EXACTLY
-        //   one hit — these are the unambiguous, trusted muon hits in this event.
-        //   This is the baseline against which crowded-layer hits are judged.
-        //
-        // Per-hit score (used for MaxHitsPerCompositeID pre-filter):
-        //   hitEdepScore[idx] = |edep(hit) - meanEdepSingle|  (keV, lower = better)
-        //
-        // Per-combo score (active criterion for k>=4, tiebreaker for k=3):
-        //   avgEdepDev = mean of hitEdepScore[idx] over the combo hits.
-        //   hitEdepScore[idx] = |edep(hit) - meanEdepSingle| measures deviation from the
-        //   event-level muon baseline (single-hit compositeID average = unambiguous muon).
-        //   Using the baseline rather than within-combo mean ensures that uniform e- tracks
-        //   (all hits far from muon baseline) are penalised, not rewarded.
-        //   For k=3: combined_score = w*avgEdepDev/edepNorm - min(r,R_cap)/R_cap.
-        //     Both radius (capped at MaxSeedPT) and edepDev contribute simultaneously.
-        //   For k>=4: combined_score = chi2/ndf + w * avgEdepDev / EdepNormKeV.
-
-        // Build per-hit edep map (keV) — needed by both pre-filter and combo scorer.
+        // ── Energy-deposit score ──────────────────────────────────────────────────
+        // In a layer with several hits, the right one usually has an energy deposit like
+        // the hits in layers with a single hit (the event baseline); delta rays and
+        // secondaries deposit much more or much less.
+        //   hit score  = distance of edep from [baseline, 2 x baseline]  (keV, lower = better)
+        //   combo score: k = 3 : w * avgScore / EdepNormKeV - min(R, R_cap) / R_cap
+        //                k >= 4: chi2/ndf + w * avgScore / EdepNormKeV
+        // MaxHitsPerCompositeID keeps only the best-scoring hits of crowded layers.
         std::unordered_map<size_t, double> hitEdepKeV;   // allHitInfo index → edep (keV)
         hitEdepKeV.reserve(allHitInfo.size());
         for (size_t idx = 0; idx < allHitInfo.size(); ++idx)
             hitEdepKeV[idx] = allHitInfo[idx].hit.getEDep() * 1e6;   // GeV → keV
 
-        // Compute baseline edep from single-hit compositeIDs.
+        // baseline: mean edep of the layers with exactly one hit
         double meanEdepSingle = 0.0;
         int    nSingle        = 0;
         for (const auto& [cid, cidIndices] : hitIndicesByCompositeLayer) {
@@ -1268,10 +1247,7 @@ void CombinatorialTrackFinder::findTracks(
         }
         if (nSingle > 0) meanEdepSingle /= static_cast<double>(nSingle);
 
-        // Per-hit edep-similarity score (deviation from baseline, keV; lower = better).
-        // If meanEdepSingle == 0 (all compositeIDs crowded, no unambiguous muon reference),
-        // fall back to the median edep across all event hits as the baseline.  Using 0 as
-        // baseline would make raw edep the score — favouring low-edep e- hits over MIP muons.
+        // no single-hit layer: use the median edep of all hits
         if (nSingle == 0 && !hitEdepKeV.empty()) {
             std::vector<double> allEdeps;
             allEdeps.reserve(hitEdepKeV.size());
@@ -1289,9 +1265,6 @@ void CombinatorialTrackFinder::findTracks(
         hitEdepScore.reserve(allHitInfo.size());
         if (m_proxScoreWeight.value() > 0.0) {
             for (size_t idx = 0; idx < allHitInfo.size(); ++idx) {
-                // Asymmetric edep score: primary muons tend to deposit more than
-                // secondaries, so reward edep in [baseline, 2×baseline]; penalise
-                // both below-baseline (secondary-like) and far-above-baseline (hadronic spike).
                 const double edep_    = hitEdepKeV.at(idx);
                 const double lowDev_  = std::max(0.0, meanEdepSingle - edep_);
                 const double highDev_ = std::max(0.0, edep_ - 2.0 * meanEdepSingle);
@@ -1302,8 +1275,6 @@ void CombinatorialTrackFinder::findTracks(
                         << " score=" << hitEdepScore[idx] << " keV" << endmsg;
             }
 
-            // If MaxHitsPerCompositeID > 0, trim crowded compositeIDs to the top-N
-            // hits with edep closest to the single-hit baseline.
             const int maxHPC = m_maxHitsPerComposite.value();
             if (maxHPC > 0) {
                 for (auto& [cid, cidIndices] : hitIndicesByCompositeLayer) {
@@ -1318,19 +1289,15 @@ void CombinatorialTrackFinder::findTracks(
                 }
             }
         }
-        // ─────────────────────────────────────────────────────────────────────────
 
-        // Build mapping layerNumber -> vector of HitInfo indices (aggregating across composite types)
+        // hits per layer number (barrel and endcaps together)
         std::map<int, std::vector<size_t>> hitsByLayerNumber;
         for (size_t idx = 0; idx < allHitInfo.size(); ++idx) {
             int lyr = allHitInfo[idx].layerID;
             hitsByLayerNumber[lyr].push_back(idx);
         }
 
-        // Create local used hits array for this iteration (starts all false for available hits)
         std::vector<bool> usedHits(hits->size(), false);
-        
-        // Copy global usage to local array
         for (size_t i = 0; i < globalUsedHits.size(); ++i) {
             usedHits[i] = globalUsedHits[i];
         }
@@ -1341,7 +1308,7 @@ void CombinatorialTrackFinder::findTracks(
             std::vector<size_t> hitIndices;
             std::vector<int> usedCompositeIDs;
 
-            TrackCandidate(edm4hep::Track t, double pt, const std::vector<size_t>& indices, 
+            TrackCandidate(edm4hep::Track t, double pt, const std::vector<size_t>& indices,
                           const std::vector<int>& composites)
                 : track(t), pT(pt), hitIndices(indices), usedCompositeIDs(composites) {}
         };
@@ -1350,7 +1317,6 @@ void CombinatorialTrackFinder::findTracks(
         int tripletCandidates = 0;
         int validTriplets = 0;
 
-        // Helper to extract pT from a track (using getPT method)
         auto extractPTFromTrack = [&](const edm4hep::Track& t) {
             double pT = 0.0;
             for (int l = 0; l < t.trackStates_size(); ++l) {
@@ -1363,16 +1329,14 @@ void CombinatorialTrackFinder::findTracks(
             return pT;
         };
 
-        edm4hep::TrackCollection candidateTracks;  // Temporary collection for this iteration
+        edm4hep::TrackCollection candidateTracks;  // this iteration only
 
-        // ── N-HIT COMBINATORIAL SEEDING ───────────────────────────────────────────
-        // Strategy: try all C(N,k) hit combinations for k = MaxCombinatorialHits
-        // down to MinTrackHits, score each by chi2/NDF from a full N-hit circle fit,
-        // apply isolation and layer-span quality cuts, then iteratively remove outlier
-        // hits from the best combination.  Finally seed from its 3 innermost hits "fix, remove seed".
-        // ─────────────────────────────────────────────────────────────────────────
+        // ── N-hit combinatorial search (Strategy = Exhaustive) ────────────────────
+        // All C(N,k) combinations for k = MaxCombinatorialHits down to MinTrackHits,
+        // each scored by the chi2/ndf of its circle fit, after road, isolation and
+        // layer-span cuts; outliers are then removed from the best combination.
 
-        // Build a flat ordered list of allHitInfo indices, layer-sorted (inner→outer).
+        // hit indices ordered by layer, inner -> outer
         std::vector<size_t> orderedHII;
         orderedHII.reserve(allHitInfo.size());
         for (const auto& cid : compositeLayerIDs) {
@@ -1384,13 +1348,12 @@ void CombinatorialTrackFinder::findTracks(
         const int maxK   = std::min(nAvail, m_maxCombinatorialHits.value());
         const int minK   = std::max(3, m_minTrackHits.value());
 
-        // Result of the best combination found so far
         using CombResult = k4rt::CombResult;
         CombResult bestCombo;
         CombResult fallbackCombo;  // best over-threshold combo; promoted if no valid combo exists
         bool foundCombination = false;
 
-        // Per-event diagnostic counters (not atomic — single-threaded per event)
+        // per-iteration counters (debug printout)
         int evtCombosEval    = 0;  // combinations that reached the fit stage
         int evtIsoRej        = 0;  // rejected by isolation cut
         int evtChi2Rej       = 0;  // rejected by chi2/ndf threshold
@@ -1401,28 +1364,24 @@ void CombinatorialTrackFinder::findTracks(
         int evtPairDistRej   = 0;  // rejected by MaxPairHitDistance
         int evtTanLambdaRej  = 0;  // rejected by MaxComboTanLambdaDev
 
-        // ── Quality-cut lambdas ───────────────────────────────────────────────────
+        // ── Quality cuts ──────────────────────────────────────────────────────────
 
-        // Reverse map: global hit index → compositeID (for use in isolation check)
+        // hit index -> layer key
         std::unordered_map<size_t, int> gIdxToComposite;
         gIdxToComposite.reserve(allHitInfo.size());
         for (const auto& hi : allHitInfo) {
             gIdxToComposite[hi.index] = hi.compositeID;
         }
 
-        // Isolation check: each selected hit must be at least m_hitIsolationCut cm
-        // away from every OTHER unused hit not in the current combination AND not in
-        // the same compositeID region.  Same-region secondary hits (delta-rays, Compton
-        // electrons from the muon in the same detector cell) are expected neighbours
-        // and must not disqualify the signal hit — the one-hit-per-compositeID
-        // constraint is already enforced structurally by the combinatorial loop.
+        // Isolation: each hit of the combination must be HitIsolationCut (cm) away from
+        // every other unused hit in a different layer. Hits in the same layer (secondaries
+        // next to the track) are not counted.
         auto allIsolated = [&](const std::vector<size_t>& gIdxVec) -> bool {
             const double cut = m_hitIsolationCut.value();
             if (cut <= 0.0) return true;
             for (size_t gi : gIdxVec) {
                 const auto& refPos = (*hits)[gi].getPosition();
                 Eigen::Vector3d ref(refPos[0]/10.0, refPos[1]/10.0, refPos[2]/10.0);
-                // compositeID of this selected hit
                 int giComposite = -999;
                 auto cgit = gIdxToComposite.find(gi);
                 if (cgit != gIdxToComposite.end()) giComposite = cgit->second;
@@ -1432,11 +1391,9 @@ void CombinatorialTrackFinder::findTracks(
                     bool inCombo = false;
                     for (size_t si : gIdxVec) { if (si == j) { inCombo = true; break; } }
                     if (inCombo) continue;
-                    // Skip hits that share the same compositeID as the selected hit:
-                    // those are same-region secondaries, not cross-region contamination.
                     int jComposite = -999;
                     auto cjit = gIdxToComposite.find(j);
-                    if (cjit == gIdxToComposite.end()) continue; // skip hits not in the active candidate pool (edep-excluded or no surface)
+                    if (cjit == gIdxToComposite.end()) continue; // not in this iteration's hit pool
                     jComposite = cjit->second;
                     if (jComposite == giComposite) continue;
                     const auto& p = (*hits)[j].getPosition();
@@ -1460,9 +1417,7 @@ void CombinatorialTrackFinder::findTracks(
         // to belong to a single track.  Hits in gIdxVec are ordered inner→outer
         // (slot order matches compositeLayerIDs which is sorted by layer number).
         // Hit-set predicates live in TrackingPrimitives so the seed finder can reuse them.
-        // The DEBUG stream is re-acquired per call: debug() sets the level on the shared
-        // algorithm stream, so a pointer cached once would print at whatever level the
-        // last info()/warning() left behind.
+        // (the debug stream is fetched per call: a cached one keeps the level of the last message)
         const k4rt::RoadCutConfig roadCfg{m_maxConsecDeltaPhi.value(), m_maxComboPhiSpread.value(),
                                           m_maxConsecHitDist.value(), m_maxPairHitDist.value(),
                                           m_maxComboTanLambdaDev.value()};
@@ -1481,34 +1436,26 @@ void CombinatorialTrackFinder::findTracks(
         };
 
 
-        // ── Pair-coincidence helpers (only used when RequirePairCoincidence=true) ──
-        // Doublets at (layer 0,1), (2,3), (4,5) within each region (barrel/+endcap/−endcap).
-        // Hardcoded thresholds (all three must hold):
-        //   |Δφ| < 0.15 rad      (~8.6°, covers pT ≥ 0.5 GeV at 24 cm spacing)
-        //   |Δη| < 0.10          (covers forward tracks across 12-24 cm spacing)
-        //   3D distance ≤ 250 mm (paired layers are 12 cm apart, max 24 cm)
+        // ── Pair coincidence (RequirePairCoincidence), for detectors built of layer
+        // doublets (0,1), (2,3), (4,5): two hits of a doublet are coincident when
+        // |dphi| < 0.15 rad, |deta| < 0.10 and their distance is below PairCoincidenceMaxDistMM.
         constexpr double kPairTolPhi    = 0.15;
         constexpr double kPairTolEta    = 0.10;
-        // Detector-scale dependent: 250 mm suits muon-system paired layers, but is
-        // meaningless in a vertex detector where layers sit mm apart. Configurable.
         const double kPairMaxDistMM = m_pairCoincMaxDistMM.value();
 
         auto coincidentHits = [&](const edm4hep::TrackerHitPlane& a,
                                   const edm4hep::TrackerHitPlane& b) -> bool {
             const auto& pa = a.getPosition();
             const auto& pb = b.getPosition();
-            // 3D distance gate
             double dx = pb[0] - pa[0];
             double dy = pb[1] - pa[1];
             double dz = pb[2] - pa[2];
             if ((dx*dx + dy*dy + dz*dz) > (kPairMaxDistMM * kPairMaxDistMM))
                 return false;
-            // φ gate
             double dPhi = std::atan2(pb[1], pb[0]) - std::atan2(pa[1], pa[0]);
             while (dPhi >  M_PI) dPhi -= 2.0*M_PI;
             while (dPhi < -M_PI) dPhi += 2.0*M_PI;
             if (std::abs(dPhi) > kPairTolPhi) return false;
-            // η gate
             double rA = std::sqrt(pa[0]*pa[0] + pa[1]*pa[1]);
             double rB = std::sqrt(pb[0]*pb[0] + pb[1]*pb[1]);
             if (rA < 1e-6 || rB < 1e-6) return false;
@@ -1517,8 +1464,7 @@ void CombinatorialTrackFinder::findTracks(
             return std::abs(etaB - etaA) <= kPairTolEta;
         };
 
-        // compositeID layout: barrel=layer (0..5); +endcap=1000+layer; -endcap=-(1000+layer)
-        // Pair partner toggles the LSB of layer: 0↔1, 2↔3, 4↔5.
+        // partner layer of a doublet: 0 <-> 1, 2 <-> 3, 4 <-> 5
         auto pairPartnerCid = [](int composite) -> int {
             int absC = std::abs(composite);
             int layer = absC % 1000;
@@ -1574,8 +1520,7 @@ void CombinatorialTrackFinder::findTracks(
             return n_complete;
         };
 
-        // ── Build per-compositeID hit lists (full event pool) ───────────────────
-        // hitsForCompAll[i] = orderedHII indices for compositeLayerIDs[i], unused only
+        // unused hits of each layer: hitsForCompAll[i] belongs to compositeLayerIDs[i]
         const int nDistinctAll = static_cast<int>(compositeLayerIDs.size());
         std::vector<std::vector<size_t>> hitsForCompAll(nDistinctAll);
         for (int ci = 0; ci < nDistinctAll; ++ci) {
@@ -1587,11 +1532,8 @@ void CombinatorialTrackFinder::findTracks(
             }
         }
 
-        // ── Build seedEligible per-hit flag and a filtered hit pool for pass 1 ──
-        // seedEligible[hii] = true if hit has at least one coincident partner in
-        // its paired layer.  hitsForCompSeed contains only seedEligible hits.
-        // Populated only in HARD mode (RequirePairCoincidence=true && !soft);
-        // SOFT mode keeps all hits in the pool and biases bestCombo via scoring.
+        // Pair coincidence, hard mode: first pass only with hits that have a coincident
+        // partner (hitsForCompSeed). Soft mode keeps all hits and ranks by doublets.
         const bool pcHard = m_requirePairCoinc.value() && !m_pairCoincSoftScoring.value();
         const bool pcSoft = m_requirePairCoinc.value() &&  m_pairCoincSoftScoring.value();
         std::vector<std::vector<size_t>> hitsForCompSeed;
@@ -1611,13 +1553,9 @@ void CombinatorialTrackFinder::findTracks(
             debug() << "  PairCoinc: " << evtNonCoinc << " hits demoted (no partner in paired layer)" << endmsg;
         }
 
-        // ── Hit clustering: group hits into spatially coherent road candidates ────
-        // Union-Find connects hits in adjacent compositeID layers when they satisfy
-        // the road criteria (MaxConsecDeltaPhi + MaxConsecutiveHitDistance).  Each
-        // resulting cluster becomes an independent hit-pool for the combinatorial
-        // search, preventing hits from unrelated track regions from entering the
-        // same combo without changing any downstream quality cuts.
-        // When DoHitClustering is false, a single cluster = all hits (original behaviour).
+        // ── Hit clustering (DoHitClustering) ──────────────────────────────────────
+        // Hits of neighbouring layers that pass the road cuts are joined (union-find);
+        // each cluster is searched on its own. Without clustering: one cluster, all hits.
         struct ClusterDef {
             std::vector<int>                 cids;
             std::vector<std::vector<size_t>> hitsForComp;
@@ -1625,7 +1563,6 @@ void CombinatorialTrackFinder::findTracks(
         std::vector<ClusterDef> activeClusters;
 
         if (m_doHitClustering.value() && nDistinctAll >= 2) {
-            // Union-Find with iterative path-halving (no std::function overhead)
             const size_t nhii = allHitInfo.size();
             std::vector<size_t> ufParent(nhii);
             for (size_t i = 0; i < nhii; ++i) ufParent[i] = i;
@@ -1645,7 +1582,7 @@ void CombinatorialTrackFinder::findTracks(
             const double phiCut  = m_maxConsecDeltaPhi.value();
             const double distCut = m_maxConsecHitDist.value(); // cm
 
-            // Connect hits in adjacent compositeID layers that satisfy road criteria
+            // join hits of neighbouring layers
             for (int ci = 0; ci < nDistinctAll - 1; ++ci) {
                 for (size_t hii_a : hitsForCompAll[ci]) {
                     const auto& pa   = (*hits)[allHitInfo[hii_a].index].getPosition();
@@ -1667,8 +1604,7 @@ void CombinatorialTrackFinder::findTracks(
                 }
             }
 
-            // One-gap bridging: connect ci and ci+2 with doubled thresholds so a
-            // single missing intermediate layer does not split a cluster.
+            // also across one missing layer, with doubled cuts
             const double phiCut2  = (phiCut  > 0.0) ? phiCut  * 2.0 : -1.0;
             const double distCut2 = (distCut > 0.0) ? distCut * 2.0 : -1.0;
             for (int ci = 0; ci < nDistinctAll - 2; ++ci) {
@@ -1692,7 +1628,6 @@ void CombinatorialTrackFinder::findTracks(
                 }
             }
 
-            // Group hii by cluster root
             std::unordered_map<size_t, std::vector<size_t>> rootToHIIs;
             for (int ci = 0; ci < nDistinctAll; ++ci) {
                 for (size_t hii : hitsForCompAll[ci]) {
@@ -1700,7 +1635,7 @@ void CombinatorialTrackFinder::findTracks(
                 }
             }
 
-            // Build a ClusterDef for each cluster that spans ≥ minK distinct layers
+            // keep clusters with at least minK layers, layers in inner -> outer order
             for (auto& [root, hiis] : rootToHIIs) {
                 std::unordered_map<int, std::vector<size_t>> cidMap;
                 for (size_t hii : hiis) cidMap[allHitInfo[hii].compositeID].push_back(hii);
@@ -1709,7 +1644,6 @@ void CombinatorialTrackFinder::findTracks(
                             << cidMap.size() << " layer(s) — skipped (minK=" << minK << ")" << endmsg;
                     continue;
                 }
-                // Preserve inner→outer sort order inherited from compositeLayerIDs
                 ClusterDef cd;
                 for (int cid : compositeLayerIDs) {
                     auto it = cidMap.find(cid);
@@ -1728,18 +1662,13 @@ void CombinatorialTrackFinder::findTracks(
                    << nDistinctAll << " layer(s) → "
                    << activeClusters.size() << " cluster(s)" << endmsg;
         } else {
-            // Single cluster = full hit pool (original behaviour)
             ClusterDef cd;
             cd.cids        = compositeLayerIDs;
             cd.hitsForComp = hitsForCompAll;
             activeClusters.push_back(std::move(cd));
         }
 
-        // ── Seed-only cluster pool for pass 1 (HARD mode only) ────────────────────
-        // Single cluster from hitsForCompSeed; no Union-Find needed because the
-        // pair filter already enforces a quality criterion.  Pass 2 falls back to
-        // the original activeClusters when pass 1's best has <3 complete doublets.
-        // SOFT mode skips this entirely and runs a single pass on all hits.
+        // hard pair-coincidence mode: the first pass uses only the coincident hits
         std::vector<ClusterDef> activeClustersSeed;
         if (pcHard) {
             ClusterDef cd;
@@ -1748,15 +1677,12 @@ void CombinatorialTrackFinder::findTracks(
             activeClustersSeed.push_back(std::move(cd));
         }
 
-        // ── Combinatorial loop: two-pass in HARD mode, single-pass in SOFT mode ──
-        // HARD: pass 0 over seed-only hits; pass 1 over all hits if pass 0 best has <3 doublets.
-        // SOFT: single pass over all hits, with bestCombo biased toward more doublets.
-        // OFF : single pass, no pair logic.
+        // passes: hard pair coincidence = coincident hits first, then all hits if the best
+        // combination has < 3 complete doublets; otherwise one pass over all hits
         const int nPairPasses = pcHard ? 2 : 1;
 
-        // ── SeedAndExtend: take the next free candidate as bestCombo ─────────────
-        // Everything downstream (outlier rejection, neighbour gate, track states,
-        // output) is shared with the exhaustive path; only the choice of hits differs.
+        // ── SeedAndExtend: the next candidate whose hits are all free ─────────────
+        // Everything after the choice of hits is shared with the exhaustive search.
         if (m_useSeedExtend) {
             if (!seBuilt) {
                 std::vector<std::pair<size_t, int>> pool;
@@ -1806,11 +1732,7 @@ void CombinatorialTrackFinder::findTracks(
         }
 
         for (int pairPassIdx = 0; !m_useSeedExtend && pairPassIdx < nPairPasses; ++pairPassIdx) {
-            // Pass-2 trigger (HARD only): skip pass-2 if pass-1 already found a
-            // 3-complete-doublet combo (the optimal case).  If pass-1's best
-            // has <3 complete doublets, run pass-2 over all hits.  The
-            // bestCombo "isBetter" logic naturally keeps pass-1's combo if
-            // pass-2 finds nothing better.
+            // second pass only if the first one's best has fewer than 3 complete doublets
             if (pairPassIdx == 1 && foundCombination) {
                 int nDoub = countCompleteDoublets(bestCombo.gIdxVec);
                 if (nDoub >= 3) break;
@@ -1824,27 +1746,22 @@ void CombinatorialTrackFinder::findTracks(
             const std::vector<ClusterDef>& clustersThisPass =
                 (pcHard && pairPassIdx == 0) ? activeClustersSeed : activeClusters;
 
-        // compositeLayerIDs / hitsForComp / nDistinct / maxKeff are re-bound to each
-        // cluster's data via shadowing so the k-loop body below is unchanged.
+        // the names below shadow the event-wide ones with this cluster's layers and hits
         for (const auto& cluster : clustersThisPass) {
         const std::vector<int>&                 compositeLayerIDs = cluster.cids;        // NOLINT(shadow)
         const std::vector<std::vector<size_t>>& hitsForComp       = cluster.hitsForComp; // NOLINT(shadow)
         const int nDistinct = static_cast<int>(compositeLayerIDs.size());
         const int maxKeff   = std::min(maxK, nDistinct);
 
-        // For each k from maxKeff down to minK:
-        //   Enumerate all C(nDistinct, k) subsets of compositeIDs,
-        //   then for each subset enumerate the Cartesian product of hit choices
-        //   (one hit per selected compositeID).
-        // This structurally enforces one-hit-per-region with zero wasted iterations.
+        // For k = maxKeff ... minK: every choice of k layers, and for each every
+        // combination of one hit per chosen layer.
         for (int k = maxKeff; k >= minK; --k) {
             // Enumerate C(nDistinct, k) — indices into compositeLayerIDs
             std::vector<int> cidxCombo(k);
             for (int i = 0; i < k; ++i) cidxCombo[i] = i;
 
             while (true) {
-                // For each of the k selected compositeID slots, build the list of
-                // available (unused) hii indices.
+                // the hits of each chosen layer
                 bool anySlotEmpty = false;
                 std::vector<std::vector<size_t>> slotHits(k);
                 for (int i = 0; i < k; ++i) {
@@ -1853,7 +1770,7 @@ void CombinatorialTrackFinder::findTracks(
                 }
 
                 if (!anySlotEmpty) {
-                    // Enumerate Cartesian product: one hii from each slot
+                    // every combination of one hit per layer
                     std::vector<int> pos(k, 0);
                     while (true) {
                         std::vector<size_t> hiiVec(k), gIdxVec(k);
@@ -1862,14 +1779,12 @@ void CombinatorialTrackFinder::findTracks(
                             gIdxVec[i] = allHitInfo[hiiVec[i]].index;
                         }
 
-                        // Skip if any hit already used
                         bool anyUsed = false;
                         for (size_t gi : gIdxVec) {
                             if (usedHits[gi]) { anyUsed = true; break; }
                         }
 
                         if (!anyUsed) {
-                            // Build compact combo label for debug
                             auto comboLabel = [&]() -> std::string {
                                 std::string s = "[";
                                 for (int ii = 0; ii < k; ++ii) {
@@ -1880,13 +1795,11 @@ void CombinatorialTrackFinder::findTracks(
                             };
 
                             if (!passesRoadCuts(gIdxVec)) {
-                                // attribute to the specific road sub-cut
-                                // (passesRoadCuts logs which sub-cut fired at DEBUG level)
-                                // Determine which counter to increment by re-running each sub-cut
+                                // which road cut failed (for the counters): repeat the
+                                // consecutive-dphi cut, with the same exceptions as passesRoadCuts
                                 bool consecFail = false;
                                 {
                                     const int nH = static_cast<int>(gIdxVec.size());
-                                    // Mirror passesRoadCuts bypass: near beam pipe → all φ cuts bypassed
                                     double sumR = 0.0, sumAbsZ = 0.0;
                                     for (int i = 0; i < nH; ++i) {
                                         const auto& p = (*hits)[gIdxVec[i]].getPosition();
@@ -1907,7 +1820,7 @@ void CombinatorialTrackFinder::findTracks(
                                             if (itB != gIdxToComposite.end()) cidB = itB->second;
                                             const bool aBarrel = (k4rt::regionOfCid(cidA, &m_cidRegion) == 0);
                                             const bool bBarrel = (k4rt::regionOfCid(cidB, &m_cidRegion) == 0);
-                                            if (aBarrel != bBarrel) continue; // transition — bypassed
+                                            if (aBarrel != bBarrel) continue; // barrel-endcap step: no cut
                                             const auto& pa = (*hits)[gIdxVec[ri]].getPosition();
                                             const auto& pb = (*hits)[gIdxVec[ri+1]].getPosition();
                                             double dPhi = std::atan2(pb[1],pb[0]) - std::atan2(pa[1],pa[0]);
@@ -1929,7 +1842,7 @@ void CombinatorialTrackFinder::findTracks(
                                             << " -> REJECT φ spread" << endmsg;
                                 }
                             } else if (!passesDistanceCuts(gIdxVec)) {
-                                // Determine which sub-cut fired for the counter
+                                // which distance cut failed (for the counters)
                                 bool consecFail = false;
                                 {
                                     const double mc = m_maxConsecHitDist.value();
@@ -1967,10 +1880,7 @@ void CombinatorialTrackFinder::findTracks(
                                         << " -> REJECT tanLambda dev" << endmsg;
                             } else if (pcHard
                                        && countCompleteDoublets(gIdxVec) < 2) {
-                                // HARD mode: need ≥2 complete doublets among
-                                // (0,1)/(2,3)/(4,5).  3 is best, 2 is acceptable,
-                                // <2 rejected.  SOFT mode skips this and biases
-                                // via the isBetter logic below instead.
+                                // hard pair coincidence: at least 2 complete doublets
                                 m_statCombosRejByCoinc++;
                                 debug() << "  k=" << k << " " << comboLabel()
                                         << " -> REJECT <2 complete doublets" << endmsg;
@@ -2002,20 +1912,16 @@ void CombinatorialTrackFinder::findTracks(
                                             << " -> REJECT chi2 threshold="
                                             << m_nHitMaxChi2NDF.value() << endmsg;
                                 } else if ((0.3 * absBRefForK3 * cr / 100.0) > m_maxComboPT.value()) {
-                                    // Combo pT exceeds MaxComboPT — exclude from primary search,
-                                    // but keep as fallback: if every combo in this event exceeds the
-                                    // threshold (e.g. near-straight high-pT muons whose circle fit is
-                                    // noise-dominated), the fallback with the lowest implied pT is
-                                    // promoted rather than leaving the muon completely untracked.
+                                    // pT above MaxComboPT: not a candidate, but kept as fallback in
+                                    // case every combination is above it (near-straight tracks)
                                     m_statComboPTRejected++;
                                     const double comboPTfb = 0.3 * absBRefForK3 * cr / 100.0;
                                     debug() << "  k=" << k << " " << comboLabel()
                                             << " -> REJECT pT=" << comboPTfb
                                             << " > MaxComboPT=" << m_maxComboPT.value()
                                             << " (stored as fallback)" << endmsg;
-                                    // Update fallback: more hits wins; equal k → for k>=4 prefer
-                                    // lower chi2/NDF (fit quality is reliable even when pT is noisy);
-                                    // for k=3 prefer lowest implied pT (closest to the threshold).
+                                    // best fallback: more hits; then lower chi2/ndf (k >= 4) or
+                                    // lower pT (k = 3)
                                     bool isBetterFallback = false;
                                     if (k != fallbackCombo.nHits) {
                                         isBetterFallback = (k > fallbackCombo.nHits);
@@ -2028,7 +1934,7 @@ void CombinatorialTrackFinder::findTracks(
                                         fallbackCombo.hiiVec    = hiiVec;
                                         fallbackCombo.gIdxVec   = gIdxVec;
                                         fallbackCombo.chi2ndf   = cchi2ndf;
-                                        fallbackCombo.avgProxCm = 0.0;  // not yet computed at this point
+                                        fallbackCombo.avgProxCm = 0.0;
                                         fallbackCombo.x0        = cx0;
                                         fallbackCombo.y0        = cy0;
                                         fallbackCombo.radius    = cr;
@@ -2038,40 +1944,20 @@ void CombinatorialTrackFinder::findTracks(
                                     }
                                 } else if (m_minComboPT.value() > 0.0
                                            && (0.3 * absBRefForK3 * cr / 100.0) < m_minComboPT.value()) {
-                                    // Combo pT below MinComboPT (only when the cut is enabled, i.e. > 0):
-                                    // rejected outright.  Unlike MaxComboPT there is no fallback, so a
-                                    // muon whose only combinations are below the threshold gets no track.
+                                    // pT below MinComboPT: rejected (no fallback)
                                     m_statComboMinPTRejected++;
                                     debug() << "  k=" << k << " " << comboLabel()
                                             << " -> REJECT pT=" << (0.3 * absBRefForK3 * cr / 100.0)
                                             << " < MinComboPT=" << m_minComboPT.value() << endmsg;
                                 } else {
-                                    // Selection priority:
-                                    //  1. More hits always beats fewer hits.
-                                    //  2. Same hit count, different k > 3: prefer lower chi2/NDF.
-                                    //  3. Both combos have k=3 (NDF=0, chi2 always 0): the chi2
-                                    //     gives no information.  Instead prefer the combo whose
-                                    //     circle has the largest radius (= highest pT), capped
-                                    //     by MaxComboPT.  This picks the
-                                    //     most "straight" (least curved = most energetic)
-                                    //     combination, which is more likely to be the signal muon
-                                    //     rather than a low-pT secondary spiral.
-                                    // ── Edep-homogeneity score for this combo ────────────────
-                                    // For each hit in the combo, take its pre-computed baseline
-                                    // deviation: hitEdepScore[idx] = |edep(hit) - meanEdepSingle|.
-                                    // The combo score is the average deviation across all k hits.
-                                    //
-                                    // Using the EVENT-LEVEL baseline (meanEdepSingle, average edep
-                                    // of single-hit compositeIDs = unambiguous muon hits) rather
-                                    // than within-combo mean is critical:
-                                    //  • A 4-muon combo scores near 0 (all hits ≈ muon baseline).
-                                    //  • A 3-muon + 1-secondary combo scores the secondary deviation.
-                                    //  • A 4-electron combo at uniform low edep scores large deviation
-                                    //    relative to muon baseline — correctly penalised.
-                                    //
-                                    // Without this, within-combo deviation would give a uniform 4-e-
-                                    // track a near-zero score, letting it beat a muon track that has
-                                    // one hit with a slightly different edep.
+                                    // Ranking of the combinations (lower score is better):
+                                    //  1. more hits always wins;
+                                    //  2. k >= 4: chi2/ndf + w * edep score / EdepNormKeV;
+                                    //  3. k = 3 (chi2 is always 0 for 3 points):
+                                    //     w * edep score / EdepNormKeV - min(R, R_cap) / R_cap,
+                                    //     i.e. straighter (higher pT) and MIP-like is better.
+                                    // The edep score is the mean hit score against the event
+                                    // baseline (see above).
                                     double cEdepDev = 0.0;
                                     const double w = m_proxScoreWeight.value();
                                     if (w > 0.0 && !hitEdepScore.empty()) {
@@ -2079,25 +1965,9 @@ void CombinatorialTrackFinder::findTracks(
                                             cEdepDev += hitEdepScore.at(hii_i);
                                         cEdepDev /= static_cast<double>(k);
                                     }
-                                    // ─────────────────────────────────────────────────────────
-                                    // Combo selection (lower score = better, more hits always wins).
-                                    //
-                                    // k=3: chi2=0 for any 3 points, so radius is the natural physics
-                                    //   discriminator (larger radius = higher pT = more physical).
-                                    //   edepDev is used as a tiebreaker on exactly equal radius.
-                                    //
-                                    // k>=4: use a COMBINED score so edep homogeneity is an active
-                                    //   criterion, not just a tiebreaker on exact chi2 equality:
-                                    //     combined = chi2/ndf + w * avgEdepDev / edepNorm
-                                    //   A 1 keV deviation contributes w/edepNorm to the score.
-                                    //   With w=1, edepNorm=2 keV: a 2 keV deviation ≈ +1 chi2 unit.
-                                    //   This lets a slightly worse-chi2 but more uniform combo beat
-                                    //   a slightly better-chi2 combo with an edep outlier hit.
                                     const double edepNorm = std::max(m_edepNormKeV.value(), 1e-9);
                                     bool isBetter;
-                                    // SOFT mode: doublet count is the PRIMARY criterion.
-                                    // Falls through to existing hit-count / chi² logic
-                                    // only when both combos have the same doublet count.
+                                    // soft pair coincidence: more complete doublets wins first
                                     int cDoub = -1, bDoub = -1;
                                     if (pcSoft) {
                                         cDoub = countCompleteDoublets(gIdxVec);
@@ -2109,25 +1979,7 @@ void CombinatorialTrackFinder::findTracks(
                                     } else if (k != bestCombo.nHits) {
                                         isBetter = (k > bestCombo.nHits);
                                     } else if (k == 3) {
-                                        // For k=3: chi2/ndf = 0 always (3 points define a circle
-                                        // exactly), so chi2 gives zero information.
-                                        //
-                                        // Combined score using BOTH radius and edepDev:
-                                        //
-                                        //   score = w * avgEdepDev / edepNorm
-                                        //           - min(radius, R_cap) / R_cap
-                                        //
-                                        // Lower score = better.
-                                        //  • The radius term rewards higher pT (larger radius),
-                                        //    but is capped at R_cap (= MaxSeedPT in GeV converted
-                                        //    to cm). Once a combo is at or above MaxSeedPT its
-                                        //    radius reward saturates at 1.0, so an absurdly straight
-                                        //    fake e-/secondary track cannot win on radius alone.
-                                        //  • The edepDev term penalises combos whose hits deviate
-                                        //    from the event-level muon baseline.
-                                        //  Both criteria contribute simultaneously — neither can
-                                        //  override the other unconditionally.
-                                        //  If edep scoring is disabled (w=0) fall back to radius.
+                                        // k = 3 (radius term saturates at R_cap; w = 0: radius only)
                                         if (w > 0.0) {
                                             const double cRadNorm = std::min(cr, rCapK3) / rCapK3;
                                             const double bRadNorm = std::min(bestCombo.radius, rCapK3) / rCapK3;
@@ -2138,7 +1990,6 @@ void CombinatorialTrackFinder::findTracks(
                                             isBetter = (cr > bestCombo.radius);
                                         }
                                     } else {
-                                        // k>=4: combined score (chi2 + edep penalty).
                                         const double cScore = cchi2ndf
                                             + (w > 0.0 ? w * cEdepDev / edepNorm : 0.0);
                                         const double bScore = bestCombo.chi2ndf
@@ -2176,7 +2027,7 @@ void CombinatorialTrackFinder::findTracks(
                             }
                         }
 
-                        // Advance Cartesian-product position (odometer)
+                        // next combination of hits
                         int carry = k - 1;
                         while (carry >= 0) {
                             pos[carry]++;
@@ -2188,7 +2039,7 @@ void CombinatorialTrackFinder::findTracks(
                     }
                 }
 
-                // Advance C(nDistinct, k) combination
+                // next choice of k layers
                 int i = k - 1;
                 while (i >= 0 && cidxCombo[i] == nDistinct - k + i) --i;
                 if (i < 0) break;
@@ -2197,10 +2048,7 @@ void CombinatorialTrackFinder::findTracks(
             }
         }
         } // end cluster loop
-            // Track recoveries via pass 2 for the run summary.
-            // Counts both: (a) brand-new tracks found in pass-2 when pass-1
-            // returned nothing, and (b) upgrades — pass-2 replaced pass-1's
-            // best with a higher-doublet combo.
+            // run statistics: tracks found or improved by the second pass
             if (pairPassIdx == 1 && foundCombination) {
                 int nDoubAfter = countCompleteDoublets(bestCombo.gIdxVec);
                 if (!foundBeforeThisPass) {
@@ -2211,7 +2059,6 @@ void CombinatorialTrackFinder::findTracks(
             }
         } // end pair-coincidence two-pass
 
-        // ── Per-event combinatorial summary ──────────────────────────────────────
         const int maxKeffAll = std::min(maxK, nDistinctAll);
         info() << "  N-hit search [trk " << trackNumber << "]: "
                << nAvail << " avail hits in " << nDistinctAll << " regions, k=" << maxKeffAll << "→" << minK
@@ -2234,8 +2081,7 @@ void CombinatorialTrackFinder::findTracks(
 
         if (!foundCombination) {
             if (fallbackCombo.nHits > 0) {
-                // Every combo exceeded MaxComboPT — promote the fallback with the lowest
-                // implied pT (k=3) or best chi2/NDF (k>=4) so the muon is not lost entirely.
+                // every combination was above MaxComboPT: use the fallback
                 bestCombo        = fallbackCombo;
                 foundCombination = true;
                 info() << "  Promoted fallback combo: k=" << bestCombo.nHits
@@ -2251,23 +2097,13 @@ void CombinatorialTrackFinder::findTracks(
         }
 
 
-        // ── Guided crowded-layer hit selection ────────────────────────────────────
-        // Two branches, both enabled by doCrowdedLayerHitSelection:
-        //
-        // Branch A (≥3 clean CIDs + ≥1 crowded CID):
-        //   Fit a circle from clean hits, pick each crowded CID's best hit by
-        //   combined score: 0.75*(dr/sigmaHit) + 0.25*(edepDev/edepNorm).
-        //   Geometry dominates; edep breaks ties when residuals are similar.
-        //
-        // Branch B (exactly 2 clean CIDs + ≥1 crowded CID):
-        //   Circle fit is degenerate with only 2 anchor points. Instead compute
-        //   the 3D direction D_AB (inner clean → outer clean) and for each crowded
-        //   candidate C score by kink angle κ = acos(D_AB · D_AC / |D_AB||D_AC|)
-        //   and edep: 0.75*(κ/sigmaKappa) + 0.25*(edepDev/edepNorm).
-        //   sigmaKappa reuses MaxConsecDeltaPhi (rad) as the natural angular scale.
-        //
-        // In both branches: refit guided hits, require chi2/NDF ≤ NHitMaxChi2NDF,
-        // override bestCombo when guided chose differently or produced better chi2.
+        // ── Guided hit choice in crowded layers (doCrowdedLayerHitSelection) ──────
+        // Layers with one hit are "clean". In each crowded layer the hit is chosen by
+        //   A (>= 3 clean layers): distance to the circle through the clean hits,
+        //      score 0.75 * dr / SigmaHitDefault + 0.25 * edep score / EdepNormKeV;
+        //   B (2 clean layers): kink angle to the line through the two clean hits,
+        //      score 0.75 * kink / MaxConsecDeltaPhi + 0.25 * edep score / EdepNormKeV.
+        // The result replaces the best combination if its refit has a lower chi2/ndf.
         if (m_doCrowdedLayerHitSelection && !m_useSeedExtend) {
             int nCleanCIDs   = 0;
             int nCrowdedCIDs = 0;
@@ -2277,8 +2113,7 @@ void CombinatorialTrackFinder::findTracks(
             }
             const int totalCIDs = nCleanCIDs + nCrowdedCIDs;
 
-            // ── helpers shared by both branches ──────────────────────────────────
-            // Collect clean hits (ordered by compositeID, map iteration is sorted)
+            // clean hits, ordered by layer key
             auto collectCleanHits = [&](std::vector<edm4hep::TrackerHitPlane>& cleanHits,
                                         std::vector<size_t>& cleanHIIs,
                                         std::vector<size_t>& cleanGIdxs) {
@@ -2292,7 +2127,7 @@ void CombinatorialTrackFinder::findTracks(
                 }
             };
 
-            // Apply guided selection: refit, check chi2, override bestCombo if better
+            // refit the guided choice; keep it if it is different and better
             auto applyGuidedResult = [&](std::vector<edm4hep::TrackerHitPlane>& guidedHits,
                                          std::vector<size_t>& guidedHIIs,
                                          std::vector<size_t>& guidedGIdxs,
@@ -2341,7 +2176,7 @@ void CombinatorialTrackFinder::findTracks(
                 }
             };
 
-            // ── Branch A: ≥3 clean CIDs — circle-fit guided selection ────────────
+            // ── A: circle through the clean hits ────────────────────────────────
             if (nCleanCIDs >= 3 && nCrowdedCIDs >= 1) {
                 debug() << "Guided crowded-layer Branch A: " << nCleanCIDs
                         << " clean CIDs + " << nCrowdedCIDs << " crowded CID(s)" << endmsg;
@@ -2359,8 +2194,6 @@ void CombinatorialTrackFinder::findTracks(
                     catch (...) {}
 
                     if (cleanOK && cr > 0) {
-                        // 0.75 geometry / 0.25 edep — radial residual is the primary discriminator;
-                        // edep breaks ties when two candidates lie equally close to the circle.
                         const double drNorm   = std::max(m_sigmaHitDefault.value(), 1e-9); // cm
                         const double edepNorm = std::max(m_edepNormKeV.value(),     1e-9); // keV
 
@@ -2399,7 +2232,7 @@ void CombinatorialTrackFinder::findTracks(
                     }
                 }
             }
-            // ── Branch B: exactly 2 clean CIDs — kink-angle guided selection ──────
+            // ── B: line through the two clean hits ──────────────────────────────
             else if (nCleanCIDs == 2 && nCrowdedCIDs >= 1 && totalCIDs >= 3) {
                 debug() << "Guided crowded-layer Branch B: 2 clean CIDs + "
                         << nCrowdedCIDs << " crowded CID(s)" << endmsg;
@@ -2409,7 +2242,7 @@ void CombinatorialTrackFinder::findTracks(
                 collectCleanHits(cleanHits, cleanHIIs, cleanGIdxs);
 
                 if (static_cast<int>(cleanHits.size()) == 2) {
-                    // Direction from inner clean hit (A) to outer clean hit (B), in cm 3D
+                    // direction from the inner (A) to the outer (B) clean hit, cm
                     const auto& posA_mm = cleanHits[0].getPosition();
                     const auto& posB_mm = cleanHits[1].getPosition();
                     double ax = posA_mm.x * 0.1, ay = posA_mm.y * 0.1, az = posA_mm.z * 0.1;
@@ -2417,7 +2250,6 @@ void CombinatorialTrackFinder::findTracks(
                     double dabx = bx - ax, daby = by - ay, dabz = bz - az;
                     double lenAB = std::sqrt(dabx*dabx + daby*daby + dabz*dabz);
 
-                    // sigmaKappa reuses the consecutive Δφ cut as the angular scale
                     const double sigmaKappa = std::max(m_maxConsecDeltaPhi.value(), 1e-4); // rad
                     const double edepNorm   = std::max(m_edepNormKeV.value(),       1e-9); // keV
 
@@ -2437,7 +2269,7 @@ void CombinatorialTrackFinder::findTracks(
                                 double cx = hp.x * 0.1, cy = hp.y * 0.1, cz = hp.z * 0.1;
                                 double dacx = cx - ax, dacy = cy - ay, dacz = cz - az;
                                 double lenAC = std::sqrt(dacx*dacx + dacy*dacy + dacz*dacz);
-                                // Kink angle κ at A between direction AB and direction AC
+                                // angle at A between AB and AC
                                 double kappa = 0.0;
                                 if (lenAC > 1e-9) {
                                     double cosK = (dabx*dacx + daby*dacy + dabz*dacz)
@@ -2467,17 +2299,13 @@ void CombinatorialTrackFinder::findTracks(
                 }
             }
         }
-        // ─────────────────────────────────────────────────────────────────────────
 
-        // ── Neighbour-track quality gate ──────────────────────────────────────────
-        // When a combo has any hit within NeighbourTrackMaxDist (cm) of a hit from an
-        // already-accepted track it is flagged as a potential shadow/delta-ray fake.
-        // Shadow combos must satisfy BOTH stricter cuts to be kept:
-        //   ≥ NeighbourTrackMinHits hits   AND   chi2/NDF ≤ NeighbourTrackMaxChi2NDF
-        // On rejection the combo hits are consumed (marked global-used) so the next
-        // iteration can search for a legitimate track from a different detector region.
-        // BestFirst tracks already own their hits exclusively and were confirmed with a
-        // scattering-aware chi2; the muon-tuned gate and outlier stage below would undo that.
+        // ── Neighbour-track cuts ──────────────────────────────────────────────────
+        // A combination with a hit within NeighbourTrackMaxDist (cm) of an accepted track
+        // may be a delta-ray shadow. It is kept only with >= NeighbourTrackMinHits hits
+        // and chi2/ndf <= NeighbourTrackMaxChi2NDF; otherwise its hits near the accepted
+        // track are marked as used and the search goes on.
+        // Not applied in BestFirst mode, whose tracks already own their hits.
         if (!m_seBestFirst && m_neighbourTrackMaxDist.value() > 0.0 && !acceptedTrackHitPositions.empty()) {
             const double distThreshMm  = m_neighbourTrackMaxDist.value() * 10.0; // cm → mm
             const double distThreshSq  = distThreshMm * distThreshMm;
@@ -2507,10 +2335,7 @@ void CombinatorialTrackFinder::findTracks(
                            << " hits AND <=" << m_neighbourTrackMaxChi2NDF.value()
                            << " chi2/ndf)" << endmsg;
                     ++m_statNeighbourRejected;
-                    // Only consume the hits that ARE within the neighbour distance
-                    // (those that triggered the gate). Hits farther than the threshold
-                    // remain free so subsequent iterations can use them to find a
-                    // legitimate track from a different detector region.
+                    // only the hits near the accepted track are used up
                     int nConsumed = 0;
                     for (size_t hii : bestCombo.hiiVec) {
                         const auto& hp = allHitInfo[hii].hit.getPosition();  // mm
@@ -2540,9 +2365,7 @@ void CombinatorialTrackFinder::findTracks(
                 }
             }
         }
-        // ─────────────────────────────────────────────────────────────────────────
 
-        // ── Print best combination hit details ────────────────────────────────────
         {
             info() << "  Best combo: " << bestCombo.nHits << " hits, chi2/ndf="
                    << bestCombo.chi2ndf << endmsg;
@@ -2561,13 +2384,13 @@ void CombinatorialTrackFinder::findTracks(
             }
         }
 
-        // ── Outlier rejection: remove worst-residual hit and refit ────────────────
+        // ── Outlier removal: drop the worst hit while its residual is above
+        //    OutlierSigma * SigmaHitDefault, and refit (not in BestFirst mode) ─────────
         {
             const double outlierCutCm = m_outlierSigma.value() * m_sigmaHitDefault.value();
             for (int iter = 0; !m_seBestFirst && iter < m_maxOutlierIterations.value(); ++iter) {
                 if (static_cast<int>(bestCombo.gIdxVec.size()) <= minK) break;
 
-                // Find worst residual
                 size_t worstIdx = 0;
                 double worstRes = 0.0;
                 for (size_t ri = 0; ri < bestCombo.residuals.size(); ++ri) {
@@ -2576,7 +2399,7 @@ void CombinatorialTrackFinder::findTracks(
                         worstIdx = ri;
                     }
                 }
-                if (worstRes <= outlierCutCm) break;  // all hits within cut
+                if (worstRes <= outlierCutCm) break;
 
                 {
                     size_t wGi = bestCombo.gIdxVec[worstIdx];
@@ -2599,7 +2422,6 @@ void CombinatorialTrackFinder::findTracks(
 
                 if (bestCombo.nHits < minK) break;
 
-                // Refit on remaining hits
                 std::vector<edm4hep::TrackerHitPlane> refitHits;
                 for (size_t gi : bestCombo.gIdxVec) refitHits.push_back((*hits)[gi]);
                 double rx0, ry0, rr, rchi2;
@@ -2616,21 +2438,20 @@ void CombinatorialTrackFinder::findTracks(
             }
         }
 
-        // ── Mark selected hits as used ────────────────────────────────────────────
         for (size_t gi : bestCombo.gIdxVec) usedHits[gi] = true;
 
-        // ── Build N-hit track state ───────────────────────────────────────────────
-        // All parameters come from the N-hit circle fit in bestCombo.
-        // This uses all N hits for both the xy circle and the z vs arc-length fit,
-        // giving better resolution than a 3-hit seed.
+        // ── Internal helix parameters of the chosen hits ──────────────────────────
+        // Circle of bestCombo + z-vs-arc-length fit. These internal parameters seed
+        // GenFit and the inner propagation; their sign convention ("charge" +1 turns
+        // counter-clockwise) holds in the muon system's return field (B < 0). The
+        // stored track states are built separately (makeEdm4hepStateFromCircle).
 
         const int  Nh   = bestCombo.nHits;
         const double cx = bestCombo.x0;     // cm
         const double cy = bestCombo.y0;     // cm
         const double cr = bestCombo.radius; // cm
 
-        // ── Charge sign from N-hit normalised cross-product sum ───────────────────
-        // Query B field at hit centroid (EDM4hep positions in mm, DD4hep expects cm)
+        // charge from the bending of the hits and the field at their centroid
         {   double sumXf=0, sumYf=0, sumZf=0;
             for (size_t gi : bestCombo.gIdxVec) {
                 const auto& p = (*hits)[gi].getPosition();
@@ -2649,11 +2470,9 @@ void CombinatorialTrackFinder::findTracks(
                                    (std::abs(sinBendSumN) >= 0.5/avgChordN);
             double chargeN = k4rt::chargeFromBend(sinBendSumN, bFieldN);
 
-            // z vs arc-length linear fit from all N hits
             const k4rt::ZFit zfN = k4rt::fitZvsArc(orderedN, cx, cy, cr, chargeN);
             double z0_cm = zfN.z0_cm, tanLambda = zfN.tanLambda;
 
-            // Track parameters from N-hit circle
             const k4rt::Perigee2D pgN = k4rt::perigeeFromCircle(cx, cy, cr, chargeN);
             double d0_cm  = pgN.d0_cm;
             double phi    = pgN.phi_rad;
@@ -2665,7 +2484,6 @@ void CombinatorialTrackFinder::findTracks(
                    << (chargeReliableN ? "" : " [UNRELIABLE]")
                    << "  chi2/ndf=" << bestCombo.chi2ndf << endmsg;
 
-            // ── Store N-hit fit parameters in bestCombo for downstream use ──────
             bestCombo.charge    = chargeN;
             bestCombo.d0_cm     = d0_cm;
             bestCombo.phi_rad   = phi;
@@ -2684,32 +2502,27 @@ void CombinatorialTrackFinder::findTracks(
             trackCandidates.emplace_back(nhSeedTrack, pTN, bestCombo.gIdxVec, usedComps);
         }
 
-        // N-hit strategy: candidateTracks always has exactly one entry (the best combination)
+        // one candidate per iteration: the best combination
         if (trackCandidates.empty()) {
             info() << "No track candidates found in iteration " << trackNumber << " - stopping track search" << endmsg;
             break;
         }
 
-        // Sort candidates by decreasing pT for better track selection
         std::sort(trackCandidates.begin(), trackCandidates.end(),
                   [](const TrackCandidate& a, const TrackCandidate& b) {
                       return a.pT > b.pT;
                   });
 
-        // Process the best candidate from this iteration
         const auto& candidate = trackCandidates.front();
-        
-        // Mark the hits used by this track in the global array
+
         for (size_t idx : candidate.hitIndices) {
             globalUsedHits[idx] = true;
         }
 
-        // All candidates should have their hits marked as used from seed generation
-        // Just verify the indices are valid
         bool validIndices = true;
         for (size_t idx : candidate.hitIndices) {
             if (idx >= usedHits.size()) {
-                error() << "Final processing: hit index " << idx 
+                error() << "Final processing: hit index " << idx
                         << " out of bounds (usedHits size: " << usedHits.size() << ")" << endmsg;
                 validIndices = false;
                 break;
@@ -2723,8 +2536,7 @@ void CombinatorialTrackFinder::findTracks(
         info() << "Processing track candidate " << trackNumber << " with pT=" << candidate.pT
                << " GeV/c  nHits=" << candidate.hitIndices.size() << endmsg;
 
-        // Build GenFit seed state directly from N-hit circle fit parameters stored in bestCombo.
-        // This will be overridden by the second circle fit below (AtLastHit) in normal cases.
+        // GenFit seed (internal convention); replaced by the circle-fit state below
         edm4hep::TrackState seedState = createTrackState(
             bestCombo.d0_cm * 10.0,   // cm → mm
             bestCombo.phi_rad,
@@ -2738,33 +2550,30 @@ void CombinatorialTrackFinder::findTracks(
         }
         debug() << "Built initial seed state from N-hit circle fit for track " << trackNumber << endmsg;
 
-        // Build trackHits vector directly using hit indices (avoid cellID duplicate issues)
+        // the track's hits, by index (cellIDs need not be unique)
         std::vector<edm4hep::TrackerHitPlane> trackHits;
-        trackHits.reserve(3); // Start with 3 hits from triplet
+        trackHits.reserve(3);
 
-        // Use direct index access instead of cellID lookup to handle duplicate cellIDs
         for (size_t idx : candidate.hitIndices) {
             if (idx < hits->size()) {
-                trackHits.push_back((*hits)[idx]); // Direct access by index
+                trackHits.push_back((*hits)[idx]);
             } else {
                 warning() << "Hit index " << idx << " out of bounds - skipping hit" << endmsg;
             }
         }
 
         if (trackHits.size() != candidate.hitIndices.size()) {
-            warning() << "Could not retrieve all hits for track candidate " << trackNumber << " - expected " 
+            warning() << "Could not retrieve all hits for track candidate " << trackNumber << " - expected "
                       << candidate.hitIndices.size() << ", got " << trackHits.size() << endmsg;
             continue;
         }
 
         debug() << "Successfully built trackHits vector with " << trackHits.size() << " hits for track " << trackNumber << endmsg;
 
-        // N-hit strategy: all hits already selected by combinatorial search — no extension needed.
-        // trackHits already contains all bestCombo hits (set above from candidate.hitIndices).
         info() << "N-hit track " << trackNumber << " has " << trackHits.size()
                << " hits after combinatorial selection and outlier rejection" << endmsg;
 
-        // Record hit positions for the neighbour-gate in subsequent iterations.
+        // for the neighbour-track cuts of the next iterations
         if (m_neighbourTrackMaxDist.value() > 0.0) {
             for (const auto& th : trackHits) {
                 const auto& p = th.getPosition();  // mm
@@ -2772,18 +2581,16 @@ void CombinatorialTrackFinder::findTracks(
             }
         }
 
-        // Create a new track
         auto finalTrack = finalTracks.create();
 
         debug() << "Created new final track object for track " << trackNumber << endmsg;
 
-
-        // The AtLastHit state in the internal circle-fit convention. It seeds GenFit and starts
-        // the inner propagation; only the EDM4hep-convention copy (toPerigeeConvention) is stored.
+        // circle-fit state in the internal convention: seeds GenFit and the inner
+        // propagation, is not stored
         edm4hep::TrackState internalLastHitState;
         bool haveInternalLastHit = false;
 
-        // N-hit circle fit: use the precomputed bestCombo result (already outlier-rejected).
+        // circle of bestCombo (after outlier removal)
         if (trackHits.size() >= 3) {
             {
                 double x0     = bestCombo.x0;
@@ -2791,7 +2598,7 @@ void CombinatorialTrackFinder::findTracks(
                 double radius = bestCombo.radius;
                 double chi2   = bestCombo.chi2ndf;
                 Eigen::Matrix3d fitCov3x3 = bestCombo.fitCov;
-                bool fit4Hits = (radius > 0);  // always true if bestCombo was set
+                bool fit4Hits = (radius > 0);
 
                 if (fit4Hits) {
                 info() << "N-hit circle fit for track " << trackNumber
@@ -2799,13 +2606,9 @@ void CombinatorialTrackFinder::findTracks(
                 info() << "  Center: (" << x0 << ", " << y0 << ") cm" << endmsg;
                 info() << "  Radius: " << radius << " cm" << endmsg;
 
-                if (false) {  // chi2 already passed NHitMaxChi2NDF in combinatorial search
-                    // (placeholder — outlier rejection already done above)
+                if (false) {
                 } else {
-                    // Query B field at the centroid of the 4 hits.
-                    // EDM4hep hit positions are in mm; DD4hep magneticField() expects cm
-                    // (p.x() in cm).
-                    // Dividing by 10 converts mm → cm.
+                    // field at the centroid of the hits (DD4hep positions in cm)
                     double sumX = 0, sumY = 0, sumZ = 0;
                     for (const auto& h : trackHits) {
                         const auto& pos = h.getPosition();
@@ -2820,10 +2623,7 @@ void CombinatorialTrackFinder::findTracks(
                     double pT = k4rt::ptFromRadius(bField4, radius);  // GeV/c
                     double bSign4 = (bField4 >= 0.0) ? 1.0 : -1.0;
 
-                    // N-hit charge sign: sum normalised cross-product sin(bend) over all
-                    // consecutive triplets (i, i+1, i+2) for i = 0..N-3.
-                    // Each triplet contributes sin_i = crossZ / (|chord_a| * |chord_b|).
-                    // Averaging over N-2 triplets gives equal weight to all hits.
+                    // charge from the mean bending angle over consecutive hit triplets
                     const k4rt::BendSense bs4 = k4rt::bendSense(trackHits);
                     double sinBendSum4 = bs4.sinBendMean;
                     double avgChord4   = bs4.avgChord;
@@ -2839,7 +2639,6 @@ void CombinatorialTrackFinder::findTracks(
                                 << "  avgChord=" << avgChord4 << " mm" << endmsg;
                     }
 
-                    // Compare against 3-hit seed charge for the match/mismatch diagnostic
                     double chargeSeed = (seedState.omega >= 0.0) ? 1.0 : -1.0;
                     if (charge4 != chargeSeed) {
                         debug() << "N-hit charge DIFFERS from 3-hit seed:"
@@ -2849,13 +2648,10 @@ void CombinatorialTrackFinder::findTracks(
                                 << "  sinBendSum4=" << sinBendSum4 << endmsg;
                     }
 
-                    // MC truth debug: extract charge and momentum from the MCParticle
-                    // linked to the first hit via the RecoSim map built at the top of findTracks.
+                    // DEBUG: MC particle of the first hit (a muon if there is one)
                     {
                         auto mcIt = recoToSimMap.find(hitKey(trackHits[0]));
                         if (mcIt != recoToSimMap.end() && !mcIt->second.empty()) {
-                            // Pick a muon SimHit if any contributed to this digi
-                            // hit, otherwise fall back to the first contributor.
                             edm4hep::SimTrackerHit chosenSim = mcIt->second.front();
                             for (const auto& s : mcIt->second) {
                                 auto p = s.getParticle();
@@ -2898,25 +2694,20 @@ void CombinatorialTrackFinder::findTracks(
                             << omega << std::defaultfloat << " 1/mm" << endmsg;
 
                     edm4hep::TrackState circleFitState = createTrackState(
-                        d0*10.0, phi, omega, seedState.Z0, seedState.tanLambda, 
+                        d0*10.0, phi, omega, seedState.Z0, seedState.tanLambda,
                         edm4hep::TrackState::AtLastHit);
 
-                    // Reference point is intentionally the first hit for both 3-hit and 4-hit
-                    // states so the two states share a common reference and can be compared directly.
                     const auto& firstHitPos = trackHits.front().getPosition();
                     circleFitState.referencePoint = edm4hep::Vector3f(
                         firstHitPos[0], firstHitPos[1], firstHitPos[2]);
 
-                // ── Propagate fit covariance [x0,y0,R] → track parameters ──
-                // All EDM4hep units: D0/Z0 in mm², phi/omega in rad²/(1/mm)².
+                // covariance of (x0, y0, R) -> d0, phi, omega (mm, rad, 1/mm)
                 {
                     double cx = x0;
                     double cy = y0;
 
                     double r2 = cx*cx + cy*cy;
                     double dist0 = std::sqrt(r2);
-
-                    // ---- Gradients ----------------------------------------------------
 
                     double dDist_dx0 = (dist0 > 1e-9) ? cx / dist0 : 0.0;
                     double dDist_dy0 = (dist0 > 1e-9) ? cy / dist0 : 0.0;
@@ -2937,17 +2728,13 @@ void CombinatorialTrackFinder::findTracks(
 
                     Eigen::Vector3d grad_omega(0.0, 0.0, dOmega_dR);
 
-                    // ---- Covariance propagation --------------------------------------
-
                     double var_d0_cm2    = grad_d0.dot(fitCov3x3 * grad_d0);
                     double var_phi_rad2  = grad_phi.dot(fitCov3x3 * grad_phi);
                     double var_omega_mm2 = grad_omega.dot(fitCov3x3 * grad_omega);
 
-                    // Convert d0 variance from cm² → mm²
                     double var_d0_mm2 = var_d0_cm2 * 100.0;
 
-                    // ---- Inherit longitudinal parameters from seed -------------------
-
+                    // z0, tanLambda variances from the seed
                     double var_z0 = seedState.getCovMatrix(
                         edm4hep::TrackParams::z0,
                         edm4hep::TrackParams::z0);
@@ -2959,16 +2746,13 @@ void CombinatorialTrackFinder::findTracks(
                     if (var_z0   < 1e-30) var_z0   = 1.0;
                     if (var_tanL < 1e-30) var_tanL = 0.01;
 
-                    // ---- Apply covariance floors -------------------------------------
-
-                    var_d0_mm2   = std::max(var_d0_mm2,   0.01);   // 0.1 mm resolution floor
+                    // floors
+                    var_d0_mm2   = std::max(var_d0_mm2,   0.01);   // 0.1 mm
                     var_phi_rad2 = std::max(var_phi_rad2, 0.01);
 
                     double omega_rel_floor = std::pow(0.1 * std::abs(omega), 2);
 
                     var_omega_mm2 = std::max({var_omega_mm2, omega_rel_floor});
-
-                    // ---- Reset covariance matrix -------------------------------------
 
                     for (int ii = 0; ii < 6; ++ii)
                         for (int jj = 0; jj <= ii; ++jj)
@@ -2977,8 +2761,6 @@ void CombinatorialTrackFinder::findTracks(
                                 static_cast<edm4hep::TrackParams>(ii),
                                 static_cast<edm4hep::TrackParams>(jj)
                             );
-
-                    // ---- Fill diagonal terms -----------------------------------------
 
                     circleFitState.setCovMatrix(
                         static_cast<float>(var_d0_mm2),
@@ -3005,9 +2787,7 @@ void CombinatorialTrackFinder::findTracks(
                         edm4hep::TrackParams::tanLambda,
                         edm4hep::TrackParams::tanLambda);
 
-                    // ---- Debug print --------------------------------------------------
-
-                    info() << "AtLastHit covariance from 4-hit circle fit:"
+                    info() << "Circle-fit covariance:"
                         << "  σ_d0="   << std::sqrt(var_d0_mm2)    << " mm"
                         << "  σ_phi="  << std::sqrt(var_phi_rad2)  << " rad"
                         << "  σ_ω="    << std::sqrt(var_omega_mm2) << " 1/mm"
@@ -3018,35 +2798,44 @@ void CombinatorialTrackFinder::findTracks(
                     internalLastHitState = circleFitState;
                     haveInternalLastHit = true;
                     {
-                        edm4hep::TrackState storedLastHit = circleFitState;
-                        toPerigeeConvention(storedLastHit);
-                        finalTrack.addToTrackStates(storedLastHit);
+                        // Stored states: the fitted helix at the first and at the last hit
+                        // and, with IPStateMode = Helix, at its closest approach to the origin.
+                        struct StoredState { StatePoint where; int location; bool wanted; };
+                        const StoredState stored[] = {
+                            {StatePoint::FirstHit, edm4hep::TrackState::AtFirstHit, true},
+                            {StatePoint::LastHit,  edm4hep::TrackState::AtLastHit,  m_storeLastHitState.value()},
+                            {StatePoint::Origin,   edm4hep::TrackState::AtIP,       m_ipStateMode.value() == "Helix"},
+                        };
+                        for (const auto& entry : stored) {
+                            if (!entry.wanted) continue;
+                            edm4hep::TrackState state = circleFitState;
+                            if (!makeEdm4hepStateFromCircle(x0, y0, radius, fitCov3x3, trackHits, entry.where, state)) {
+                                warning() << "Could not build track state " << entry.location << " of track "
+                                          << trackNumber << " (degenerate hits)" << endmsg;
+                                continue;
+                            }
+                            state.location = entry.location;
+                            finalTrack.addToTrackStates(state);
+                        }
                     }
-                    // NDF = n_hits - 3, matching the fit that produced this chi2.
-                    // fitCircleNHits() forms ONE radial residual per hit and fits three
-                    // circle parameters (x0, y0, R), so the dof is n_hits - 3 -- not the
-                    // 2*n_hits - 5 of a 5-parameter helix with two measurements per hit.
-                    // Using the helix formula here made the stored raw chi2 inconsistent
-                    // with the stored ndf (only their ratio came out right), so a chi2
-                    // probability computed from the output file was wrong.
+                    // the circle fit has one radial residual per hit and 3 parameters
                     const int fitNdf = std::max(1, static_cast<int>(trackHits.size()) - 3);
                     finalTrack.setChi2(static_cast<float>(chi2 * fitNdf));   // store raw chi2
                     finalTrack.setNdf(fitNdf);
 
-                    // Promote to GenFit seed: 4-hit fit is a better starting point
                     seedState = circleFitState;
-                    debug() << "Promoted AtLastHit (4-hit circle fit) to GenFit seed state" << endmsg;
+                    debug() << "Circle-fit state used as GenFit seed" << endmsg;
 
-                    info() << "Added 4-hit circle fit track state for track " << trackNumber << ": pT=" << pT 
+                    info() << "Added circle-fit track states for track " << trackNumber << ": pT=" << pT
                            << " GeV/c, d0=" << d0*10.0 << " mm" << endmsg;
                 }
             } else {
-                warning() << "4-hit circle fit failed for track " << trackNumber << endmsg;
+                warning() << "Circle fit failed for track " << trackNumber << endmsg;
             }
-            } // end inner scope for N-hit fit
+            }
         }
 
-        // Fit the track with GenFit (if enabled)
+        // GenFit fit (UseGenFit); it also copies the hits to the output
         bool fitSuccess = false;
         if (m_useGenFit) {
             try {
@@ -3059,8 +2848,8 @@ void CombinatorialTrackFinder::findTracks(
         }
         if (fitSuccess) {
             m_statGenFitSuccess++;
-            info() << "Successfully fitted track " << trackNumber << " with GenFit: " 
-                << finalTrack.trackerHits_size() << " hits, chi2/ndf = " 
+            info() << "Successfully fitted track " << trackNumber << " with GenFit: "
+                << finalTrack.trackerHits_size() << " hits, chi2/ndf = "
                 << (finalTrack.getNdf() > 0 ? finalTrack.getChi2() / finalTrack.getNdf() : -1.0) << endmsg;
         } else {
             if (m_useGenFit) {
@@ -3069,21 +2858,17 @@ void CombinatorialTrackFinder::findTracks(
                 debug() << "Using analytical seed parameters for track " << trackNumber << " (GenFit disabled)" << endmsg;
             }
 
-            // Same dof as the circle fit above (n_hits - 3); this branch runs whenever
-            // GenFit is off or failed, and must not clobber the ndf set with the chi2.
+            // circle-fit ndf (n_hits - 3)
             finalTrack.setNdf(std::max(1, static_cast<int>(trackHits.size()) - 3));
-            // BestFirst: store the multiple-scattering-aware kink chi2 instead (calibrated,
-            // chi2/ndf ~ 1 for real tracks), and mark loopers with track type 1.
+            // BestFirst: the stored chi2 is the kink chi2 (with multiple scattering);
+            // loopers get track type 1
             if (bestCombo.kinkNdf > 0) {
                 finalTrack.setChi2(static_cast<float>(bestCombo.kinkChi2));
                 finalTrack.setNdf(bestCombo.kinkNdf);
             }
             if (bestCombo.looper) finalTrack.setType(1);
 
-            // seedTrack carries no states (N-hit params are stored in bestCombo);
-            // AtLastHit is added by the circle fit block above when GenFit is skipped.
-
-            // Copy hits into output collection so PODIO can resolve the relation
+            // copy the hits to the output collection
             for (const auto& hit : trackHits) {
                 auto outHit = outputHits.create();
                 outHit.setCellID(hit.getCellID());
@@ -3094,25 +2879,20 @@ void CombinatorialTrackFinder::findTracks(
                 outHit.setCovMatrix(hit.getCovMatrix());
                 outHit.setDu(hit.getDu());
                 outHit.setDv(hit.getDv());
-                outHit.setU(hit.getU());  // measurement direction vectors
+                outHit.setU(hit.getU());
                 outHit.setV(hit.getV());
-                // [UV-DEBUG] disabled
                 propagateLink(outHit, hit);
                 finalTrack.addToTrackerHits(outHit);
             }
         }
 
-        // ======= Reconstruct Inner Track Segment =========
-        // Controlled by the steering property DoInnerPropagation (default: true).
-        // The result is saved as TrackState::AtVertex so it is distinct from all other states.
+        // ======= RK4 propagation inward through the solenoid (DoInnerPropagation) =======
+        // For tracks measured outside the solenoid. Starts at the first hit from the
+        // GenFit state if there is one, else from the internal circle-fit state.
+        // The result is only printed.
         if (m_doInnerPropagation) {
         edm4hep::TrackState bestState;
         bool foundStateForProp = false;
-        // ===== EXTRACT BEST STATE FOR INNER PROPAGATION =====
-        // Priority 1: GenFit-fitted state (AtOther) — most accurate
-        // Priority 2: N-hit circle fit (AtLastHit)
-        // The reference point in all these states is the hit position in the outer
-        // muon system, which is where RK4 propagation starts.
         for (int j = 0; j < finalTrack.trackStates_size(); ++j) {
             auto st = finalTrack.getTrackStates(j);
             if (st.location == edm4hep::TrackState::AtOther) {
@@ -3123,25 +2903,22 @@ void CombinatorialTrackFinder::findTracks(
             }
         }
         if (!foundStateForProp && haveInternalLastHit) {
-            // internal convention (the stored AtLastHit copy is in the EDM4hep convention)
             bestState = internalLastHitState;
             foundStateForProp = true;
-            debug() << "Using AtLastHit state (N-hit circle) for inner propagation" << endmsg;
+            debug() << "Using the circle-fit state for inner propagation" << endmsg;
         }
-            
-        // ===== INNER PROPAGATION =====
+
         if (foundStateForProp) {
-            // Extract helix parameters from best state
             double d0 = bestState.D0 / 10.0;           // mm → cm
             double phi = bestState.phi;
             double omega = bestState.omega * 10.0;     // 1/mm → 1/cm
             double z0 = bestState.Z0 / 10.0;           // mm → cm
             double tanLambda = bestState.tanLambda;
-            
+
             if (std::abs(omega) > 1e-10) {
                 double radius = 1.0 / std::abs(omega);
-                
-                // Position at closest approach
+
+                // start at the first hit
                 Eigen::Vector3d pos;
                 if (finalTrack.trackerHits_size() > 0) {
                     auto firstHit = finalTrack.getTrackerHits(0);
@@ -3151,34 +2928,30 @@ void CombinatorialTrackFinder::findTracks(
                         firstHit.getPosition()[2] / 10.0
                     );
                 }
-                
-                // Field at position
+
                 dd4hep::Position fieldPos(pos.x(), pos.y(), pos.z());
                 double bField = m_field.magneticField(fieldPos).z() / dd4hep::tesla;
-                
-                // Momentum
+
                 double lambda = std::atan(tanLambda);
                 double cosL = std::cos(lambda);
                 double sinL = std::sin(lambda);
                 double pT = 0.3 * std::abs(bField) * radius / 100.0;
-                
+
                 Eigen::Vector3d mom(
                     pT * std::cos(phi) * cosL,
                     pT * std::sin(phi) * cosL,
                     pT * sinL
                 );
-                
+
                 info() << ">>> Attempting inner solenoid propagation for track " << trackNumber << "..." << endmsg;
                 info() << "  Propagating track " << trackNumber << " to inner region..." << endmsg;
                 info() << "    Outer R=" << std::sqrt(pos.x()*pos.x() + pos.y()*pos.y())
                     << " cm, |p|=" << mom.norm() << " GeV/c" << endmsg;
-                
-                // Charge sign from omega: omega>0 → positive charge (EDM4hep convention)
+
                 double chargeSign = (omega > 0.0) ? 1.0 : -1.0;
 
-                // Propagate using RK4 to m_innerPropTargetRadius
                 auto inner = propagateToInner(pos, mom, m_innerPropTargetRadius, chargeSign);
-                
+
                 if (inner.success) {
                     m_statInnerPropSuccess++;
                     double rxy = std::sqrt(
@@ -3188,62 +2961,36 @@ void CombinatorialTrackFinder::findTracks(
                     double pMagFinal = inner.finalMomentum.norm();
                     double pRatio = pMagFinal / mom.norm();
 
-                    info() << "  ✓ Inner propagation SUCCESS (AtVertex saving disabled):" << endmsg;
+                    info() << "  ✓ Inner propagation SUCCESS:" << endmsg;
                     info() << "    Final R=" << rxy << " cm, |p|=" << pMagFinal
                         << " GeV/c (ratio=" << pRatio << ")" << endmsg;
                     info() << "    Arc length: " << inner.arcLength << " cm, steps: "
                         << inner.numSteps << endmsg;
-
-                    // ===== AtVertex STATE SAVING DISABLED =====
-                    // The RK4 track-state extraction (d0, phi, omega from final position/momentum)
-                    // is not yet reliable — d0 approximation and hardcoded B-ratio are incorrect.
-                    // Re-enable once the state conversion is fixed.
-                    //
-                    // double d0_inner = rxy - (1.0 / std::abs(omega)) / 10.0;
-                    // double phi_inner = std::atan2(inner.finalPosition.y(), inner.finalPosition.x());
-                    // double omega_inner = omega * -1.176;
-                    // double z0_inner = inner.finalPosition.z();
-                    // edm4hep::TrackState innerState = createTrackState(
-                    //     d0_inner * 10.0, phi_inner, omega_inner / 10.0,
-                    //     z0_inner * 10.0, tanLambda, edm4hep::TrackState::AtVertex);
-                    // finalTrack.addToTrackStates(innerState);
                 } else {
                     debug() << "  ✗ Inner propagation failed: " << inner.message << endmsg;
                 }
             }
         }
         } // end if (m_doInnerPropagation)
-        // ===== END INNER PROPAGATION (RK4) =====
 
-        // ===== ANALYTICAL TWO-SEGMENT INNER PROPAGATION → AtIP ===============
-        // Reconstructs the inner segment analytically by reversing the outer
-        // helix at the solenoid boundary and saves the result as TrackState::AtIP.
-        // Controlled by DoAnalyticalPropagation (default true).
-        if (m_doAnalyticalPropagation.value()
+        // ===== IPStateMode = SolenoidCrossing: AtIP from the helix matched at the solenoid =====
+        // Only for tracks with all hits outside the solenoid.
+        if (m_ipStateMode.value() == "SolenoidCrossing" && allHitsOutsideSolenoid(trackHits)
             && foundCombination && std::abs(bestCombo.omega_mm) > 1e-10
             && finalTrack.trackerHits_size() > 0)
         {
-            // Use the circle-fit center directly — exact for any d0, no
-            // perigee-encoding assumption.  The previous formula reconstructed
-            // (cx, cy) from (d0, phi, omega), which is only correct when the
-            // helix perigee is at the origin; for displaced tracks (Z→bb etc.)
-            // the angular encoding introduces a bias that is amplified by the
-            // solenoid-crossing geometry into unrealistic d0 values.
-            // fitCircleNHits works in cm (converts hit mm positions internally)
-            // so x0, y0, radius are already in cm — no conversion needed.
+            // outer circle (cm)
             double R_outer_anal = bestCombo.radius;  // cm
             double cx_o_anal    = bestCombo.x0;      // cm
             double cy_o_anal    = bestCombo.y0;      // cm
 
-            // Use the innermost muon-system hit as the reference anchor
+            // the innermost hit anchors the crossing
             auto refHit = finalTrack.getTrackerHits(0);
             double xr = refHit.getPosition()[0] / 10.0;  // mm → cm
             double yr = refHit.getPosition()[1] / 10.0;
             double zr = refHit.getPosition()[2] / 10.0;
 
-            // Determine barrel vs endcap from the hit's composite cell ID type field:
-            //   typeID == 0 → barrel disk → barrel solenoid crossing
-            //   typeID != 0 → endcap disk → solenoid endcap crossing
+            // barrel hit: crossing of the solenoid barrel; endcap hit: of its end face
             bool isEndcapHit = (getTypeID(refHit.getCellID()) != 0);
             debug() << "  [Analytical] Ref hit typeID=" << getTypeID(refHit.getCellID())
                     << "  -> " << (isEndcapHit ? "endcap" : "barrel") << " crossing" << endmsg;
@@ -3258,8 +3005,7 @@ void CombinatorialTrackFinder::findTracks(
             if (atIPok) {
                 m_statAnalyticalPropSuccess++;
 
-                // ── Truth vertex rxy vs reco d0 (INFO, all samples) ──────────
-                // Find majority MCParticle for this track, retrieve production vertex
+                // printout: d0 of the AtIP state vs the true production radius
                 try {
                     int bestMCCount = 0;
                     edm4hep::MCParticle bestMCpart;
@@ -3283,7 +3029,6 @@ void CombinatorialTrackFinder::findTracks(
                     if (hasMCpart) {
                         const auto& vtx = bestMCpart.getVertex();  // mm (EDM4hep)
                         double rxy_truth = std::sqrt(vtx.x*vtx.x + vtx.y*vtx.y);  // mm
-                        // Extract reco d0 from the AtIP state just added
                         double d0_reco_mm = 0.0;
                         for (int si = 0; si < finalTrack.trackStates_size(); ++si) {
                             auto ts = finalTrack.getTrackStates(si);
@@ -3302,7 +3047,7 @@ void CombinatorialTrackFinder::findTracks(
                     debug() << "[TruthRxy] Exception: " << e.what() << endmsg;
                 }
 
-                // ── Truth comparison (prompt muon gun: expect d0≈0, z0≈0) ──
+                // printout: all states vs the matched MC particle
                 try {
                     if (m_mcParticles.exist()) {
                         const auto* mcParts = m_mcParticles.get();
@@ -3319,9 +3064,7 @@ void CombinatorialTrackFinder::findTracks(
                         << trackNumber << endmsg;
             }
         }
-        // ===== END ANALYTICAL INNER PROPAGATION ==============================
 
-        // ======================= Printing final track=============================
         info() << "Successfully created track " << trackNumber
             << " with " << finalTrack.trackerHits_size() << " hits"
             << " and " << finalTrack.trackStates_size() << " track states" << endmsg;
@@ -3343,9 +3086,8 @@ void CombinatorialTrackFinder::findTracks(
         if (hasOther)   m_statStateAtOther++;
         if (hasVertex)  m_statStateAtVertex++;
         if (hasIP)      m_statStateAtIP++;
-        if (hasLastHit) m_statFourHitTracks++; else m_statThreeHitTracks++;  // legacy
+        if (hasLastHit) m_statFourHitTracks++; else m_statThreeHitTracks++;
 
-        // N-hit multiplicity distribution
         {
             int nFinalHits = static_cast<int>(trackHits.size());
             if      (nFinalHits <= 3) m_statNhit3++;
@@ -3356,18 +3098,13 @@ void CombinatorialTrackFinder::findTracks(
         }
         m_statValidTriplets++;
 
-        // ── Reco vs MC truth comparison (DEBUG level) ─────────────────────────────
-        // Find the majority MCParticle from the track hits, then compare reco
-        // parameters (AtLastHit or AtFirstHit) with truth.
+        // DEBUG: AtFirstHit state vs the MC particle with most hits on the track
         if (msgLevel(MSG::DEBUG)) {
-            // Tally MCParticle associations across all track hits
             std::unordered_map<int, std::pair<edm4hep::MCParticle, int>> mcCount;
             for (const auto& th : trackHits) {
                 auto it = recoToSimMap.find(hitKey(th));
                 if (it == recoToSimMap.end()) continue;
-                // Count every MCParticle that contributed to this digi-hit,
-                // deduplicating within the same hit so one cluster doesn't
-                // count twice for the same MC.
+                // each MC particle counts once per hit
                 std::unordered_set<int> seenInThisHit;
                 for (const auto& sim : it->second) {
                     auto mcPart = sim.getParticle();
@@ -3378,7 +3115,6 @@ void CombinatorialTrackFinder::findTracks(
                     mcCount[mcIdx].second++;
                 }
             }
-            // Find majority MCParticle
             int bestCount = 0;
             edm4hep::MCParticle bestMC;
             bool hasMC = false;
@@ -3396,26 +3132,14 @@ void CombinatorialTrackFinder::findTracks(
                 double mcEta = (mcPt > 0.0) ? std::asinh(mom.z / mcPt) : 0.0;
                 double mcPhi = std::atan2(mom.y, mom.x);
 
-                // Extract best reco parameters (prefer AtLastHit)
                 double recoPt = 0.0, recoPhi = 0.0, recoD0mm = 0.0, recoZ0mm = 0.0, recoEta = 0.0;
                 bool hasRecoState = false;
                 for (int sIdx = 0; sIdx < finalTrack.trackStates_size(); ++sIdx) {
                     auto ts = finalTrack.getTrackStates(sIdx);
-                    if (ts.location == edm4hep::TrackState::AtLastHit ||
-                        (!hasRecoState && ts.location == edm4hep::TrackState::AtFirstHit)) {
+                    if (ts.location == edm4hep::TrackState::AtFirstHit) {
                         double omegaMm = ts.omega;           // 1/mm
                         if (std::abs(omegaMm) > 1e-12) {
-                            // pT from circle: pT[GeV] = 0.3 * B[T] * R[m]
-                            // omega[1/mm] = q/R[mm] => R[m] = 1e-3/|omega|
-                            // Use B from the seed region (roughly 2 T for muon spec)
-                            // AtLastHit was computed with the actual B so we just invert:
-                            // pT = 0.3 * B * (1e-3 / |omega[1/mm]|)
-                            // The B value is already baked into omega via the fit, so:
-                            // omega[1/mm] = 0.3*B / pT[GeV] * 1e-3
-                            // => pT = 0.3*B*1e-3 / |omega|
-                            // We stored omega = chargeN / (cr_cm * 10.0) with B baked in
-                            // via chargeN*0.3*B/pT * sign, so just use getPT helper:
-                            recoPt = getPT(ts);
+                            recoPt = getPT(ts);   // field at the first hit
                         }
                         recoPhi      = ts.phi;
                         recoD0mm     = ts.D0;
@@ -3423,13 +3147,12 @@ void CombinatorialTrackFinder::findTracks(
                         recoEta      = (std::abs(ts.tanLambda) > 0.0)
                                        ? std::asinh(ts.tanLambda) : 0.0;
                         hasRecoState = true;
-                        if (ts.location == edm4hep::TrackState::AtLastHit) break; // prefer this
+                        break;
                     }
                 }
 
                 double dPt  = (mcPt  > 0) ? (recoPt  - mcPt)  / mcPt  * 100.0 : 0.0;
                 double dPhi = recoPhi - mcPhi;
-                // wrap dPhi to [-pi,pi]
                 while (dPhi >  M_PI) dPhi -= 2*M_PI;
                 while (dPhi < -M_PI) dPhi += 2*M_PI;
 
@@ -3452,42 +3175,38 @@ void CombinatorialTrackFinder::findTracks(
             }
         }
 
-        // Count charge from AtLastHit (N-hit WLS circle fit).
-        // AtOther (GenFit) is NOT used for charge classification.
+        // run statistics: sign of omega of the AtFirstHit state
         {
             double omegaLastHit = 0.0;  bool hasLastHitOmega = false;
             for (int sIdx = 0; sIdx < finalTrack.trackStates_size(); ++sIdx) {
                 auto ts = finalTrack.getTrackStates(sIdx);
-                if (ts.location == edm4hep::TrackState::AtLastHit) {
+                if (ts.location == edm4hep::TrackState::AtFirstHit) {
                     omegaLastHit    = ts.omega;
                     hasLastHitOmega = true;
                     break;
                 }
             }
             if (hasLastHitOmega) {
-                // EDM4hep convention: omega = charge / R  →  omega > 0 means positive charge
+                // omega > 0: clockwise (positive charge in a field along +z)
                 if (omegaLastHit > 0.0) m_statPositiveCharge++;
                 else                     m_statNegativeCharge++;
                 debug() << "Charge classification: omega=" << omegaLastHit
-                        << " 1/mm (AtLastHit)  →  " << (omegaLastHit > 0 ? "positive" : "negative") << endmsg;
+                        << " 1/mm (AtFirstHit)  →  " << (omegaLastHit > 0 ? "positive" : "negative") << endmsg;
             }
         }
-        // Continue to next iteration to find more tracks
-    } // End of main while loop
+    } // end of the track loop
 
-    info() << "Track reconstruction complete: created " << finalTracks.size() 
+    info() << "Track reconstruction complete: created " << finalTracks.size()
            << " final tracks across " << (trackNumber-1) << " iterations" << endmsg;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Analytical two-segment inner propagation  (barrel + endcap)
+// IPStateMode = SolenoidCrossing: AtIP for a track measured outside the solenoid.
 //
-// The solenoid boundary is a closed surface: a barrel cylinder at R = R_sol
-// and two endcap disks at |z| = Z_sol.  Tracks entering from the barrel side
-// have their innermost muon-system hit at R_ref > R_sol; endcap tracks have
-// R_ref < R_sol (their hits are on the endcap disks inside the barrel radius).
-// Both cases share the same inner-helix construction once the crossing point
-// (xc_sol, yc_sol, z_sol) on the solenoid surface is known.
+// The solenoid boundary is a cylinder at R = R_sol closed by two disks at
+// |z| = Z_sol. Going backward from the innermost hit, the outer circle is followed
+// to the boundary crossing (barrel or end disk); there an inner helix with the
+// inner field and the same pT and tanLambda is attached, and its perigee is stored.
 // ─────────────────────────────────────────────────────────────────────────────
 bool CombinatorialTrackFinder::analyticalInnerPropagation(
     double cx_o, double cy_o, double R_outer,
@@ -3498,7 +3217,6 @@ bool CombinatorialTrackFinder::analyticalInnerPropagation(
     bool   isEndcap,
     edm4hep::MutableTrack& finalTrack) const {
 
-    // ── Helpers ──────────────────────────────────────────────────────────────
     auto normAngle = [](double a) -> double {   // → (−π, π]
         while (a >  M_PI) a -= 2.0*M_PI;
         while (a < -M_PI) a += 2.0*M_PI;
@@ -3513,7 +3231,6 @@ bool CombinatorialTrackFinder::analyticalInnerPropagation(
     const double R_sol = m_solenoidBoundaryMm / 10.0;   // mm → cm
     const double Z_sol = m_solenoidHalfZmm    / 10.0;   // mm → cm
 
-    // ── Entry diagnostic ─────────────────────────────────────────────────────
     double d_oc = std::sqrt(cx_o*cx_o + cy_o*cy_o);  // outer center dist from IP (cm)
     info() << "  [Anal.Entry] " << (isEndcap ? "endcap" : "barrel")
            << "  R_o=" << std::fixed << std::setprecision(2) << R_outer
@@ -3522,25 +3239,15 @@ bool CombinatorialTrackFinder::analyticalInnerPropagation(
            << "  pT=" << std::setprecision(3) << pT << " GeV"
            << "  z_ref=" << std::setprecision(2) << z_ref << " cm" << endmsg;
 
-    // Sign that encodes the backward direction on the outer circle:
-    //   CW outer (omega<0): backward = increasing θ → +1
-    //   CCW outer (omega>0): backward = decreasing θ → -1
-    // This same sign is the curvature-reversal sign for the inner helix.
+    // Backward direction on the outer circle (+1: increasing angle, for omega < 0);
+    // the same sign gives the reversed curvature of the inner helix.
     const double inner_sign = (omega_outer_mm < 0) ? 1.0 : -1.0;
-
-    // isEndcap is passed in from the call site, determined from the hit composite
-    // ID (typeID != 0 means endcap disk hit).  This is more reliable than the
-    // geometric R_ref < R_sol test, which can give the wrong answer when the
-    // solenoid boundary radius is close to the hit transverse position.
-    // (kept as a fallback: if cell-ID type information is unavailable, the caller
-    // passes isEndcapHit = (R_ref < R_sol) using the geometry instead.)
 
     // ── Solenoid boundary crossing ────────────────────────────────────────────
     double xc_sol, yc_sol, z_sol;
 
     if (!isEndcap) {
-        // ── BARREL: intersect outer circle with solenoid cylinder ────────────
-        // d_oc already computed at entry above
+        // ── barrel: outer circle x solenoid cylinder ────────────────────────
         if (d_oc < 1e-6) {
             debug() << "  [Analytical] Barrel: outer circle center at IP – degenerate" << endmsg;
             m_statAnalBarrelNoIsect++;
@@ -3562,7 +3269,7 @@ bool CombinatorialTrackFinder::analyticalInnerPropagation(
         double P1x = h*ex + l*px,  P1y = h*ey + l*py;
         double P2x = h*ex - l*px,  P2y = h*ey - l*py;
 
-        // Select the crossing first reached going backward from the reference hit
+        // the crossing reached first going backward from the hit
         double theta_hit = std::atan2(y_ref - cy_o, x_ref - cx_o);
         auto bwdArc = [&](double Px, double Py) -> double {
             double tc = std::atan2(Py - cy_o, Px - cx_o);
@@ -3578,10 +3285,7 @@ bool CombinatorialTrackFinder::analyticalInnerPropagation(
         double s_bwd = R_outer * arc_back;
         z_sol = z_ref - tanLambda * s_bwd;
 
-        // Fix 1: validate z_sol is on the IP side of z_ref.
-        // A displaced track can cause the arc criterion to pick the forward crossing
-        // (going away from IP), giving |z_sol| > |z_ref|.  When that happens, try
-        // the other intersection; if both fail, bail out.
+        // The crossing must be on the IP side of the hit in z; if not, try the other one.
         if (std::abs(z_sol) > std::abs(z_ref) + 1e-3) {
             double arc_alt, s_bwd_alt, z_sol_alt;
             double xc_alt, yc_alt;
@@ -3610,33 +3314,23 @@ bool CombinatorialTrackFinder::analyticalInnerPropagation(
                << " cm  z_sol=" << z_sol << " cm" << endmsg;
 
     } else {
-        // ── ENDCAP: intersect outer helix with solenoid endcap disk at |z|=Z_sol
-        //
-        // The B-field reverses at |z| = Z_sol just as it does at R = R_sol.
-        // Going backward from the reference hit, the z advances toward 0.
-        // We find the transverse arc s such that z(s) = z_cap = ±Z_sol,
-        // then compute the (x,y) on the outer circle at that arc.
+        // ── end disk: arc s backward from the hit with z(s) = +-Z_sol ────────
         if (std::abs(tanLambda) < 1e-6) {
             debug() << "  [Analytical] Endcap: |tanLambda| too small to extrapolate z" << endmsg;
             m_statAnalEndcapSmallTanL++;
             return false;
         }
 
-        // z_cap carries the same sign as z_ref (negative-z endcap or positive-z endcap)
         double z_cap = (z_ref < 0.0) ? -Z_sol : +Z_sol;
 
-        // Backward transverse arc to reach z = z_cap:  z_ref - tanLambda*s = z_cap
+        // z_ref - tanLambda * s = z_cap
         double s_endcap = (z_ref - z_cap) / tanLambda;
         if (s_endcap < 0.0) {
-            // Reference hit is already inside the solenoid z boundary — the hit
-            // is endcap-typed by cell ID but sits at |z| < Z_sol.  Fall back to
-            // the barrel solenoid crossing (R = R_sol) which is the relevant
-            // boundary for this hit geometry.
+            // hit already at |z| < Z_sol: use the barrel crossing instead
             debug() << "  [Analytical] Endcap: z_ref=" << z_ref
                     << " cm already inside z_cap=" << z_cap
                     << " cm – falling back to barrel formula" << endmsg;
             m_statAnalEndcapPastCap++;
-            // ---- barrel fallback ----
             if (d_oc < 1e-6 || R_outer <= std::abs(d_oc - R_sol) || R_outer >= d_oc + R_sol) {
                 debug() << "  [Analytical] Endcap→Barrel fallback: no barrel crossing" << endmsg;
                 return false;
@@ -3664,7 +3358,6 @@ bool CombinatorialTrackFinder::analyticalInnerPropagation(
             info() << "  [Anal.Brl*] fallback crossing=(" << std::fixed << std::setprecision(2) << xc_sol
                    << ", " << yc_sol << ") cm  bwd_arc=" << s_bwd_fb
                    << " cm  z_sol=" << z_sol << " cm" << endmsg;
-            // continue to common section below with the barrel crossing point
         } else {
         if (s_endcap > 2.0 * M_PI * R_outer) {
             debug() << "  [Analytical] Endcap: backward arc would exceed one loop – skip" << endmsg;
@@ -3672,7 +3365,6 @@ bool CombinatorialTrackFinder::analyticalInnerPropagation(
             return false;
         }
 
-        // Angular step on the outer circle going backward
         double theta_ref = std::atan2(y_ref - cy_o, x_ref - cx_o);
         double d_theta   = s_endcap / R_outer;
         double theta_cap = theta_ref + inner_sign * d_theta;
@@ -3683,19 +3375,18 @@ bool CombinatorialTrackFinder::analyticalInnerPropagation(
 
         info() << "  [Anal.End] crossing=(" << std::fixed << std::setprecision(2) << xc_sol
                << ", " << yc_sol << ", " << z_sol << ") cm  bwd_arc=" << s_endcap << " cm" << endmsg;
-    }   // closes: if (s_endcap < 0.0) { ... } else { ... }
-    }   // closes: if (!isEndcap) { ... } else { ... }
+    }   // end if (s_endcap < 0.0)
+    }   // end if (!isEndcap)
 
-    // ── Common: tangent and outward radial at the solenoid crossing ───────────
+    // ── tangent and outward radial direction at the crossing ──────────────────
     double rx = (xc_sol - cx_o) / R_outer;
     double ry = (yc_sol - cy_o) / R_outer;
-    // Forward momentum direction at the crossing (same convention as convertToGenFitState)
     double tx = (omega_outer_mm < 0) ? -ry :  ry;
     double ty = (omega_outer_mm < 0) ?  rx : -rx;
     debug() << "  [Analytical] Tangent: (" << tx << ", " << ty
             << ")  outward radial: (" << rx << ", " << ry << ")" << endmsg;
 
-    // ── Inner B field (queried at the beam axis, well inside the solenoid) ────
+    // ── inner field, at the origin ────────────────────────────────────────────
     double B_inner = m_field.magneticField(dd4hep::Position(0.0, 0.0, 0.0)).z()
                      / dd4hep::tesla;
     if (std::abs(B_inner) < 1e-6) {
@@ -3703,10 +3394,7 @@ bool CombinatorialTrackFinder::analyticalInnerPropagation(
         return false;
     }
 
-    // ── Inner circle ──────────────────────────────────────────────────────────
-    // pT conserved; B reverses → curvature reverses → circle on opposite side.
-    // Outer centripetal: crossing → outer center  (inward = −radial direction)
-    // Inner centripetal: crossing → inner center  (outward = +radial direction)
+    // ── inner circle: same pT, field reversed, so the centre is on the other side ─
     double R_inner = pT * 100.0 / (0.3 * std::abs(B_inner));   // cm
     double cx_i    = xc_sol + R_inner * rx;
     double cy_i    = yc_sol + R_inner * ry;
@@ -3717,18 +3405,12 @@ bool CombinatorialTrackFinder::analyticalInnerPropagation(
            << " B_i=" << std::setprecision(3) << B_inner << " T"
            << "  d0=" << std::setprecision(2) << (std::sqrt(cx_i*cx_i+cy_i*cy_i)-R_inner) << " cm" << endmsg;
 
-    // ── Inner helix parameters at the 2-D perigee (CCA to z-axis) ────────────
+    // ── inner helix at its perigee ────────────────────────────────────────────
     double d0_inner_cm    = std::sqrt(cx_i*cx_i + cy_i*cy_i) - R_inner;
     double phi0_inner     = normAngle(std::atan2(cy_i, cx_i) - inner_sign * M_PI / 2.0);
     double omega_inner_mm = inner_sign / (R_inner * 10.0);   // 1/mm, signed
 
-    // ── z at inner perigee ────────────────────────────────────────────────────
-    // Trace the inner helix backward from the solenoid crossing to its perigee.
-    //   omega_inner > 0 (CCW inner): bwd arc = normPos(θ_crossing − θ_perigee)
-    //   omega_inner < 0 (CW  inner): bwd arc = normPos(θ_perigee  − θ_crossing)
-    // For prompt tracks the perigee is always reachable within half a revolution;
-    // normPos can wrap a near-zero angle to ≈2π for large R_inner (near-straight
-    // tracks), so we take the shorter of the two arcs (< π).
+    // ── z at the perigee: backward arc from the crossing, the shorter way (< pi) ─
     double theta_c  = std::atan2(yc_sol - cy_i, xc_sol - cx_i);
     double theta_ip = std::atan2(-cy_i,  -cx_i);
     double bwd_arc_inner = (omega_inner_mm > 0) ? normPos(theta_c  - theta_ip)
@@ -3746,7 +3428,7 @@ bool CombinatorialTrackFinder::analyticalInnerPropagation(
             << "  z0=" << z0_inner_cm << " cm"
             << "  (bwd arc=" << s_sol_to_ip << " cm)" << endmsg;
 
-    // ── Save AtIP state ────────────────────────────────────────────────────────
+    // ── stored as AtIP ────────────────────────────────────────────────────────
     edm4hep::TrackState atIPState = createTrackState(
         d0_inner_cm  * 10.0,    // cm → mm
         phi0_inner,
@@ -3772,20 +3454,18 @@ bool CombinatorialTrackFinder::analyticalInnerPropagation(
 genfit::MeasuredStateOnPlane CombinatorialTrackFinder::convertToGenFitState(
     const edm4hep::TrackState& state,
     genfit::AbsTrackRep* rep) const {
-    
-    // ---------- Extract EDM4hep track parameters ----------
-    // All EDM4hep track params: D0 [mm], phi [rad], omega [1/mm], Z0 [mm], tanLambda
+
+    // Internal circle-fit convention (see findTracks); mm, rad, 1/mm
     double d0        = state.D0;          // mm
     double phi       = state.phi;         // rad
-    double omega     = state.omega;       // 1/mm, signed: omega = charge/R
+    double omega     = state.omega;       // 1/mm
     double tanLambda = state.tanLambda;
 
-    // Reference point (hit position in mm → cm for GenFit)
+    // reference point = first hit (cm for GenFit)
     double refX = state.referencePoint[0] / 10.0;  // cm
     double refY = state.referencePoint[1] / 10.0;
     double refZ = state.referencePoint[2] / 10.0;
 
-    // ---------- Magnetic field at reference point ----------
     dd4hep::Position fieldPos(refX, refY, refZ);  // cm
     double bField = m_field.magneticField(fieldPos).z() / dd4hep::tesla;  // Tesla
 
@@ -3793,13 +3473,11 @@ genfit::MeasuredStateOnPlane CombinatorialTrackFinder::convertToGenFitState(
         throw genfit::Exception("convertToGenFitState: omega or B too small", __LINE__, __FILE__);
     }
 
-    // ---------- pT and pz ----------
     // pT [GeV/c] = 0.3 * |Bz| [T] / (|omega| [1/mm] * 1000)
     double pT = 0.3 * std::abs(bField) / (std::abs(omega) * 1000.0);  // GeV/c
     double pz = pT * tanLambda;
 
-    // ---------- Momentum direction at reference point ----------
-    // Helix center (mm), derived from perigee parameters
+    // momentum direction at the reference point: tangent of the circle
     double R_mm = 1.0 / std::abs(omega);
     double centerX_mm, centerY_mm;
     if (omega < 0) {  // positive charge → clockwise
@@ -3810,7 +3488,6 @@ genfit::MeasuredStateOnPlane CombinatorialTrackFinder::convertToGenFitState(
         centerY_mm =  d0 * std::cos(phi) + R_mm * std::sin(phi);
     }
 
-    // Unit radial vector from center to reference point (in cm)
     double vecX = refX - centerX_mm / 10.0;
     double vecY = refY - centerY_mm / 10.0;
     double vecMag = std::sqrt(vecX*vecX + vecY*vecY);
@@ -3820,7 +3497,6 @@ genfit::MeasuredStateOnPlane CombinatorialTrackFinder::convertToGenFitState(
     vecX /= vecMag;
     vecY /= vecMag;
 
-    // Tangent (momentum direction in xy) = radial rotated 90°, sign by charge
     double momDirX, momDirY;
     if (omega < 0) {  // positive charge → clockwise
         momDirX = -vecY;  momDirY =  vecX;
@@ -3834,9 +3510,7 @@ genfit::MeasuredStateOnPlane CombinatorialTrackFinder::convertToGenFitState(
     TVector3 posVec(refX, refY, refZ);    // cm
     TVector3 momVec(px, py, pz);          // GeV/c
 
-    // ---------- Build GenFit state with pos/mom only ----------
-    // The covariance is set by the caller via genfit::Track(rep, stateVec, covInit),
-    // which accepts a 6×6 Cartesian seed covariance.  Do not call setCov() here.
+    // position and momentum only; the caller sets the seed covariance
     genfit::MeasuredStateOnPlane gfState(rep);
     gfState.setPosMom(posVec, momVec);
 
@@ -3847,39 +3521,32 @@ genfit::MeasuredStateOnPlane CombinatorialTrackFinder::convertToGenFitState(
 edm4hep::TrackState CombinatorialTrackFinder::convertToEDM4hepState(
     const genfit::MeasuredStateOnPlane& state,
     int location) const {
-    
-    // Get position [cm] and momentum [GeV/c] from GenFit state
+
     TVector3 pos = state.getPos();   // cm
     TVector3 mom = state.getMom();   // GeV/c
     double charge = (state.getQop() > 0) ? 1.0 : -1.0;
-    
+
     double px = mom.X();
     double py = mom.Y();
     double pz = mom.Z();
     double pt = std::sqrt(px*px + py*py);
     double p  = mom.Mag();
-    
-    // ---------- EDM4hep 5-parameter track state ----------
-    // phi: azimuthal angle of momentum at the track point
+
     double phi = std::atan2(py, px);
 
-    // tanLambda: pz/pT
     double tanLambda = (pt > 1e-10) ? pz / pt : 0.0;
 
-    // Magnetic field at fit position
     dd4hep::Position fieldPos(pos.X(), pos.Y(), pos.Z());  // cm
     double bField = m_field.magneticField(fieldPos).z() / dd4hep::tesla;
-    
+
     // omega [1/mm] = charge * 0.3 * |B| / (pT [GeV/c] * 1000)
     double omega = 0.0;
     if (pt > 1e-10 && std::abs(bField) > 1e-6)
         omega = charge * 0.3 * std::abs(bField) / (pt * 1000.0);  // 1/mm
 
-    // d0 [mm]: signed transverse impact parameter w.r.t. origin
-    // d0 = -(y*cos(phi) - x*sin(phi)) evaluated at fit position (cm → mm)
+    // d0, z0 of the straight line through the fit position (mm)
     double d0 = (-pos.Y() * std::cos(phi) + pos.X() * std::sin(phi)) * 10.0;  // mm
 
-    // z0 [mm]: z at closest approach
     double z0 = pos.Z() * 10.0;  // cm → mm
 
     edm4hep::TrackState outState;
@@ -3890,30 +3557,19 @@ edm4hep::TrackState CombinatorialTrackFinder::convertToEDM4hepState(
     outState.tanLambda = tanLambda;
     outState.location  = location;
 
-    // Reference point: GenFit fit position converted mm
     outState.referencePoint = edm4hep::Vector3f(
         pos.X() * 10.0f,   // cm → mm
         pos.Y() * 10.0f,
         pos.Z() * 10.0f);
 
-    // ---------- Covariance back-propagation 6D → 5D ----------
-    // IMPORTANT: GenFit's MeasuredStateOnPlane::getCov() returns a 5×5 matrix in the
-    // local track-representation basis [q/p, u', v', u, v].  It is NOT a 6×6 Cartesian
-    // matrix.  Calling getCov() and treating the result as 6×6 causes the
-    // "Request column(5)/row(5) outside matrix range of 0-5" errors because ROOT's
-    // TMatrixDSym only has indices 0-4 for a 5×5 matrix.
-    //
-    // The correct approach is to use getPosMomCov() which explicitly constructs the
-    // 6×6 Cartesian covariance [x,y,z,px,py,pz] from the internal representation.
-    // We then propagate this back to EDM4hep's 5D parameter space via our Jacobian.
+    // ---------- covariance: (x, y, z, px, py, pz) -> 5 track parameters ----------
+    // getPosMomCov gives the 6x6 Cartesian covariance (getCov would give the 5x5 one
+    // of GenFit's local parameters).
     {
-        // --- Get full 6×6 Cartesian covariance from GenFit ---
-        // getPosMomCov fills a 6×6 TMatrixDSym with the covariance in (x,y,z,px,py,pz)
-        // ordering.  This is safe regardless of the internal representation dimension.
         TMatrixDSym C6sym(6);
         {
             TVector3 tmpPos, tmpMom;
-            state.getPosMomCov(tmpPos, tmpMom, C6sym);  // fills 6×6 Cartesian cov (x,y,z,px,py,pz)
+            state.getPosMomCov(tmpPos, tmpMom, C6sym);
         }
 
         if (msgLevel(MSG::DEBUG)) {
@@ -3930,7 +3586,6 @@ edm4hep::TrackState CombinatorialTrackFinder::convertToEDM4hepState(
                     << "  pz=" << std::sqrt(std::max(0., C6sym(5,5))) << " GeV/c" << endmsg;
         }
 
-        // Copy to plain TMatrixD for subsequent multiplications
         TMatrixD C6(6, 6);
         for (int i = 0; i < 6; ++i)
             for (int j = 0; j < 6; ++j)
@@ -3967,8 +3622,7 @@ edm4hep::TrackState CombinatorialTrackFinder::convertToEDM4hepState(
 
         TMatrixD JT(TMatrixD::kTransposed, J);    // 5×6
 
-    // Pseudo-inverse: C5 = (J^T J)^{-1} J^T C6 J (J^T J)^{-1}
-    // All steps use explicit Mult() to avoid ROOT operator* dimension errors
+    // pseudo-inverse: C5 = (J^T J)^{-1} J^T C6 J (J^T J)^{-1}
     TMatrixD JtJ(5, 5);
     JtJ.Mult(JT, J);                           // (5×6)·(6×5) = 5×5
     TMatrixD JtJ_inv(TMatrixD::kInverted, JtJ);
@@ -3983,7 +3637,7 @@ edm4hep::TrackState CombinatorialTrackFinder::convertToEDM4hepState(
     TMatrixD C5mat(5, 5);
     C5mat.Mult(tmpL, JtJ_inv);                 // 5×5
 
-    // Fill EDM4hep covariance; D0(col 0) and Z0(col 3) are in mm→ scale ×100 per axis
+    // EDM4hep covariance; d0 and z0 go from cm to mm
     for (int i = 0; i < 5; ++i) {
         for (int j = 0; j <= i; ++j) {
             double v = 0.5 * (C5mat(i,j) + C5mat(j,i));
@@ -3995,7 +3649,6 @@ edm4hep::TrackState CombinatorialTrackFinder::convertToEDM4hepState(
         }
     }
 
-    // Debug: print EDM4hep 5×5 covariance diagonal
     if (msgLevel(MSG::DEBUG)) {
         double v_d0    = outState.getCovMatrix(edm4hep::TrackParams::d0,        edm4hep::TrackParams::d0);
         double v_phi   = outState.getCovMatrix(edm4hep::TrackParams::phi,       edm4hep::TrackParams::phi);
@@ -4018,7 +3671,7 @@ edm4hep::TrackState CombinatorialTrackFinder::convertToEDM4hepState(
             << "  ω="      << omega   << " 1/mm"
             << "  z0="     << z0      << " mm"
             << "  tanL="   << tanLambda << endmsg;
-    
+
     return outState;
 }
 
@@ -4027,55 +3680,45 @@ genfit::AbsMeasurement* CombinatorialTrackFinder::createGenFitMeasurement(
     const dd4hep::rec::Surface* surface,
     int hitId,
     genfit::TrackPoint* trackPoint) const {
-    
-    // Get surface properties for measurement plane
+
+    // measurement plane of the surface (DD4hep lengths in cm)
     dd4hep::rec::Vector3D u = surface->u();
     dd4hep::rec::Vector3D v = surface->v();
     dd4hep::rec::Vector3D origin = surface->origin();
-    
-    // Convert to ROOT's TVector3
-    TVector3 o(origin.x(), origin.y(), origin.z());  // Note: origin already in cm
+
+    TVector3 o(origin.x(), origin.y(), origin.z());
     TVector3 uVec(u.x(), u.y(), u.z());
     TVector3 vVec(v.x(), v.y(), v.z());
-    
-    // Get hit position
+
+    // hit position in the local (u, v) coordinates of the surface
     const auto& pos = hit.getPosition();  // mm
-    
-    // Convert global position to local position on the surface
     dd4hep::rec::Vector3D hitGlobal(pos[0], pos[1], pos[2]);  // mm
     dd4hep::rec::Vector2D hitLocal = surface->globalToLocal(dd4hep::mm * hitGlobal);  // cm
-    
-    // Create measurement coordinates
+
     TVectorD hitCoords(2);
     hitCoords[0] = hitLocal[0];  // u coordinate in cm
     hitCoords[1] = hitLocal[1];  // v coordinate in cm
-    
-    // Get measurement errors
+
+    // resolutions (0.4 mm if not set)
     double sigma_u = hit.getDu();  // mm
     double sigma_v = hit.getDv();  // mm
-    
-    // If resolutions are zero or not set, use reasonable defaults
-    if (sigma_u <= 0) sigma_u = 0.4;  // 400 microns default
-    if (sigma_v <= 0) sigma_v = 0.4;  // 400 microns default
-    
-    // Create covariance matrix
+    if (sigma_u <= 0) sigma_u = 0.4;
+    if (sigma_v <= 0) sigma_v = 0.4;
+
     TMatrixDSym hitCov(2);
     hitCov(0,0) = std::pow(dd4hep::mm * sigma_u, 2);  // cm²
     hitCov(0,1) = 0;
-    hitCov(1,0) = 0; 
+    hitCov(1,0) = 0;
     hitCov(1,1) = std::pow(dd4hep::mm * sigma_v, 2);  // cm²
-    
-    // Extract detector ID from cell ID
+
     int detId = hit.getCellID();
-    
-    // Create planar measurement
-    genfit::PlanarMeasurement* meas = 
+
+    genfit::PlanarMeasurement* meas =
         new genfit::PlanarMeasurement(hitCoords, hitCov, detId, hitId, trackPoint);
-    
-    // Create and set measurement plane
+
     genfit::SharedPlanePtr plane(new genfit::DetPlane(o, uVec, vVec));
-    meas->setPlane(plane, detId);  // Use cellID as planeID as in the example
-    
+    meas->setPlane(plane, detId);  // cellID as plane ID
+
     return meas;
 }
 
@@ -4086,93 +3729,72 @@ bool CombinatorialTrackFinder::fitTrackWithGenFit(
     edm4hep::TrackerHitPlaneCollection& outputHits,
     const LinkPropagator& propagateLink,
     const edm4hep::TrackerHitPlaneCollection* allHits) const {
-    
+
     if (hits.empty()) {
         warning() << "Cannot fit track - no hits provided" << endmsg;
         return false;
     }
-    
-    // Determine particle type for the track representation
+
     int pdgCode = getPDGCode();
-    
+
     debug() << "Using particle type: " << m_particleType << " (PDG code: " << pdgCode << ")" << endmsg;
-    
+
     try {
-        // Create a track representation
         genfit::AbsTrackRep* rep = new genfit::RKTrackRep(pdgCode);
-        //genfit::AbsTrackRep* rep = new genfit::GeaneTrackRep();  // takes more time, but more efficient with material and particle independent.
-        // Convert seed state (EDM4hep helix params) → Cartesian (pos, mom) for GenFit
+        // seed state -> position and momentum
         genfit::MeasuredStateOnPlane seedGFState = convertToGenFitState(seedState, rep);
         TVector3 pos = seedGFState.getPos();  // cm
         TVector3 mom = seedGFState.getMom();  // GeV/c
 
-        // Build 6D state vector [x, y, z, px, py, pz]
-        TVectorD stateVec(6);
+        TVectorD stateVec(6);   // x, y, z, px, py, pz
         stateVec[0] = pos.X();  stateVec[1] = pos.Y();  stateVec[2] = pos.Z();
         stateVec[3] = mom.X();  stateVec[4] = mom.Y();  stateVec[5] = mom.Z();
 
-        // ── Build 6×6 Cartesian seed covariance from seed state's EDM4hep covariance ──
-        // We propagate the 5D EDM4hep cov C5 to Cartesian via the analytic Jacobian
-        //   J = ∂(x,y,z,px,py,pz)/∂(d0,phi,ω,z0,tanλ)
-        // so that covInit = J · C5 · J^T.
-        // This replaces the old hardcoded (10% of |p|) momentum sigma.
+        // ── Cartesian seed covariance from the seed state's diagonal variances ──
         TMatrixDSym covInit(6);
         covInit.Zero();
         {
-            // Read EDM4hep diagonal variances (units: mm², rad², (1/mm)², mm², dimensionless)
+            // mm^2, rad^2, (1/mm)^2, mm^2, 1
             double var_d0   = seedState.getCovMatrix(edm4hep::TrackParams::d0,        edm4hep::TrackParams::d0);
             double var_phi  = seedState.getCovMatrix(edm4hep::TrackParams::phi,       edm4hep::TrackParams::phi);
             double var_om   = seedState.getCovMatrix(edm4hep::TrackParams::omega,     edm4hep::TrackParams::omega);
             double var_z0   = seedState.getCovMatrix(edm4hep::TrackParams::z0,        edm4hep::TrackParams::z0);
             double var_tanL = seedState.getCovMatrix(edm4hep::TrackParams::tanLambda, edm4hep::TrackParams::tanLambda);
 
-            // Apply floors (protect against unset or collapsed covariances)
-            if (var_d0   < 1e-30) var_d0   = 1.0;  // (1 mm)²
+            // defaults for unset variances
+            if (var_d0   < 1e-30) var_d0   = 1.0;
             if (var_phi  < 1e-30) var_phi  = 0.1;
-            //if (var_om   < 1e-30) var_om   = 1e-10;  // absolute minimum
             if (var_z0   < 1e-30) var_z0   = 1.0;
             if (var_tanL < 1e-30) var_tanL = 0.1;
 
-            // Track parameters at ref point (mm, rad, 1/mm)
             double phi  = seedState.phi;
             double om   = seedState.omega;   // 1/mm, signed
             double tanL = seedState.tanLambda;
-            double pT   = mom.Perp();        // GeV/c  (from Cartesian conversion)
+            double pT   = mom.Perp();        // GeV/c
             double pMag = mom.Mag();
 
-            // ∂(px,py)/∂phi: tangent direction rotates with phi
-            //   px = pT * sin(phi_track);  phi_track depends on helix geometry
-            //   Proxy: use the actual Cartesian (px,py) directions
             double ux = (pMag > 1e-10) ? mom.X() / pMag : 0.0;
             double uy = (pMag > 1e-10) ? mom.Y() / pMag : 0.0;
             double uz = (pMag > 1e-10) ? mom.Z() / pMag : 0.0;
 
-            // Position block (mm² → cm²):
-            //   σ²(x) ≈ σ²(y) ≈ σ²(d0) * mm²→cm²
-            //   σ²(z) ≈ σ²(z0) * mm²→cm²
+            // position: var(x) = var(y) = var(d0), var(z) = var(z0), at least 0.1 cm^2
             const double mm2cm2 = 0.01;
-            double var_xy = std::max(var_d0 * mm2cm2, 0.1);   // floor: 0.1 cm²
+            double var_xy = std::max(var_d0 * mm2cm2, 0.1);
             double var_z  = std::max(var_z0 * mm2cm2, 0.1);
             covInit(0,0) = var_xy;
             covInit(1,1) = var_xy;
             covInit(2,2) = var_z;
 
-            // Momentum block via Jacobian:
-            //   pT  = 0.3 * |Bz| / (|ω| * 1000)  → ∂pT/∂ω = -pT/ω
-            //   pz  = pT * tanL
-            //   σ²(pT) from σ²(ω):  var_pT = (pT/ω)² * var_om   [GeV² per (1/mm)²]
-            //   σ²(pz) from σ²(tanL): var_pz = pT² * var_tanL
-            //   σ²(phi) contributes rotation of (px,py) but not |pT|
+            // momentum: var(pT) = (pT/omega)^2 var(omega), var(pz) = pT^2 var(tanLambda),
+            // and phi rotates (px, py): dpx/dphi = -py, dpy/dphi = px
             double dpT_dom  = (std::abs(om) > 1e-10) ? -pT / om : 0.0;  // GeV·mm
             double var_pT   = dpT_dom * dpT_dom * var_om;      // (GeV/c)²
             double var_pz   = pT * pT * var_tanL;              // (GeV/c)²
-            // phi variance rotates (px,py) in the transverse plane:
-            //   px = pT*cos(φ_track), py = pT*sin(φ_track) → ∂px/∂phi ≈ -py, ∂py/∂phi ≈ px
             double var_px_phi = mom.Y() * mom.Y() * var_phi;   // (GeV/c)²
             double var_py_phi = mom.X() * mom.X() * var_phi;
 
-            // Combine pT magnitude uncertainty + angular uncertainty, then apply floor
-            double pT_floor = std::max(pT * 0.1, 0.1);  // 1% of pT or 0.1 GeV/c
+            // at least (10% of pT)^2 or (0.1 GeV)^2
+            double pT_floor = std::max(pT * 0.1, 0.1);
             double var_pT_floor = pT_floor * pT_floor;
 
             covInit(3,3) = std::max(var_pT * ux*ux + var_px_phi, var_pT_floor);
@@ -4182,8 +3804,8 @@ bool CombinatorialTrackFinder::fitTrackWithGenFit(
 
         debug() << "─── GenFit Input ──────────────────────────────────────────────────────" << endmsg;
         debug() << "  Seed state source : "
-                << (seedState.location == edm4hep::TrackState::AtLastHit ? "AtLastHit (4-hit circle fit)" :
-                    seedState.location == edm4hep::TrackState::AtFirstHit ? "AtFirstHit (3-hit seed)" : "other")
+                << (seedState.location == edm4hep::TrackState::AtLastHit ? "circle fit" :
+                    seedState.location == edm4hep::TrackState::AtFirstHit ? "AtFirstHit" : "other")
                 << endmsg;
         debug() << "  Seed pos  (cm)    : (" << pos.X() << ", " << pos.Y() << ", " << pos.Z() << ")" << endmsg;
         debug() << "  Seed mom  (GeV/c) : (" << mom.X() << ", " << mom.Y() << ", " << mom.Z()
@@ -4199,22 +3821,20 @@ bool CombinatorialTrackFinder::fitTrackWithGenFit(
         debug() << "───────────────────────────────────────────────────────────────────────" << endmsg;
 
         genfit::Track finalGFTrack(rep, stateVec, covInit);
-        
-        // Add all seed hits to the track
+
+        // one planar measurement per hit
         for (size_t i = 0; i < hits.size(); ++i) {
             const auto& hit = hits[i];
-            
-            // Find the surface for this hit
+
             const dd4hep::rec::Surface* surface = findSurface(hit);
             if (!surface) {
                 warning() << "Could not find surface for hit " << i << endmsg;
                 continue;
             }
-            
-            // Create a new track point
+
             genfit::TrackPoint* trackPoint = new genfit::TrackPoint();
-            
-            // Store the hit index if it's from the allHits collection
+
+            // index of the hit in the input collection
             int hitIdx = -1;
             if (allHits) {
                 for (size_t j = 0; j < allHits->size(); ++j) {
@@ -4224,25 +3844,20 @@ bool CombinatorialTrackFinder::fitTrackWithGenFit(
                     }
                 }
             }
-            
-            // Create a measurement for this hit
+
             genfit::AbsMeasurement* measurement = createGenFitMeasurement(hit, surface, hitIdx, trackPoint);
             if (!measurement) {
                 warning() << "Could not create measurement for hit " << i << endmsg;
                 delete trackPoint;
                 continue;
             }
-            
-            // Add measurement to track point
+
             trackPoint->addRawMeasurement(measurement);
-            
-            // Add track point to track
             finalGFTrack.insertPoint(trackPoint);
         }
-        
-        //------------------------------------------------------------------
-        // Fit the track with GenFit (KalmanFitterRefTrack)
-        //------------------------------------------------------------------
+
+        // ── Kalman fit (KalmanFitterRefTrack); GenFit's stderr is captured to detect
+        //    Cholesky failures ──────────────────────────────────────────────────
         genfit::KalmanFitterRefTrack fitter;
         fitter.setMaxIterations(m_maxFitIterations);
         fitter.setMinIterations(3);
@@ -4253,9 +3868,7 @@ bool CombinatorialTrackFinder::fitTrackWithGenFit(
         debug() << "  Points in track   : " << finalGFTrack.getNumPoints() << endmsg;
         std::string capturedStderr;
         {
-            // Save original stderr fd
             int savedStderr = dup(STDERR_FILENO);
-            // Create a pipe to capture stderr
             int pipefd[2];
             if (pipe(pipefd) == 0) {
                 dup2(pipefd[1], STDERR_FILENO);
@@ -4263,14 +3876,13 @@ bool CombinatorialTrackFinder::fitTrackWithGenFit(
 
                 fitter.processTrack(&finalGFTrack);
 
-                // Restore stderr — flush both C and C++ stderr before restoring
+                // restore stderr
                 fflush(stderr);
                 std::cerr.flush();
                 dup2(savedStderr, STDERR_FILENO);
                 close(savedStderr);
 
-                // Read captured output
-                // Set non-blocking and drain the pipe
+                // read what GenFit printed
                 fcntl(pipefd[0], F_SETFL, O_NONBLOCK);
                 char buf[4096];
                 ssize_t n;
@@ -4280,33 +3892,18 @@ bool CombinatorialTrackFinder::fitTrackWithGenFit(
                 }
                 close(pipefd[0]);
 
-                // If anything was captured, print it at warning level
                 if (!capturedStderr.empty()) {
                     warning() << "GenFit stderr during fit: " << capturedStderr << endmsg;
                 }
             } else {
-                // pipe() failed — just run without capture
+                // no pipe: fit without capture
                 close(savedStderr);
                 fitter.processTrack(&finalGFTrack);
             }
         }
 
-        // ---- Backward fit is commented out for now ----
-        // The forward fit is sufficient for the muon system seed quality.
-        // A proper bidirectional smooth requires combining forward+backward states
-        // at each measurement site (smoothing step), which GenFit's KalmanFitterRefTrack
-        // supports via processTrackWithRep with bidir=true.  Enable when convergence is stable.
-        //
-        // genfit::Track backwardTrack = finalGFTrack;
-        // backwardTrack.reverseTrack();
-        // fitter.processTrack(&backwardTrack);
-
-        // Check fit quality
-        // processTrack() swallows ill-conditioned exceptions internally and sets isFitted=false.
-        // We detect Cholesky failures by capturing stderr during processTrack (GenFit prints to stderr).
+        // a failed fit: ill-conditioned covariance (seen in GenFit's stderr) or other
         if (!finalGFTrack.getFitStatus()->isFitted()) {
-            // Classify: ill-conditioned covariance vs other failure.
-            // The stderr output from processTrack was already captured in capturedStderr above.
             if (capturedStderr.find("ill-conditioned") != std::string::npos ||
                 capturedStderr.find("not positive definite") != std::string::npos ||
                 capturedStderr.find("TDecompChol") != std::string::npos) {
@@ -4318,8 +3915,7 @@ bool CombinatorialTrackFinder::fitTrackWithGenFit(
             }
             return false;
         }
-        
-        // Get fit quality metrics
+
         double chi2 = finalGFTrack.getFitStatus()->getChi2();
         int ndf     = finalGFTrack.getFitStatus()->getNdf();
         double chi2ndf = (ndf > 0) ? chi2 / ndf : -1.0;
@@ -4330,11 +3926,8 @@ bool CombinatorialTrackFinder::fitTrackWithGenFit(
                 << "  ndf=" << ndf
                 << "  chi2/ndf=" << chi2ndf << endmsg;
 
-        // Accumulate chi2/ndf for run statistics (store as integer × 1000 to keep atomic)
-        // Cap at chi2/ndf < 1000 to exclude numerically blown-up fits that are still
-        // flagged isFitted=true but have non-physical covariances.
-        // NOTE: GenFit chi2 is purely from position measurement residuals, NOT momentum.
-        // A huge chi2/ndf indicates the track model doesn't describe the hits well.
+        // run statistics: mean chi2/ndf (stored x 1000 as an integer), fits with
+        // chi2/ndf >= 1000 counted separately
         if (ndf > 0) {
             if (chi2ndf < 1000.0) {
                 m_statGenFitChi2Count++;
@@ -4349,11 +3942,10 @@ bool CombinatorialTrackFinder::fitTrackWithGenFit(
             }
         }
 
-        // ---- Update chi2/ndf on the EDM4hep track ----
         finalTrack.setChi2(chi2);
         finalTrack.setNdf(ndf);
 
-        // Copy hits into output collection (only if not already filled by the seed fallback path)
+        // copy the hits to the output collection
         if (finalTrack.trackerHits_size() == 0) {
             for (const auto& hit : hits) {
                 auto outHit = outputHits.create();
@@ -4361,39 +3953,25 @@ bool CombinatorialTrackFinder::fitTrackWithGenFit(
                 outHit.setEDep(hit.getEDep()); outHit.setEDepError(hit.getEDepError());
                 outHit.setPosition(hit.getPosition()); outHit.setCovMatrix(hit.getCovMatrix());
                 outHit.setDu(hit.getDu()); outHit.setDv(hit.getDv());
-                outHit.setU(hit.getU()); outHit.setV(hit.getV());  // measurement direction vectors
-                // [UV-DEBUG] disabled
+                outHit.setU(hit.getU()); outHit.setV(hit.getV());
                 propagateLink(outHit, hit);
                 finalTrack.addToTrackerHits(outHit);
             }
         }
 
-        // ----------------------------------------------------------------
-        // Save GenFit fitted states.
-        // Convention:
-        //   • AtLastHit   → N-hit WLS circle fit result (always present)
-        //   • AtOther     → GenFit fitted state at first hit
-        //
-        // We do NOT overwrite any state that was already added by the N-hit circle fit
-        // (AtLastHit is preserved).  GenFit output is saved at AtOther.
-        // Inner-propagation result will be saved at AtVertex (see propagation section below).
-        // ----------------------------------------------------------------
-
-        // Determine which locations are already occupied in this track
+        // The GenFit state at the first measurement is stored as AtOther; the helix
+        // states (AtFirstHit, AtLastHit, AtIP) are not touched.
         auto hasLocation = [&](int loc) {
             for (int j = 0; j < finalTrack.trackStates_size(); ++j)
                 if (finalTrack.getTrackStates(j).location == loc) return true;
             return false;
         };
 
-        // ---- State at first measurement ----
         if (finalGFTrack.getNumPoints() > 0) {
             try {
                 genfit::MeasuredStateOnPlane stateFirst = finalGFTrack.getFittedState(0);
-                // Save as AtOther so it does not overwrite the analytical AtLastHit state
                 edm4hep::TrackState gfFirst = convertToEDM4hepState(stateFirst,
                                                     edm4hep::TrackState::AtOther);
-                // Only add if AtOther is not yet used (inner propagation uses it later)
                 if (!hasLocation(edm4hep::TrackState::AtOther)) {
                     finalTrack.addToTrackStates(gfFirst);
                     debug() << "  Saved fitted state : AtOther (first measurement)" << endmsg;
@@ -4406,29 +3984,19 @@ bool CombinatorialTrackFinder::fitTrackWithGenFit(
             }
         }
 
-        // ---- State at last measurement ----
-        // AtLastHit is RESERVED for the 4-hit analytical circle fit (set earlier in findTracks).
-        // GenFit's fitted state at the last measurement is NOT stored here to keep the semantics
-        // clean: AtFirstHit = analytical seed, AtLastHit = 4-hit circle, AtOther = GenFit at first hit.
-        // For 3-hit tracks the last-measurement GenFit state is redundant (very close to AtOther).
-        // Only add it if the 4-hit circle fit already filled AtLastHit (i.e. it's a 4-hit track)
-        // in which case we add the GenFit last-hit state at AtOther2 — but since EDM4hep has no
-        // second AtOther slot, we simply skip it. Summary: for 3-hit tracks, no AtLastHit is stored.
+        // the GenFit state at the last measurement is not stored
         if (finalGFTrack.getNumPoints() > 1 && hasLocation(edm4hep::TrackState::AtLastHit)) {
-            // 4-hit track: AtLastHit already has the circle fit; optionally compare with GenFit last.
-            // Currently skipped — the circle fit is the preferred reference.
-            debug() << "Skipping GenFit AtLastHit add (4-hit circle fit already occupies AtLastHit)" << endmsg;
+            debug() << "GenFit state at the last hit not stored (AtLastHit holds the helix)" << endmsg;
         }
 
         debug() << "  Track states total : " << finalTrack.trackStates_size()
                 << "  hits: " << finalTrack.trackerHits_size() << endmsg;
         debug() << "───────────────────────────────────────────────────────────────────────" << endmsg;
-        
+
         return true;
-        
+
     } catch (genfit::Exception& e) {
         std::string exMsg = e.what();
-        // Distinguish ill-conditioned covariance (Cholesky failure) from other errors
         if (exMsg.find("ill-conditioned") != std::string::npos ||
             exMsg.find("not positive definite") != std::string::npos) {
             warning() << "GenFit: ill-conditioned covariance matrix (numerics): " << exMsg << endmsg;
@@ -4453,7 +4021,7 @@ bool CombinatorialTrackFinder::fitCircleNHits(
         return false;
     }
 
-    // Extract positions (mm → cm) and uncertainties
+    // positions (cm) and weights: one radial residual per hit, so one resolution (du)
     std::vector<Eigen::Vector2d> pts(N);
     std::vector<double> sigma(N), w(N);
     for (int i = 0; i < N; ++i) {
@@ -4461,14 +4029,7 @@ bool CombinatorialTrackFinder::fitCircleNHits(
         pts[i] = { pos[0] / 10.0, pos[1] / 10.0 };
         double su = hits[i].getDu();
         if (su <= 0) su = m_sigmaHitDefault.value() * 10.0;  // property is in cm, du is in mm
-        // The fit forms a single SCALAR radial residual per hit (see step 4), so the
-        // weight must be a single 1D uncertainty. Adding du and dv in quadrature here
-        // described a 2D position error and inflated sigma by up to sqrt(2) (exactly
-        // sqrt(2) when du == dv, as the muon-system digitiser produces), which deflated
-        // chi2 by a factor 2. Use the precise measurement coordinate du instead.
-        // NOTE: strictly the radial direction should be projected onto the local (u,v)
-        // axes; du is the right scale for the bending-plane residual in this geometry.
-        sigma[i] = su / 10.0;  // convert mm → cm
+        sigma[i] = su / 10.0;  // mm -> cm
         w[i]     = 1.0 / (sigma[i] * sigma[i]);
     }
 
@@ -4562,9 +4123,8 @@ bool CombinatorialTrackFinder::fitCircleNHits(
             << ") cm  R=" << radius << " cm  chi2/ndf=" << chi2ndf << endmsg;
     return true;
 }
-// Helper to get PDG code
+// PDG code of the particle hypothesis
 int CombinatorialTrackFinder::getPDGCode() const {
-    // Map particle type to PDG code
     if (m_particleType == "electron") return 11;
     else if (m_particleType == "positron") return -11;
     else if (m_particleType == "muon") return 13;
@@ -4580,8 +4140,8 @@ int CombinatorialTrackFinder::getPDGCode() const {
 // SOLENOID BOUNDARY SCAN
 // ============================================================================
 double CombinatorialTrackFinder::findSolenoidBoundary() const {
-    // Scan B_z along the +x axis (y=z=0) in 1 mm steps around the nominal radius
-    // to bracket the sign change, then binary-search for < 0.01 mm precision.
+    // Bz along +x in 1 mm steps around SolenoidRadius to bracket the sign change,
+    // then a binary search to 0.01 mm.
 
     const double nominalMm  = m_solenoidRadius.value();
     const double stepMm     = 1.0;
@@ -4652,10 +4212,7 @@ double CombinatorialTrackFinder::findSolenoidBoundary() const {
     return boundary;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Scan B_z along the z-axis (x=y=0) to find the solenoid endcap boundary.
-// Same algorithm as findSolenoidBoundary() but in z instead of R.
-// ─────────────────────────────────────────────────────────────────────────────
+// Same as findSolenoidBoundary(), along the z axis.
 double CombinatorialTrackFinder::findSolenoidBoundaryZ() const {
     const double nominalMm   = m_solenoidHalfZ.value();
     const double stepMm      = 1.0;
@@ -4739,7 +4296,7 @@ void CombinatorialTrackFinder::compareStatesWithTruth(
     const edm4hep::MCParticleCollection& mcParticles,
     int trackNumber) const {
 
-    // Find best MC particle: the one with highest pT (works for single-particle gun)
+    // MC particle with the highest pT (single-particle samples)
     const edm4hep::MCParticle* mu = nullptr;
     double bestPT2 = -1.0;
     for (const auto& p : mcParticles) {
@@ -4752,23 +4309,18 @@ void CombinatorialTrackFinder::compareStatesWithTruth(
         return;
     }
 
-    // Truth kinematics
     const auto& vtx = mu->getVertex();    // mm (EDM4hep convention)
     const auto& mom = mu->getMomentum(); // GeV/c
     double pT_true    = std::sqrt(mom.x*mom.x + mom.y*mom.y);
     double phi0_true  = std::atan2(mom.y, mom.x);
     double tanL_true  = (pT_true > 1e-9) ? mom.z / pT_true : 0.0;
-    // For a prompt muon gun vertex ≈ (0,0,0): d0_true = 0, z0_true = 0.
-    // More precisely: d0 = signed transverse displacement.
-    // For any vertex (vx, vy) and momentum direction phi:
-    //   d0_true ≈ −vx·sin(phi0) + vy·cos(phi0)  (leading-order, exact for straight tracks)
+    // straight-line d0 and z0 of the production vertex
     double d0_true_mm = -vtx.x * std::sin(phi0_true) + vtx.y * std::cos(phi0_true);
     double z0_true_mm = vtx.z;
 
-    // Inner B field at IP for omega comparison
+    // fields inside (origin) and outside (50 cm beyond the boundary) the solenoid
     double B_ip = m_field.magneticField(dd4hep::Position(0.0, 0.0, 0.0)).z() / dd4hep::tesla;
-    // Outer B field at muon system (query at solenoid boundary outward)
-    double R_outer_cm = (m_solenoidBoundaryMm / 10.0) + 50.0;   // 50 cm beyond boundary
+    double R_outer_cm = (m_solenoidBoundaryMm / 10.0) + 50.0;
     double B_outer = m_field.magneticField(dd4hep::Position(R_outer_cm, 0.0, 0.0)).z()
                      / dd4hep::tesla;
 
@@ -4799,7 +4351,7 @@ void CombinatorialTrackFinder::compareStatesWithTruth(
     // Helper: print one state row + residual row
     struct StateRow { const char* label; int loc; double B_for_pT; };
     StateRow rows[] = {
-        { "AtLastHit",    edm4hep::TrackState::AtLastHit,  B_outer },
+        { "AtFirstHit",   edm4hep::TrackState::AtFirstHit, B_outer },
         { "AtVertex(RK4)",edm4hep::TrackState::AtVertex,   B_ip    },
         { "AtIP(analyt)", edm4hep::TrackState::AtIP,       B_ip    },
     };
@@ -4850,44 +4402,53 @@ bool CombinatorialTrackFinder::isInsideSolenoid(const Eigen::Vector3d& pos) cons
     return (r < m_solenoidBoundaryMm / 10.0) && (z < SOLENOID_Z_HALF_CM);
 }
 
+// True when no hit of the track lies inside the solenoid.
+bool CombinatorialTrackFinder::allHitsOutsideSolenoid(const std::vector<edm4hep::TrackerHitPlane>& trackHits) const {
+    for (const auto& hit : trackHits) {
+        const auto& pos = hit.getPosition();
+        const Eigen::Vector3d posCm(pos[0] / 10.0, pos[1] / 10.0, pos[2] / 10.0);
+        if (isInsideSolenoid(posCm))
+            return false;
+    }
+    return true;
+}
+
 void CombinatorialTrackFinder::rk4PropagationStep(
     Eigen::Vector3d& pos,
     Eigen::Vector3d& mom,
     double stepSize,
     double chargeSign) const {
 
-    double pMagInitial = mom.norm();  // Save initial momentum magnitude
-    // kappa = 0.3/100 [GeV/c / (T·cm)] — the correct factor relating curvature to B/pT.
-    // dp/ds [GeV/c per cm] = charge * kappa * (pHat × B [T])
-    // This gives dθ/ds = 0.003*B/p [1/cm] → R = p/(0.3*B) in meters ✓
+    double pMagInitial = mom.norm();
+    // dp/ds [GeV/c per cm] = charge * 0.003 * (p_hat x B [T])
     const double kappa_factor = 0.3 / 100.0;
-    
+
     // Lambda for field at position
     auto getFieldAt = [this](const Eigen::Vector3d& r) -> double {
         dd4hep::Position ddPos(r.x(), r.y(), r.z());
         dd4hep::Direction B = m_field.magneticField(ddPos);
         return B.z() / dd4hep::tesla;
     };
-    
+
     // Lambda for derivatives dr/ds, dp/ds
     auto derivatives = [&](const Eigen::Vector3d& r, const Eigen::Vector3d& p)
         -> std::pair<Eigen::Vector3d, Eigen::Vector3d> {
-        
+
         double pMag = p.norm();
         if (pMag < 1e-12) {
             return {Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero()};
         }
-        
+
         Eigen::Vector3d pHat = p / pMag;
         double B = getFieldAt(r);
         Eigen::Vector3d B_vec(0, 0, B);
-        
+
         // dr/ds = p̂
         Eigen::Vector3d drds = pHat;
-        
+
         // dp/ds = q * kappa * (p̂ × B)  where q = ±1 particle charge
         Eigen::Vector3d dpds = chargeSign * kappa_factor * pHat.cross(B_vec);
-        
+
         return {drds, dpds};
     };
 
@@ -4896,7 +4457,7 @@ void CombinatorialTrackFinder::rk4PropagationStep(
     auto [k2r, k2p] = derivatives(pos + 0.5 * stepSize * k1r, mom + 0.5 * stepSize * k1p);
     auto [k3r, k3p] = derivatives(pos + 0.5 * stepSize * k2r, mom + 0.5 * stepSize * k2p);
     auto [k4r, k4p] = derivatives(pos + stepSize * k3r, mom + stepSize * k3p);
-    
+
     // Update state
     pos += (stepSize / 6.0) * (k1r + 2.0*k2r + 2.0*k3r + k4r);
     mom += (stepSize / 6.0) * (k1p + 2.0*k2p + 2.0*k3p + k4p);
@@ -4974,42 +4535,36 @@ InnerTrajectory CombinatorialTrackFinder::propagateToInner(
 const edm4hep::MCParticle* CombinatorialTrackFinder::findTruthParticle(
     const edm4hep::Track& recoTrack,
     const edm4hep::MCParticleCollection& mcParticles) const {
-    
+
     if (recoTrack.trackerHits_size() == 0) {
         debug() << "Track has no hits - cannot find truth" << endmsg;
         return nullptr;
     }
-    
-    // Count which MCParticle appears most in the track hits
+
+    // Rough match without sim links: MC particle whose production vertex is within
+    // 50 cm of most hits.
     std::map<const edm4hep::MCParticle*, int> hitCounts;
-    
+
     for (int i = 0; i < recoTrack.trackerHits_size(); ++i) {
         const auto& hit = recoTrack.getTrackerHits(i);
-        
-        // For each MCParticle, check if it could have created this hit
-        // (This is a simple matching - in reality, you'd use SimTrackerHit links)
+
         for (const auto& mcPart : mcParticles) {
-            // Get truth vertex and momentum
             const auto& vertex = mcPart.getVertex();
             const auto& momentum = mcPart.getMomentum();
-            
-            // Check if this particle's trajectory passes near this hit
-            // Simple check: does hit lie roughly on particle's path?
+
             const auto& hitPos = hit.getPosition();
             double dist = std::sqrt(
                 (hitPos[0]/10.0 - vertex.x) * (hitPos[0]/10.0 - vertex.x) +
                 (hitPos[1]/10.0 - vertex.y) * (hitPos[1]/10.0 - vertex.y) +
                 (hitPos[2]/10.0 - vertex.z) * (hitPos[2]/10.0 - vertex.z)
             );
-            
-            // If hit is within 50cm of vertex, count it (rough association)
+
             if (dist < 50.0) {
                 hitCounts[&mcPart]++;
             }
         }
     }
-    
-    // Find MCParticle with most hits
+
     const edm4hep::MCParticle* bestMatch = nullptr;
     int maxHits = 0;
     for (const auto& [particle, count] : hitCounts) {
@@ -5018,16 +4573,16 @@ const edm4hep::MCParticle* CombinatorialTrackFinder::findTruthParticle(
             bestMatch = particle;
         }
     }
-    
+
     if (bestMatch && maxHits > 0) {
-        info() << "Truth match: " << maxHits << " / " << recoTrack.trackerHits_size() 
-               << " hits matched to MCParticle with momentum " 
+        info() << "Truth match: " << maxHits << " / " << recoTrack.trackerHits_size()
+               << " hits matched to MCParticle with momentum "
                << std::sqrt(bestMatch->getMomentum().x * bestMatch->getMomentum().x +
                            bestMatch->getMomentum().y * bestMatch->getMomentum().y +
                            bestMatch->getMomentum().z * bestMatch->getMomentum().z)
                << " GeV/c" << endmsg;
     }
-    
+
     return bestMatch;
 }
 
@@ -5035,28 +4590,28 @@ void CombinatorialTrackFinder::validateTrackWithTruth(
     const edm4hep::Track& recoTrack,
     const edm4hep::MCParticleCollection& mcParticles,
     int trackNumber) const {
-    
+
     // Find truth match
     const auto* truthParticle = findTruthParticle(recoTrack, mcParticles);
     if (!truthParticle) {
         debug() << "No truth match found for track " << trackNumber << endmsg;
         return;
     }
-    
+
     // Get truth information
     const auto& truthVertex = truthParticle->getVertex();
     const auto& truthMom = truthParticle->getMomentum();
-    
+
     double truthMomMag = std::sqrt(
         truthMom.x * truthMom.x +
         truthMom.y * truthMom.y +
         truthMom.z * truthMom.z
     );
-    
-    // Get reconstructed state (AtFirstHit for outer, AtOther for inner)
+
+    // AtFirstHit state and, if present, the GenFit state (AtOther)
     edm4hep::TrackState recoState;
     bool foundOuter = false, foundInner = false;
-    
+
     for (int i = 0; i < recoTrack.trackStates_size(); ++i) {
         auto st = recoTrack.getTrackStates(i);
         if (st.location == edm4hep::TrackState::AtFirstHit) {
@@ -5065,7 +4620,7 @@ void CombinatorialTrackFinder::validateTrackWithTruth(
             break;
         }
     }
-    
+
     edm4hep::TrackState innerState;
     for (int i = 0; i < recoTrack.trackStates_size(); ++i) {
         auto st = recoTrack.getTrackStates(i);
@@ -5075,17 +4630,17 @@ void CombinatorialTrackFinder::validateTrackWithTruth(
             break;
         }
     }
-    
+
     // Extract reconstructed position and momentum
     double d0 = recoState.D0 / 10.0;  // mm to cm
     double phi = recoState.phi;
-    
+
     Eigen::Vector3d recoPos(
         d0 * std::cos(phi),
         d0 * std::sin(phi),
         recoState.Z0 / 10.0
     );
-    
+
     // Calculate reconstructed momentum magnitude
     double omega = recoState.omega * 10.0;  // 1/mm to 1/cm
     double radius = 1.0 / std::abs(omega);
@@ -5093,28 +4648,28 @@ void CombinatorialTrackFinder::validateTrackWithTruth(
     double bField = m_field.magneticField(fieldPos).z() / dd4hep::tesla;
     double lambda = std::atan(recoState.tanLambda);
     double recoMomMag = 0.3 * std::abs(bField) * radius / (100.0 * std::cos(lambda));
-    
+
     // Calculate residuals
     double deltaX = recoPos.x() - truthVertex.x;
     double deltaY = recoPos.y() - truthVertex.y;
     double deltaZ = recoPos.z() - truthVertex.z;
     double deltaRxy = std::sqrt(deltaX*deltaX + deltaY*deltaY);
-    
+
     double deltaMom = std::abs(recoMomMag - truthMomMag);
     double momResolution = (truthMomMag > 0) ? deltaMom / truthMomMag : 0;
-    
+
     // Log comparison
     info() << "\n=== TRUTH COMPARISON (Track " << trackNumber << ") ===" << endmsg;
-    info() << "Truth vertex: (" << truthVertex.x << ", " 
+    info() << "Truth vertex: (" << truthVertex.x << ", "
            << truthVertex.y << ", " << truthVertex.z << ") cm" << endmsg;
-    info() << "Reco position (outer): (" << recoPos.x() << ", " 
+    info() << "Reco position (outer): (" << recoPos.x() << ", "
            << recoPos.y() << ", " << recoPos.z() << ") cm" << endmsg;
     info() << "Position error: ΔR_xy=" << deltaRxy << " cm, ΔZ=" << deltaZ << " cm" << endmsg;
-    
+
     info() << "Truth momentum: " << truthMomMag << " GeV/c" << endmsg;
     info() << "Reco momentum (outer): " << recoMomMag << " GeV/c" << endmsg;
     info() << "Momentum resolution: " << momResolution * 100.0 << "%" << endmsg;
-    
+
     // Check curvature flip if inner exists
     if (foundInner) {
         double omegaInner = innerState.omega * 10.0;
@@ -5128,6 +4683,6 @@ void CombinatorialTrackFinder::validateTrackWithTruth(
             }
         }
     }
-    
+
     info() << "\n";
 }

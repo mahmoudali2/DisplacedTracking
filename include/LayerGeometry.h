@@ -1,15 +1,10 @@
 // LayerGeometry — where each composite layer actually is.
 //
-// CombinatorialTrackFinder groups surfaces by compositeID, but nothing downstream knew a
-// layer's radius or z: the only ordering was the integer `layer` field, under which barrel
-// layer 2, +endcap layer 2 and -endcap layer 2 are indistinguishable. Extrapolating a seed
-// to "the next layer" needs real geometry, so this class aggregates the DD4hep surfaces of
-// each composite layer into a bounding cylinder (barrel) or annulus (endcap disk).
+// The DD4hep surfaces of each composite layer are combined into a bounding cylinder (barrel)
+// or annulus (endcap disk), so that a seed can be extrapolated to "the next layer".
 //
-// Barrel vs endcap is decided from the surface normals, NOT from the compositeID: the
-// `100*system + layer` encoding classifies any system ID >= 10 as an endcap (this bit the
-// CLD-in-IDEA hybrid, whose outer-tracker IDs were once 23/24). The cid-based answer is
-// kept alongside so disagreements are visible.
+// Barrel vs endcap is decided from the surface normals, not from the compositeID (whose
+// range test fails for system IDs >= 10); the cid-based answer is kept to show disagreements.
 //
 // Units: cm (DD4hep internal), like every other geometric quantity in the component.
 #ifndef TRACKING_LAYERGEOMETRY_H

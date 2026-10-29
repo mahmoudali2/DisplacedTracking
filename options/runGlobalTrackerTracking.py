@@ -1,15 +1,7 @@
-# Vertex (barrel + endcap) + Si wrapper (barrel + disks)
-#
-# CombinatorialTrackFinder on the GLOBAL TRACKER readout of IDEA_o1_v04.
-# Pattern recognition AND fitting run in ONE pass over all input subdetectors:
-# MergeTrackerHitPlanes combines their hit and reco->sim link collections first,
-# so a track crossing several subdetectors is found as a single track.
-#
-# Readout differences vs the muon system:
-#   muon   : system:5,type:-2,layer:2,chamber:13,slice:1,y:-10,z:-10
-#   global : system:5,side:-2,layer:5,module:12,sensor:8
-# "type" and "side" are both signed 2-bit with the same 0/+1/-1 barrel/+endcap/
-# -endcap meaning, so only the NAME differs -> RegionFieldName.
+# CombinatorialTrackFinder on an inner tracker: IDEA_o1_v04 vertex detector (barrel + disks)
+# and silicon wrapper (barrel + disks), which share the GlobalTrackerReadoutID readout.
+# MergeTrackerHitPlanes first combines their hit and reco->sim link collections, so a
+# track crossing several subdetectors is found as one track.
 import os
 from Gaudi.Configuration import INFO
 from k4FWCore import ApplicationMgr, IOSvc
@@ -30,24 +22,28 @@ merge.OutputRecoSimLinkCollection = ["GlobalTrackerHitSimLinks"]
 merge.OutputLevel = INFO
 
 t = CombinatorialTrackFinder()
-# -- readout adoption ---------------------------------------------------------
+# -- readout -------------------------------------------------------------------
 t.EncodingStringParameterName = "GlobalTrackerReadoutID"
-t.RegionFieldName = "side"          # "type" for MuonSystemReadoutID
+t.RegionFieldName = "side"          # barrel / endcap field of this readout
 t.LayerFieldName  = "layer"
 t.DetectorNames   = ["Vertex", "SiWrB", "SiWrD"]        # surface maps of all contributing DetElements
-t.UseSystemInCompositeID = 1        # else VTXB layer 0 and SiWrB layer 0 collide
+t.UseSystemInCompositeID = 1        # several subdetectors share the readout
 t.ParticleType    = "muon"
 t.OutputLevel     = INFO
 
 t.UseGenFit          = False
-t.DoInnerPropagation = False        # hits are already inside the solenoid
+t.DoInnerPropagation = False        # hits are inside the solenoid
 
-# -- detector-scale retuning (vertex is um-scale, the muon system is m-scale) --
+# -- stored track states: the fitted helix AtFirstHit and AtLastHit, plus AtIP ----
+t.IPStateMode        = "Helix"      # uniform field: the same helix at its closest approach to the origin
+t.StoreLastHitState  = True
+
+# -- scale of a silicon tracker ---------------------------------------------------
 t.SigmaHitDefault           = 0.0003   # cm; per-hit du/dv from the digitiser wins
 t.MaxPairHitDistance        = 400.0    # cm; wrapper disks reach |z| ~ 2.3 m
 t.MaxConsecutiveHitDistance = -1
 t.NeighbourTrackMaxDist     = 1.0
-t.PairCoincidenceMaxDistMM  = 20.0     # 250 mm is muon-scale, meaningless here
+t.PairCoincidenceMaxDistMM  = 20.0
 
 t.MinTrackHits          = 3
 t.MinLayerSpan          = 3
@@ -58,7 +54,7 @@ t.OutlierSigma          = 5.0
 t.MaxOutlierIterations  = 10
 t.MaxHitsPerCompositeID = 0
 t.MaxHitEdepKeV         = 0
-t.MaxConsecDeltaPhi     = -1           # road cuts are tuned for muon radii
+t.MaxConsecDeltaPhi     = -1           # no phi road cuts
 t.MaxComboPhiSpread     = -1
 
 t.InputHitCollection          = ["GlobalTrackerHits"]

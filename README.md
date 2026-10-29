@@ -1,126 +1,91 @@
-# CombinatorialTrackFinder (standalone)
+# CombinatorialTrackFinder
 
-A Gaudi/Key4hep algorithm that reconstructs tracks from the hits of a single tracking
-system, without needing hits from any other sub-detector. It was written for the IDEA
-muon system at FCC-ee, where muons from long-lived particle decays (e.g. HNL → μμ, decay
-vertex at O(1–5 m)) leave hits only in the muon chambers. The same code runs on silicon
-readouts (IDEA vertex + Si wrapper, CLD-like inner tracker) for prompt and displaced
-tracks.
+A Gaudi algorithm for Key4hep that finds tracks in the planar hits of one tracking system
+(an inner tracker, a silicon wrapper, a muon system, ...) without using any other detector.
+It is built for displaced tracks, for example from long-lived particle decays, so it never
+assumes that a track comes from the interaction point. The detector, field and cuts are set
+in the steering file.
 
-This repository is the standalone build of the component. The same sources live in
-k4RecTracker under `Tracking/`, where the component was first called
-`StandaloneMuonTracking`. The older `DisplacedTracking` component that used to be here was
-replaced by it. That version is still in the git history (commit `8a9cb10` and earlier).
+## How it works
 
-## Algorithm overview
+1. The hits are grouped by layer (barrel and endcap layers, from the cellID).
+2. Track candidates are found with one of two strategies (`Strategy`):
+   - `Exhaustive`: every combination of k hits on k different layers is fitted (a circle
+     in xy, a line of z versus arc length). Good for sparse events.
+   - `SeedAndExtend`: seeds of 3 to 5 hits on neighbouring layers are extended layer by
+     layer along their helix. Good for dense events. With `SeedAndExtendMode = BestFirst`,
+     the best seeds go first, take their hits and are judged with a kink χ² that includes
+     multiple scattering.
+3. Road, outlier and quality cuts remove wrong combinations. The best candidate becomes a
+   track, its hits are removed, and the search repeats.
+4. Each track stores its fitted helix as EDM4hep track states (below). A GenFit fit can be
+   added (`UseGenFit`).
 
-The `Strategy` property chooses how candidates are found:
+## Track states
 
-* **`Exhaustive`** (default): N-hit combinatorics. Hits are grouped per layer, k-hit
-  combinations are formed for k from `MaxCombinatorialHits` down to `MinTrackHits`, and
-  each one is tested with a weighted circle fit plus an sz line fit. Road cuts in φ,
-  distance and tanλ keep the search small. Outliers are then removed and a neighbour-track
-  check is applied. This mode works well on sparse muon-system events but scales as C(N,k),
-  so it is not usable on dense silicon events.
-* **`SeedAndExtend`**: forms triplet seeds on the inner layers (`SeedFinder`) and extends
-  them layer by layer with an analytic helix (`HelixExtrapolator`) through the layer
-  geometry read from DD4hep (`LayerGeometry`). `SeedAndExtendMode` selects one of two
-  variants:
-  * `Classic`: all seeds are built first, then extended.
-  * `BestFirst`: seeds are taken in order of best kink-χ² first and claim their hits at
-    once. The kink χ² accounts for multiple scattering, using the per-layer x/X0 measured
-    from the DD4hep material (`TrackQuality`). This mode adds a confirmation pass, merges
-    track pieces, flags loopers and checks short tracks for holes and minimum pT.
-    `SeedPasses` (e.g. `[4, 3]`) runs iterative passes with fewer seed hits each time.
+| Location | What it is | When |
+|---|---|---|
+| `AtFirstHit` | the fitted helix at the innermost hit (`referencePoint` = that hit) | always |
+| `AtLastHit` | the same helix at the outermost hit | `StoreLastHitState = true` (default) |
+| `AtIP` | the track at its closest approach to the origin | `IPStateMode` (below) |
+| `AtOther` | GenFit fit at the first hit | `UseGenFit = true` |
 
-The found tracks can then be refitted with GenFit (Kalman/DAF, with DD4hep field and
-material through `GenfitField` / `GenfitMaterialInterface`). With `DoInnerPropagation`,
-tracks are propagated inward through the solenoid boundary, either analytically or with
-RK4 steps.
+All states follow the EDM4hep convention: the five parameters are relative to the
+`referencePoint`, the track moves outward, and `omega > 0` means clockwise seen from +z.
 
-`MergeTrackerHitPlanes` is a small helper. It concatenates several hit collections and
-their reco→sim link collections, for example vertex barrel/disk + SiWrB/SiWrD, into one
-collection that a single `CombinatorialTrackFinder` instance can read.
+`IPStateMode` says whether, and how, an `AtIP` state is made. The track is never forced to
+come from the IP. The state only describes it at the point closest to the origin.
 
-## Layout
-
-```
-components/CombinatorialTrackFinder.{h,cpp}   Gaudi algorithm
-components/MergeTrackerHitPlanes.cpp          hit-collection merger
-include/, src/
-  TrackingPrimitives                          circle/helix fit primitives, hit helpers
-  LayerGeometry                               layer surfaces + per-layer material from DD4hep
-  HelixExtrapolator                           analytic helix–layer crossings
-  SeedFinder                                  triplet seeding, seed-and-extend
-  TrackQuality                                multiple-scattering-aware kink chi2
-  genfit_interfaces/GenfitField, GenfitMaterialInterface   DD4hep → GenFit adapters
-test/testHelixExtrapolator, test/testTrackQuality          standalone unit tests (ctest)
-options/runCombinatorialTrackFinder.py        muon-system steering example
-options/runGlobalTrackerTracking.py           IDEA vertex + Si wrapper example (with merger)
-```
-
-## Dependencies
-
-* Key4hep stack: DD4hep, EDM4hep, Gaudi, k4FWCore, podio, ROOT, Eigen3
-* GenFit2. `cmake/FindGenFit.cmake` looks for it on `CMAKE_PREFIX_PATH`, then through the
-  environment hints `GENFIT_INSTALL_DIR` (install prefix) or `GENFIT_INC` / `GENFIT_LIB`
-  (include directory / full library path).
-
-Some recent nightlies (e.g. 2026-10-01) do not ship GenFit. In that case take it from an
-older release and pass it through the hints. `env1001.sh` in the parent directory does this.
+| `IPStateMode` | Use |
+|---|---|
+| `None` (default) | no `AtIP` state |
+| `Helix` | the same helix at its closest approach to the origin. For tracks in a uniform field (inner trackers). |
+| `SolenoidCrossing` | the helix is followed back to the solenoid boundary and matched there to a helix in the inner field. For tracks measured outside the solenoid (muon system). |
 
 ## Build
 
 ```bash
-source /cvmfs/sw-nightlies.hsf.org/key4hep/setup.sh   # or env1001.sh
-cmake -S . -B build -DCMAKE_INSTALL_PREFIX=install
-cmake --build build -j16 --target install
-(cd build && ctest --output-on-failure)               # unit tests
+source /cvmfs/sw-nightlies.hsf.org/key4hep/setup.sh
+cmake -S . -B build -DCMAKE_INSTALL_PREFIX=$PWD/install
+cmake --build build -j8 --target install
+(cd build && ctest)          # unit tests of the helix extrapolation and the kink chi2
 ```
 
-## Running
+GenFit is found on `CMAKE_PREFIX_PATH` or through `GENFIT_INSTALL_DIR`, or through
+`GENFIT_INC` / `GENFIT_LIB` (see `cmake/FindGenFit.cmake`).
+
+## Set up (in every new shell)
 
 ```bash
-source /cvmfs/sw-nightlies.hsf.org/key4hep/setup.sh   # same environment as the build
-source setup.sh                                        # puts install/ on LD_LIBRARY_PATH / PYTHONPATH
-k4run options/runCombinatorialTrackFinder.py
+source /cvmfs/sw-nightlies.hsf.org/key4hep/setup.sh
+export LD_LIBRARY_PATH=<path to>/install/lib64:$LD_LIBRARY_PATH
+export PYTHONPATH=<path to>/install/python:$PYTHONPATH
 ```
 
-The compact in `GeoSvc` **must** match the geometry the input file was digitised with.
-With the wrong compact the job still runs, but every step after pattern recognition goes
-wrong.
+## Run
 
-## Main configuration parameters
+```bash
+k4run options/runGlobalTrackerTracking.py
+```
 
-| Parameter | Default | Description |
-|---|---|---|
-| `DetectorName` / `DetectorNames` | `"Tracker"` / `[]` | DetElement(s) whose surfaces are used; list several when they share one readout |
-| `EncodingStringParameterName` | `"GlobalTrackerReadoutID"` | readout whose cellID encoding is decoded |
-| `RegionFieldName`, `LayerFieldName` | `"type"`, `"layer"` | cellID field names (`"side"` for GlobalTrackerReadoutID) |
-| `UseSystemInCompositeID` | `-1` | fold `system` into the layer key (-1 = auto when several detectors are used) |
-| `Strategy` | `"Exhaustive"` | `Exhaustive` or `SeedAndExtend` |
-| `SeedAndExtendMode` | `"Classic"` | `Classic` or `BestFirst` |
-| `NumSeedLayers`, `SeedPasses` | `3`, `[]` | seed size; iterative passes (e.g. `[4, 3]`) |
-| `SeedMaxDeltaPhi`, `SeedMaxHitDistance` | `0.3`, `100.0` | seed road cuts (displaced tracks need loose φ) |
-| `MaxMissedLayers`, `ExtensionWindow` | `1`, `1.0` | extension tolerance |
-| `ShortTrackMaxHits`, `ShortTrackMinPt` | `4`, `0.0` | rules for short tracks; the minimum pT removes most random triplets |
-| `MinTrackHits`, `MaxCombinatorialHits` | `3`, `7` | k range of the exhaustive search |
-| `NHitMaxChi2NDF` | `5.0` | χ²/ndf cut on the N-hit fit |
-| `UseGenFit`, `MaxFitIterations` | `true`, `4` | GenFit refit |
-| `ParticleType` | `"pion"` | mass hypothesis for material effects |
-| `DoInnerPropagation`, `DoAnalyticalPropagation` | `false`, `true` | inward propagation through the solenoid |
+| Steering | Detector |
+|---|---|
+| `runGlobalTrackerTracking.py` | IDEA vertex detector + silicon wrapper, merged with `MergeTrackerHitPlanes`; `IPStateMode = Helix` |
+| `runMuonSystemTracking.py` | IDEA muon system, settings of the HNL muon-system studies; input, output and compact on the command line; `IPStateMode = SolenoidCrossing` |
+| `runCombinatorialTrackFinder.py` | IDEA muon system, fixed example files; `IPStateMode = SolenoidCrossing` |
 
-The header `components/CombinatorialTrackFinder.h` documents every property.
+The geometry compact in the steering must be the one the input file was digitised with.
+Every property is documented in `components/CombinatorialTrackFinder.h`.
 
-## Input / output collections
+## Files
 
-| Property | Type | Example |
-|---|---|---|
-| `InputHitCollection` | `TrackerHitPlaneCollection` | `MSTrackerHits` |
-| `InputRecoSimLinkCollection` | `TrackerHitSimTrackerHitLinkCollection` | `MSTrackerHitRelations` |
-| `OutputTrackCollection` | `TrackCollection` | `StandaloneMuonTracks` |
-| `OutputHitCollection` | `TrackerHitPlaneCollection` | `StandaloneMuonTrackHits` |
-| `OutputRecoSimLinkCollection` | `TrackerHitSimTrackerHitLinkCollection` | `StandaloneMuonTrackHitSimLinks` |
+| File | Content |
+|---|---|
+| `components/CombinatorialTrackFinder.{h,cpp}` | the algorithm |
+| `components/MergeTrackerHitPlanes.cpp` | merges hit collections of several subdetectors |
+| `src/`, `include/` | circle and helix tools, layer geometry, seed finder, kink χ², DD4hep field and material for GenFit |
+| `test/` | unit tests |
+| `options/` | example steering files |
 
 ## Author
 

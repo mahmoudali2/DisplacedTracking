@@ -1,10 +1,5 @@
-// HelixExtrapolator — forward/backward propagation of a circle+linear-z helix to layers.
-//
-// The only intersection code in CombinatorialTrackFinder before this was inside
-// analyticalInnerPropagation(): hardwired to the solenoid radius, backward-only, and
-// mutating the track. A seed-and-extend strategy needs the general case: from a fitted
-// seed, where does the trajectory next cross a barrel cylinder, an endcap disk, or one
-// specific sensor plane?
+// HelixExtrapolator — forward/backward propagation of a circle+linear-z helix to layers:
+// where does a fitted seed next cross a barrel cylinder, an endcap disk, or one sensor plane?
 //
 // The helix is defined GEOMETRICALLY, without charge or field sign: a circle (cx, cy, R),
 // the rotation sense `rot` of travel about its centre (taken from the hit order), and

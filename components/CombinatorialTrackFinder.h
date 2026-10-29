@@ -9,7 +9,7 @@
 #include <memory>
 #include <utility>
 
-// POSIX headers for stderr capture (GenFit Cholesky failure detection)
+// stderr capture (detects GenFit Cholesky failures)
 #include <unistd.h>
 #include <fcntl.h>
 
@@ -30,7 +30,6 @@
 
 #include "k4FWCore/DataHandle.h"
 #include "k4FWCore/Transformer.h"
-//#include "k4FWCore/MultiTransformer.h"
 #include "k4Interface/IUniqueIDGenSvc.h"
 
 // EDM4hep includes
@@ -48,7 +47,6 @@
 #include "TrackCand.h"
 #include "AbsTrackRep.h"
 #include "RKTrackRep.h"
-//#include "GeaneTrackRep.h"
 #include "KalmanFitter.h"
 #include "KalmanFitterRefTrack.h"
 #include <DAF.h>
@@ -67,7 +65,7 @@
 #include <atomic>
 #include <iomanip>
 
-// Reuse the field/material GenFit adapters already provided by k4RecTracker's Tracking module
+// DD4hep field and material for GenFit
 #include "GenfitField.h"
 #include "GenfitMaterialInterface.h"
 
@@ -85,24 +83,19 @@ namespace Eigen {
     typedef Matrix<double, 5, 5> Matrix5d;
 }
 
-/**
- * Particle properties struct
- */
+// Mass and charge of the particle hypothesis used for material effects.
 struct ParticleProperties {
     double mass;          // Mass in GeV
     double charge;        // Charge in e
     std::string name;     // Particle name
 
-    // Add a default constructor
     ParticleProperties() : mass(0), charge(0), name("unknown") {}
 
     ParticleProperties(double m, double q, const std::string& n)
         : mass(m), charge(q), name(n) {}
 };
 
-/**
- * Result of inner solenoid propagation
- */
+// Result of the RK4 inner propagation.
 struct InnerTrajectory {
     bool success;
     Eigen::Vector3d finalPosition;      // cm
@@ -114,19 +107,28 @@ struct InnerTrajectory {
 
 /** @class CombinatorialTrackFinder
  *
- *  Standalone pattern-recognition and track fitter for the IDEA Muon-System,
- *  implemented as a Key4hep Gaudi MultiTransformer.
+ *  Track finding on the planar hits of one tracking system (inner tracker, silicon
+ *  wrapper, muon system, ...), with no input from other detectors.
  *
- *  Reconstructs tracks directly from Muon-System tracker hits via an N-hit
- *  combinatorial circle-fit search (with configurable quality/outlier/road
- *  cuts), optionally refining the result with a GenFit Kalman/DAF fit and
- *  analytical or RK4 propagation of the track inward through the solenoid
- *  boundary.
+ *  How it works, per event:
+ *   1. Hits are grouped by layer (barrel / endcap layers from the cellID).
+ *   2. Track candidates are found either
+ *        - Exhaustive: all k-hit combinations over the layers, each tested with a
+ *          circle fit in xy and a line fit of z versus arc length, or
+ *        - SeedAndExtend: 3-5 hit seeds on neighbouring layers, extended layer by
+ *          layer with a helix (BestFirst: best seeds first, kink chi2 with multiple
+ *          scattering, hits claimed as tracks are accepted).
+ *      Road, outlier and quality cuts reject wrong combinations.
+ *   3. The best candidate is stored as a track; its hits are removed and the search
+ *      repeats until no candidate is left.
+ *   4. Each track stores the fitted helix as EDM4hep track states: AtFirstHit and
+ *      AtLastHit, optionally AtIP (IPStateMode). Optional: a GenFit fit (UseGenFit,
+ *      state AtOther).
  *
  *  @author Mahmoud Althakeel
  *  @email  mahmoud.althakeel@cern.ch
  */
-// Convenience alias for the link-propagation callback
+// Callback that copies the reco->sim link of an input hit to its output copy
 using LinkPropagator = std::function<void(const edm4hep::MutableTrackerHitPlane&, const edm4hep::TrackerHitPlane&)>;
 
 class CombinatorialTrackFinder final
@@ -152,7 +154,7 @@ public:
         const edm4hep::EventHeaderCollection& headers,
         const edm4hep::TrackerHitSimTrackerHitLinkCollection& recoSimLinks) const override;
     
-    // Make sure findTracks is const
+    // Pattern recognition and track building for one event
     void findTracks(
                             const edm4hep::TrackerHitPlaneCollection* hits,
                             edm4hep::TrackCollection& outputTracks,
@@ -163,19 +165,19 @@ public:
                             bool& evtUsedPtInner2,
                             bool& evtUsedPtFallback) const;
 
-    // Find surface for a hit
+    // Detector surface of a hit
     const dd4hep::rec::Surface* findSurface(const edm4hep::TrackerHitPlane& hit) const;
     
 private:
-    // Helper method to find surface for a given cell ID
+    // Detector surface of a cellID
     const dd4hep::rec::Surface* findSurfaceByID(uint64_t cellID) const;
     // Extract type ID from cell ID
     int getTypeID(uint64_t cellID) const;
     // Extract layer ID from cell ID
     int getLayerID(uint64_t cellID) const;
-    // Compute composite layer ID: barrel->layerID, +endcap->1000+layerID, -endcap->-1000-layerID
+    // Layer key: barrel -> layer, +endcap -> 1000 + layer, -endcap -> -1000 - layer
     int getCompositeID(uint64_t cellID) const;
-    // Get PT
+    // pT from omega, with the field at the state's reference point
     double getPT(const edm4hep::TrackState& state) const;
 
     // Create a track state with the given parameters
@@ -186,16 +188,15 @@ private:
     // Group surfaces by detector layer
     std::map<int, std::vector<const dd4hep::rec::Surface*>> getSurfacesByLayer() const;
 
-    // Fit circle to N≥3 hits using weighted least-squares + Gauss-Newton refinement.
-    // fitCov3x3 is the 3×3 covariance on [x0,y0,R] (cm²).
-    // residualsCm returns the per-hit geometric residual (cm) — used for outlier rejection.
-    // Returns false if the fit is degenerate or NDF<1.
+    // Circle fit to N >= 3 hits (weighted least squares + Gauss-Newton).
+    // fitCov3x3: covariance of (x0, y0, R) in cm^2; residualsCm: per-hit residual (cm).
+    // Returns false if the fit is degenerate.
     bool fitCircleNHits(const std::vector<edm4hep::TrackerHitPlane>& hits,
                         double& x0, double& y0, double& radius, double& chi2ndf,
                         Eigen::Matrix3d& fitCov3x3,
                         std::vector<double>& residualsCm) const;
 
-    // fitTrackWithGenFit with extrapolation support
+    // GenFit fit of the track hits, seeded by seedState; adds the fitted state (AtOther)
     bool fitTrackWithGenFit(
         const std::vector<edm4hep::TrackerHitPlane>& hits,
         const edm4hep::TrackState& seedState,
@@ -221,29 +222,24 @@ private:
         int hitId,
         genfit::TrackPoint* trackPoint) const;
 
-    // Field and material adapters (shared GenFit interfaces from Tracking/include/genfit_interfaces)
+    // DD4hep field and material for GenFit
     std::unique_ptr<GenfitInterface::GenfitField> m_genFitField;
     GenfitInterface::GenfitMaterialInterface* m_genFitMaterial{nullptr}; // singleton, not owned
     
-    // ==================== TRUTH MATCHING ====================
-    // Data handle for truth information - use mutable to allow get() in const methods
+    // ==================== TRUTH (diagnostic printouts only) ====================
     mutable k4FWCore::DataHandle<edm4hep::MCParticleCollection> m_mcParticles{
         "MCParticles", Gaudi::DataHandle::Reader, this};
 
-    // Helper method for truth matching
     const edm4hep::MCParticle* findTruthParticle(
         const edm4hep::Track& recoTrack,
         const edm4hep::MCParticleCollection& mcParticles) const;
 
-    // Validate track against truth
     void validateTrackWithTruth(
         const edm4hep::Track& recoTrack,
         const edm4hep::MCParticleCollection& mcParticles,
         int trackNumber) const;
-    // ==================== INNER SOLENOID PROPAGATION ====================
-    /**
-     * Propagate outer track inward to solenoid using RK4
-     */
+    // ==================== PROPAGATION THROUGH THE SOLENOID ====================
+    // RK4 propagation of a track measured outside the solenoid, inward
     InnerTrajectory propagateToInner(
         const Eigen::Vector3d& outerPos,    // Starting position in cm
         const Eigen::Vector3d& outerMom,    // Starting momentum in GeV/c
@@ -251,14 +247,10 @@ private:
         double chargeSign   = 1.0           // +1 or -1 particle charge sign
     ) const;
 
-    /**
-     * Check if position is inside solenoid boundary
-     */
     bool isInsideSolenoid(const Eigen::Vector3d& pos) const;
+    bool allHitsOutsideSolenoid(const std::vector<edm4hep::TrackerHitPlane>& trackHits) const;
 
-    /**
-     * Single RK4 propagation step
-     */
+    // One RK4 step
     void rk4PropagationStep(
         Eigen::Vector3d& pos,      // Position (modified in place)
         Eigen::Vector3d& mom,      // Momentum (modified in place)
@@ -266,21 +258,10 @@ private:
         double chargeSign = 1.0    // +1 or -1 particle charge sign
     ) const;
 
-    /**
-     * Analytical two-segment inner propagation.
-     * Uses the outer circle (cx_o, cy_o, R_outer) and the field-reversal geometry
-     * to construct the inner helix and save it as TrackState::AtIP.
-     *
-     * Parameters (all in cm unless noted):
-     *   cx_o, cy_o, R_outer  – outer circle center and radius
-     *   omega_outer_mm       – outer omega (1/mm, sign encodes curvature direction)
-     *   pT_GeV               – transverse momentum (GeV/c, conserved across boundary)
-     *   tanLambda            – dz/d(arc length), conserved
-     *   x_ref, y_ref, z_ref  – innermost muon-system hit (cm); used for intersection
-     *                          selection and z anchor
-     *   finalTrack           – track to which the AtIP state is appended
-     * Returns true on success.
-     */
+    // IPStateMode = SolenoidCrossing: the outer circle (centre, radius in cm) is matched
+    // at the solenoid boundary to an inner helix with the inner field, which is stored as
+    // AtIP. pT and tanLambda are kept across the boundary; the innermost hit (cm) selects
+    // the crossing point and anchors z. Returns true on success.
     bool analyticalInnerPropagation(
         double cx_o_cm, double cy_o_cm, double R_outer_cm,
         double omega_outer_mm,
@@ -290,38 +271,24 @@ private:
         bool   isEndcap,             // true = endcap hit → use z-cap crossing
         edm4hep::MutableTrack& finalTrack) const;
 
-    /**
-     * Scan B_z radially to locate the exact solenoid boundary (sign-change radius).
-     * Starts from the SolenoidRadius property, walks in 1-mm steps to bracket the
-     * zero, then binary-searches to < 0.01 mm precision.
-     * Returns the boundary radius in mm.
-     */
+    // Radius (mm) where Bz changes sign, searched around SolenoidRadius
     double findSolenoidBoundary() const;
 
-    /**
-     * Scan B_z along the z-axis (x=y=0) to locate the exact solenoid endcap
-     * boundary (sign-change |z|). Starts from SolenoidHalfZ property, same
-     * algorithm as findSolenoidBoundary(). Returns the half-length in mm.
-     */
+    // |z| (mm) on the axis where Bz changes sign, searched around SolenoidHalfZ
     double findSolenoidBoundaryZ() const;
 
-    /**
-     * Print a compact truth-comparison table for all track states
-     * (AtLastHit, AtVertex/RK4, AtIP/analytical) vs. the best-matched MC particle.
-     * For a prompt muon gun AtIP should show d0 ≈ 0, z0 ≈ 0.
-     */
+    // Table of the track states versus the matched MC particle (debug printout)
     void compareStatesWithTruth(
         const edm4hep::Track& track,
         const edm4hep::MCParticleCollection& mcParticles,
         int trackNumber) const;
 
-    // Inner propagation constants
+    // Solenoid boundary
     static constexpr double SOLENOID_RADIUS_CM = 230.0;  // fallback default
     static constexpr double SOLENOID_Z_HALF_CM = 218.0;
-    double m_solenoidBoundaryMm{2300.0};  // runtime value set by findSolenoidBoundary()
-    double m_solenoidHalfZmm{2180.0};     // runtime value set by findSolenoidBoundaryZ()
-    // =====================================================================
-    
+    double m_solenoidBoundaryMm{2300.0};  // set by findSolenoidBoundary()
+    double m_solenoidHalfZmm{2180.0};     // set by findSolenoidBoundaryZ()
+
     // Properties
     Gaudi::Property<std::string> m_detectorName{this, "DetectorName", "Tracker", "Name of detector to process"};
     Gaudi::Property<std::vector<std::string>> m_detectorNames{this, "DetectorNames", {},
@@ -330,20 +297,15 @@ private:
         "SiWrB, SiWrD). If empty, DetectorName is used on its own."};
     Gaudi::Property<std::string> m_particleType{this, "ParticleType", "pion", "Particle type for material effects"};
     Gaudi::Property<std::string> m_encodingStringParameter{this, "EncodingStringParameterName", "GlobalTrackerReadoutID", "Name of DD4hep parameter with the encoding string"};
-    // CellID field names. Different readouts spell the same concepts differently:
-    //   MuonSystemReadoutID  : system:5,type:-2,layer:2,chamber:13,slice:1,y:-10,z:-10
-    //   GlobalTrackerReadoutID: system:5,side:-2,layer:6,module:11,sensor:8
-    // "type" and "side" are both signed 2-bit fields with the same 0 / +1 / -1
-    // barrel / +endcap / -endcap meaning, so only the NAME differs.
+    // CellID field names: the region field is 0 / +1 / -1 for barrel / +endcap / -endcap
     Gaudi::Property<std::string> m_regionFieldName{this, "RegionFieldName", "type",
         "CellID field separating barrel (0) from +endcap (1) and -endcap (-1). "
         "\"type\" for MuonSystemReadoutID, \"side\" for GlobalTrackerReadoutID."};
     Gaudi::Property<std::string> m_layerFieldName{this, "LayerFieldName", "layer",
         "CellID field holding the layer index."};
     // ── Strategy ────────────────────────────────────────────────────────────────
-    // "Exhaustive"   : C(N,k) over all layers (the original algorithm; default).
-    // "SeedAndExtend": N-plet seeds on NumSeedLayers layers, then helix extension layer by
-    //                  layer. For dense events where the exhaustive search explodes.
+    // Exhaustive   : all k-hit combinations over the layers (sparse events).
+    // SeedAndExtend: seeds on NumSeedLayers layers, then helix extension (dense events).
     Gaudi::Property<std::string> m_strategy{this, "Strategy", "Exhaustive",
         "Exhaustive | SeedAndExtend"};
     Gaudi::Property<int> m_numSeedLayers{this, "NumSeedLayers", 3,
@@ -431,14 +393,17 @@ private:
         "Nominal solenoid half-length in mm; start for Bz sign-change scan along z-axis in initialize()"};
     // Inner propagation steering
     Gaudi::Property<bool> m_doInnerPropagation{this, "DoInnerPropagation", false,
-        "Propagate outer track inward through the solenoid boundary using RK4. "
-        "State saving (AtVertex) is currently disabled pending fix of the state extraction. "
-        "Set true only to inspect propagation diagnostics in the log."};
+        "Propagate the track inward through the solenoid boundary with RK4 (tracks measured "
+        "outside the solenoid). The result is printed in the log; no state is stored."};
     Gaudi::Property<double> m_innerPropTargetRadius{this, "InnerPropTargetRadius", 100.0,
         "Target radius in cm for inner RK4 propagation"};
-    Gaudi::Property<bool> m_doAnalyticalPropagation{this, "DoAnalyticalPropagation", true,
-        "Run the analytical two-segment inner propagation and save TrackState::AtIP. "
-        "Set false to skip and save CPU when AtIP is not needed."};
+    Gaudi::Property<std::string> m_ipStateMode{this, "IPStateMode", "None",
+        "Extra track state AtIP: None (not stored), Helix (the fitted helix at its closest "
+        "approach to the origin; for tracks in a uniform field, e.g. an inner tracker) or "
+        "SolenoidCrossing (helix matched at the solenoid boundary; only for tracks measured "
+        "outside the solenoid, e.g. the muon system)"};
+    Gaudi::Property<bool> m_storeLastHitState{this, "StoreLastHitState", true,
+        "Also store the fitted helix at the outermost hit (AtLastHit)"};
     Gaudi::Property<double> m_maxComboPT{this, "MaxComboPT", 200.0,
         "Maximum allowed combo pT in GeV/c. Combinations whose circle-fit radius implies pT above this threshold are excluded during the combinatorial search."};
     Gaudi::Property<double> m_minComboPT{this, "MinComboPT", -1.0,
@@ -519,8 +484,8 @@ private:
         "MaxConsecutiveHitDistance thresholds. Each cluster becomes an independent hit-pool, "
         "preventing hits from unrelated track regions from ever entering the same combo. "
         "Clusters spanning fewer than MinTrackHits distinct layers are skipped. "
-        "Default false (original single-pool behaviour). Enable for high-occupancy events "
-        "where delta-ray or multi-track hit pollution inflates the Cartesian product."};
+        "Enable for high-occupancy events where delta-ray or multi-track hits inflate the "
+        "number of combinations."};
 
     Gaudi::Property<bool> m_requirePairCoinc{this, "RequirePairCoincidence", false,
         "If true, exploit paired-layer geometry (doublets at layers (0,1), (2,3), (4,5)) "
@@ -529,7 +494,7 @@ private:
         "Two-pass: pass 1 enumerates combos using only hits with a coincident partner in "
         "the paired layer; pass 2 (if pass 1 finds nothing) uses all hits. Either way, "
         "candidate combos are required to have ≥2 complete doublets — exactly 3 is best, "
-        "2 is acceptable, <2 rejected. Default false (no behaviour change)."};
+        "2 is acceptable, <2 rejected."};
 
     Gaudi::Property<bool> m_pairCoincSoftScoring{this, "PairCoincidenceSoftScoring", false,
         "Only honoured when RequirePairCoincidence=true. Switches the doublet quality "
@@ -537,59 +502,54 @@ private:
         "combos in the running but bias bestCombo selection to prefer higher doublet "
         "count (3>2>1>0) as the primary criterion ahead of hit count and chi². "
         "Soft mode disables the seed-eligible hit filter and the two-pass fallback — "
-        "it runs a single pass over all hits, just with doublet-aware ranking. "
-        "Default false (HARD mode, the validated direction 2)."};
+        "it runs a single pass over all hits, just with doublet-aware ranking."};
 
     Gaudi::Property<double> m_pairCoincMaxDistMM{this, "PairCoincidenceMaxDistMM", 250.0,
         "Max 3D distance (mm) between two hits treated as a paired-layer doublet. "
         "250 mm suits the muon system (paired layers 12-24 cm apart); scale it down "
         "for inner-tracker readouts where layers are far closer."};
 
-    // ── Neighbour-track quality gate ──────────────────────────────────────
+    // ── Neighbour-track quality cuts ──────────────────────────────────────
     Gaudi::Property<double> m_neighbourTrackMaxDist{this, "NeighbourTrackMaxDist", 5.0,
         "If the best-combo candidate has any hit within this distance (cm) of a hit from "
         "an already-accepted track, apply stricter quality requirements defined by "
         "NeighbourTrackMinHits and NeighbourTrackMaxChi2NDF. "
-        "Rejects delta-ray shadow tracks that form near a parent muon track. "
-        "Default 5.0 cm = 50 mm. Set to 0 to disable."};
+        "Rejects delta-ray shadow tracks that form next to a real track. Set to 0 to disable."};
     Gaudi::Property<int> m_neighbourTrackMinHits{this, "NeighbourTrackMinHits", 4,
         "Minimum hit count required for a combo flagged as a neighbour track "
         "(any hit lies within NeighbourTrackMaxDist of an accepted track hit). "
-        "Stronger than MinTrackHits — forces ≥4 hits to reject 3-hit shadow fakes."};
+        "Stronger than MinTrackHits, to reject 3-hit shadow fakes."};
     Gaudi::Property<double> m_neighbourTrackMaxChi2NDF{this, "NeighbourTrackMaxChi2NDF", 3.0,
         "Maximum chi2/NDF accepted for a neighbour-track combo. "
         "Applied together with NeighbourTrackMinHits when a combo is spatially near "
         "an already-accepted track."};
-    // ────────────────────────────────────────────────────────────────────────
-
     // Services
     ServiceHandle<IGeoSvc> m_geoSvc{this, "GeoSvc", "GeoSvc", "Detector geometry service"};
     
-    // Member variables
-    dd4hep::Detector* m_detector{nullptr};  // Detector instance
-    dd4hep::OverlayedField m_field;         // Magnetic field
-    const dd4hep::rec::SurfaceMap* m_surfaceMap{nullptr};    // Surface map from detector
-    std::vector<const dd4hep::rec::Surface*> m_surfaces;      // All detector surfaces
-    std::map<int, std::vector<const dd4hep::rec::Surface*>> m_surfacesByLayer; // Surfaces grouped by layer
+    // Geometry and field
+    dd4hep::Detector* m_detector{nullptr};
+    dd4hep::OverlayedField m_field;
+    const dd4hep::rec::SurfaceMap* m_surfaceMap{nullptr};
+    std::vector<const dd4hep::rec::Surface*> m_surfaces;
+    std::map<int, std::vector<const dd4hep::rec::Surface*>> m_surfacesByLayer;
     k4rt::LayerGeometry m_layerGeo;          // per-layer radius/z extents, built from m_surfacesByLayer
     std::unordered_map<int, int> m_cidRegion;  // compositeID -> readout region (0, +1, -1); see k4rt::regionOfCid
     bool m_useSeedExtend{false};             // Strategy == "SeedAndExtend"
     bool m_seBestFirst{false};               // SeedAndExtendMode == "BestFirst"
     std::unique_ptr<k4rt::SeedFinder> m_seedFinder;  // built in initialize() when m_useSeedExtend
-    ParticleProperties m_particleProperties;  // Particle properties for material effects
-    std::unique_ptr<dd4hep::DDSegmentation::BitFieldCoder> m_bitFieldCoder; // For cell ID decoding
+    ParticleProperties m_particleProperties;  // hypothesis for material effects
+    std::unique_ptr<dd4hep::DDSegmentation::BitFieldCoder> m_bitFieldCoder; // cellID decoding
     bool m_hasRegionField{true};   // false when the readout has no barrel/endcap field at all
     bool m_useSystemInCompositeID{false};  // fold "system" into the layer key (multi-subdetector readouts)
-    // Owns the merged surface map when several detectors are combined (DetectorNames).
+    // merged surface map when several detectors are combined (DetectorNames)
     dd4hep::rec::SurfaceMap m_mergedSurfaceMap;
 
     int getPDGCode() const;
     
-    // Map of known particle types
+    // known particle hypotheses
     std::map<std::string, ParticleProperties> m_particleMap;
 
-    // ==================== RUN STATISTICS ====================
-    // General
+    // ==================== RUN STATISTICS (printed in finalize) ====================
     mutable std::atomic<int> m_statTotalEvents{0};
     mutable std::atomic<int> m_statTracksReconstructed{0};
 
@@ -632,7 +592,7 @@ private:
     mutable std::atomic<int> m_statAnalyticalPropSuccess{0};
     mutable std::atomic<int> m_statGenFitSuccess{0};
 
-    // Analytical inner propagation — per-failure-reason counters
+    // SolenoidCrossing AtIP: failure reasons
     mutable std::atomic<int> m_statAnalBarrelNoIsect{0};    // outer circle doesn't cross solenoid barrel
     mutable std::atomic<int> m_statAnalBarrelBothZfail{0};  // both crossings have |z_sol|>|z_ref|
     mutable std::atomic<int> m_statAnalBarrelZswapped{0};   // swapped successfully to alt crossing
@@ -653,7 +613,7 @@ private:
     mutable std::atomic<int>       m_statGenFitChi2BadCount{0};
     mutable std::atomic<long long> m_statGenFitChi2Sum{0};
 
-    // Legacy counters (kept to avoid reference errors; no longer incremented)
+    // not filled by the current code; kept for the finalize printout
     mutable std::atomic<int> m_statTripletBadGeom{0};
     mutable std::atomic<int> m_statAngleGuardRejected{0};
     mutable std::atomic<int> m_statHighestPtInner{0};
@@ -661,8 +621,6 @@ private:
     mutable std::atomic<int> m_statHighestPtFallback{0};
     mutable std::atomic<int> m_statFourHitTracks{0};
     mutable std::atomic<int> m_statThreeHitTracks{0};
-    // =========================================================
-
 };
 
 DECLARE_COMPONENT(CombinatorialTrackFinder)

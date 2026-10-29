@@ -1,22 +1,13 @@
 /*
- * Merge several TrackerHitPlane collections (and their reco->sim link collections)
- * into one, so a single tracking pass can do pattern recognition AND fitting over
- * every subdetector sharing a readout at once.
+ * MergeTrackerHitPlanes: merge several TrackerHitPlane collections (and their reco->sim
+ * link collections) into one, so that one CombinatorialTrackFinder instance can find
+ * tracks across several subdetectors that are digitised into separate collections
+ * (e.g. vertex barrel + disks + silicon wrapper).
  *
- * Motivation: GlobalTrackerReadoutID is shared by four DetElements — VertexBarrel,
- * VertexEndcap, SiWrB and SiWrD — each of which is digitised into its OWN
- * collection (VTXBDigis, VTXDDigis, SiWrBDigis, SiWrDDigis). CombinatorialTrackFinder
- * consumes a single TrackerHitPlaneCollection, so without merging, a track that
- * crosses the vertex barrel and then the silicon wrapper could never be found as
- * one track: each subdetector would have to be tracked separately and the segments
- * stitched afterwards.
- *
- * The outputs are podio SUBSET collections: they reference the original hits rather
- * than copying them, so every hit keeps its original ObjectID (collectionID, index).
- * That matters because the reco->sim links point at the original hits — copies would
- * silently break the truth association. It also means CombinatorialTrackFinder must
- * key its reco->sim map on (collectionID, index) and not on index alone, since the
- * per-collection indices all start at 0; that is done in CombinatorialTrackFinder.cpp.
+ * The outputs are podio subset collections: they reference the original hits, so every
+ * hit keeps its ObjectID (collectionID, index) and the reco->sim links stay valid.
+ * Because the indices of the different input collections all start at 0, the track
+ * finder keys hits on (collectionID, index).
  */
 #include "edm4hep/TrackerHitPlaneCollection.h"
 #include "edm4hep/TrackerHitSimTrackerHitLinkCollection.h"

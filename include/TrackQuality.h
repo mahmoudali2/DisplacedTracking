@@ -2,10 +2,8 @@
 //
 // The circle fit weights hits by their measurement error only (micrometres). At pT ~ 0.5 GeV
 // multiple scattering moves hits by 0.1-1 mm, so real low-pT tracks fail any chi2 cut tuned on
-// it and extension stops part-way (that is what produced the "sequential piece" duplicates).
-// Inflating every hit's error with the scattering of all upstream material (the diagonal
-// approximation) over-counts by ~3x because those displacements are correlated (measured on
-// the material-aware-fitting branch).
+// it and extension stops part-way. Inflating every hit's error with the scattering of all
+// upstream material over-counts by ~3x, because those displacements are correlated.
 //
 // Here the scattering enters where it is independent: as KINKS. For three consecutive hits
 // a-b-c the change of direction at b, in the bending plane and in dip, is compared with what

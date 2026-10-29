@@ -1,6 +1,4 @@
-// See TrackingPrimitives.h. Bodies moved verbatim from CombinatorialTrackFinder::findTracks();
-// any change to the arithmetic here changes reconstruction output — gate on a
-// bit-identical comparison before and after.
+// See TrackingPrimitives.h.
 #include "TrackingPrimitives.h"
 
 #include "GaudiKernel/MsgStream.h"
@@ -288,9 +286,8 @@ ZFit fitZvsArc(const std::vector<edm4hep::TrackerHitPlane>& h,
     double dAngle = std::atan2(yi, xi) - angle0;
     while (dAngle >  M_PI) dAngle -= 2*M_PI;
     while (dAngle < -M_PI) dAngle += 2*M_PI;
-    // Multiply by charge so s is always positive in the direction of travel; without
-    // this, negative-charge tracks (clockwise, dAngle < 0 for outer hits) get s < 0 and
-    // tanLambda comes out with the wrong sign.
+    // s = charge * R * dAngle: positive along the direction of travel when "charge" +1
+    // turns counter-clockwise (internal convention, see TrackingPrimitives.h).
     double s = charge * cr * dAngle;  // cm
     double z = pi[2] / 10.0;          // cm
     sumS += s; sumZ += z; sumSS += s*s; sumSZ += s*z;

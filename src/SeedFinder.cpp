@@ -537,15 +537,14 @@ std::vector<SECandidate> SeedFinder::runBestFirst(const edm4hep::TrackerHitPlane
       if (!best) break;
       visited.push_back(best->compositeID);
       const double W = m_cfg.window_cm + m_cfg.windowSlope * bestDs;
-      // Judge each candidate by the chi2 increase of the REFIT that includes it, not by its
-      // triplet kink against the current curvature: the current curvature is not exact, and
-      // across a long gap (IDEA: 172 cm from the vertex detector to the Si wrapper, after a
-      // 31 cm lever arm) its error alone predicts the turn wrongly by many sigma.
+      // Judge each candidate by the chi2 increase of the REFIT that includes it, not only by
+      // its kink against the current curvature: across a long gap between layers the error
+      // of the current curvature alone predicts the turn wrongly by many sigma.
       std::vector<size_t> bestTrial; TrackFit bestFit; double bestD = std::numeric_limits<double>::infinity();
       const double sigR = std::sqrt(std::max(0.0, f.cov(2, 2)));
       for (const auto& [d, g] : nearHits(f.h, bestC, *best, W, trk)) {
         // first: the new hit's kink against the current curvature, including its uncertainty
-        // (strict where the curvature is well measured, e.g. CLD's closely spaced layers) ...
+        // (strict where the curvature is well measured, e.g. closely spaced layers) ...
         const size_t n = trk.size();
         const double c3 = dir > 0 ? tripletKinkChi2(KP(trk[n - 2]), KP(trk[n - 1]), KP(g), f.R, f.h.rot, kc, sigR)
                                   : tripletKinkChi2(KP(g), KP(trk[0]), KP(trk[1]), f.R, f.h.rot, kc, sigR);

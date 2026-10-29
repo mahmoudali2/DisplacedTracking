@@ -1,13 +1,8 @@
-// TrackingPrimitives — the pieces of CombinatorialTrackFinder's pattern recognition that
-// do not depend on the per-event search state, lifted out of findTracks() so that a seed
-// finder can reuse them instead of carrying a second copy of every cut.
+// TrackingPrimitives — the parts of CombinatorialTrackFinder's pattern recognition that do
+// not depend on the per-event search state (cuts, circle -> helix pieces), shared by the
+// exhaustive search and the seed finder. All are pure functions of their arguments.
 //
-// Everything here is a pure function of its arguments. The bodies are moved verbatim from
-// findTracks(); only the access to inputs changed (explicit parameters instead of [&]
-// capture), so the arithmetic and its order are unchanged.
-//
-// Units follow the call sites they came from: hit positions in mm (EDM4hep), circle
-// parameters and distance cuts in cm, B in tesla.
+// Units: hit positions in mm (EDM4hep), circle parameters and distance cuts in cm, B in tesla.
 #ifndef TRACKING_TRACKINGPRIMITIVES_H
 #define TRACKING_TRACKINGPRIMITIVES_H
 
@@ -47,7 +42,7 @@ struct CombResult {
   Eigen::Matrix3d fitCov = Eigen::Matrix3d::Zero();
   std::vector<double> residuals;
   int nHits = 0;
-  // Track parameters stored after N-hit fit (used to build seed state)
+  // internal helix parameters of the combination (GenFit seed)
   double charge    = 0.0;
   double d0_cm     = 0.0;
   double phi_rad   = 0.0;
@@ -61,7 +56,7 @@ struct CombResult {
   bool   looper    = false;
 };
 
-/// Cut values for the hit-set predicates. A value <= 0 disables that cut, as before.
+/// Cut values for the hit-set predicates. A value <= 0 disables that cut.
 struct RoadCutConfig {
   double maxConsecDeltaPhi     = -1.0;  ///< rad
   double maxComboPhiSpread     = -1.0;  ///< rad
@@ -72,13 +67,10 @@ struct RoadCutConfig {
 
 /// Region of a compositeID: 0 barrel, +1 +endcap, -1 -endcap.
 ///
-/// The encoding is barrel 100*system+layer, endcap +-(1000+100*system+layer), so the old
-/// test "cid >= 1000 means endcap" is WRONG as soon as a barrel system ID reaches 10
-/// (IDEA o1v04: Si-wrapper barrel = system 23 -> cid 2300, outer vertex barrel = system 31
-/// -> cid 3103 were treated as +endcap). The authoritative answer is the readout's region
-/// field, collected per compositeID at initialize(); pass that map here. Without a map
-/// (or for an unknown cid) the old range rule is used, which is exact when every system
-/// ID is < 10.
+/// The encoding is barrel 100*system+layer, endcap +-(1000+100*system+layer), so the range
+/// test "cid >= 1000 means endcap" fails once a barrel system ID reaches 10. The answer comes
+/// from the readout's region field, collected per compositeID at initialize() (pass that map
+/// here); without a map, or for an unknown cid, the range test is used.
 int regionOfCid(int cid, const std::unordered_map<int, int>* cidRegion);
 
 /// Everything the predicates read besides the candidate itself.
@@ -103,8 +95,9 @@ bool passesDistanceCuts(const std::vector<size_t>& gIdxVec, const RoadCutContext
 bool passesTanLambdaCut(const std::vector<size_t>& gIdxVec, const RoadCutContext& ctx);
 
 // ── Circle -> helix pieces ────────────────────────────────────────────────────────────
-// Shared by the N-hit track-state block and the AtLastHit block, which used to carry
-// separate copies of the same arithmetic.
+// perigeeFromCircle / fitZvsArc take "charge" +1 to turn counter-clockwise, which holds in
+// a field along -z (e.g. a muon system's return field). The stored track states are built
+// geometrically in CombinatorialTrackFinder instead.
 
 /// Mean normalised cross-product sin(bend) over consecutive triplets of ordered hits.
 struct BendSense {

@@ -48,8 +48,7 @@ void LayerGeometry::build(
     for (const auto* s : surfs) {
       if (!s) continue;
       // Only sensitive surfaces define a measurement layer. Helper/support surfaces carry
-      // no system ID and land in cid 0 spanning the whole tracker (seen on CLD-in-IDEA:
-      // 50 surfaces, r 9-259 cm), which would otherwise be mistaken for a layer.
+      // no system ID and would land in cid 0, spanning the whole tracker.
       if (!s->type().isSensitive()) { ++d.nNonSensitive; continue; }
       const auto o  = s->origin();
       const auto u  = s->u(o);
@@ -178,8 +177,8 @@ void LayerGeometry::measureMaterial(dd4hep::Detector& det,
   // Each layer carries the material from halfway to its inner neighbour to halfway to its
   // outer neighbour (same kind: barrel by radius with overlapping z, disks by |z| on the same
   // side with overlapping r). Material BETWEEN layers then enters the kink of the nearest hit,
-  // which matters wherever it is not concentrated at the sensors, e.g. IDEA's drift chamber
-  // (walls + gas) between the vertex detector and the Si wrapper. Without a neighbour on one
+  // which matters wherever it is not concentrated at the sensors (e.g. a gas detector
+  // between two silicon layers). Without a neighbour on one
   // side, 1 cm is used there.
   dd4hep::rec::MaterialManager mm(det.world().volume());
   for (auto& d : m_layers) {

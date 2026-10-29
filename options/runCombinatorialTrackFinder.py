@@ -1,9 +1,7 @@
 # Author : Mahmoud Althakeel (mahmoud.althakeel@cern.ch)
 #
-# Steering file for running the standalone muon-system tracking algorithm
-# (pattern recognition + optional GenFit fit over IDEA Muon-System hits).
-# This script configures and runs the CombinatorialTrackFinder Gaudi component.
-#
+# CombinatorialTrackFinder on the IDEA muon system (tracks found from the muon-chamber
+# hits alone), with the AtIP state from the solenoid-crossing model.
 
 import os
 from Gaudi.Configuration import INFO
@@ -12,17 +10,9 @@ from Configurables import EventDataSvc
 from Configurables import CombinatorialTrackFinder
 from Configurables import GeoSvc
 
-# Geometry service - provides access to detector geometry.
-# IMPORTANT: the compact MUST match the geometry the input file was digitised
-# with. The muon-system configurations use dedicated compacts, NOT the nominal
-# IDEA_o1_v03.xml; feeding a 3L/4L digi file to the nominal compact still
-# "works" but wrecks everything downstream of pattern recognition (analytical
-# inner propagation 94% -> 35%, charge-sign correctness 77% -> 45%).
-#   3L_30cm -> IDEA_3L_30cm.xml      4L_50cm -> IDEA_MS_4L_50cm.xml
-# (see IDEA_muon_optimization/gen_tracking_steerings.py for the full mapping)
+# The compact MUST be the one the input file was digitised with (a wrong compact still
+# runs but spoils everything after pattern recognition). It matches iosvc.Input below.
 geoservice = GeoSvc("GeoSvc")
-# This compact matches iosvc.Input below (the 3L_30cm muon-gun digi file).
-# Change BOTH together if you switch configuration.
 geoservice.detectors = [os.environ["K4GEO"] + "/FCCee/IDEA/compact/IDEA_o1_v03/IDEA_3L_30cm.xml"]
 geoservice.OutputLevel = INFO
 geoservice.EnableGeant4Geo = False
@@ -34,33 +24,23 @@ combinatorialTrackFinder.ParticleType = "muon"                  # Particle type 
 combinatorialTrackFinder.EncodingStringParameterName = "MuonSystemReadoutID"
 combinatorialTrackFinder.OutputLevel = INFO
 
-# ── Readout schema ───────────────────────────────────────────────────────────
-# The component is readout-agnostic: only the cellID FIELD NAMES are assumed.
-#   MuonSystemReadoutID   : system:5,type:-2,layer:2,chamber:13,slice:1,y:-10,z:-10
-#   GlobalTrackerReadoutID: system:5,side:-2,layer:5,module:12,sensor:8
-# "type" and "side" are both signed 2-bit with the same 0 / +1 / -1 meaning
-# barrel / +endcap / -endcap, so only the name differs. initialize() validates
-# these against the actual encoding and fails loudly on a mismatch.
-combinatorialTrackFinder.RegionFieldName = "type"               # "side" for GlobalTrackerReadoutID
+# ── Readout: names of the cellID fields (barrel/endcap region and layer) ──────
+combinatorialTrackFinder.RegionFieldName = "type"               # 0 barrel, +1/-1 endcaps
 combinatorialTrackFinder.LayerFieldName  = "layer"
-# Fold the cellID "system" field into the per-layer key. -1 = auto (on when
-# DetectorNames lists more than one detector), 0 = off, 1 = on. Required when a
-# readout spans several subdetectors, else e.g. VertexBarrel layer 0 and SiWrB
-# layer 0 collapse onto the same key. Irrelevant for the single-DetElement
-# muon system, where it is a constant offset.
+# put the cellID "system" into the layer key: -1 = only when DetectorNames lists several detectors
 combinatorialTrackFinder.UseSystemInCompositeID = -1
-# DetectorNames merges the surface maps of several DetElements sharing one
-# readout (GlobalTrackerReadoutID covers Vertex, SiWrB, SiWrD). Leave empty to
-# use DetectorName alone, as here.
+# several detectors sharing one readout: list them (see runGlobalTrackerTracking.py)
 # combinatorialTrackFinder.DetectorNames = ["Vertex", "SiWrB", "SiWrD"]
 
-# See runGlobalTrackerTracking.py in this directory for the full
-# GlobalTrackerReadoutID configuration, including MergeTrackerHitPlanes.
+# ── Stored track states: the fitted helix AtFirstHit and AtLastHit, plus AtIP ──
+# SolenoidCrossing: the outer helix is matched at the solenoid boundary to an inner one
+combinatorialTrackFinder.IPStateMode = "SolenoidCrossing"
+combinatorialTrackFinder.StoreLastHitState = True
 
 # GenFit configuration
 combinatorialTrackFinder.UseGenFit = False                      # Enable GenFit track fitting
 combinatorialTrackFinder.MaxFitIterations = 100                 # Maximum iterations for the Kalman fit
-# Inner propagation (disabled: solenoid boundary extrapolation not yet calibrated)
+# RK4 propagation through the solenoid (printed only)
 combinatorialTrackFinder.DoInnerPropagation = False
 combinatorialTrackFinder.InnerPropTargetRadius = 100.0          # target radius in cm if enabled
 
